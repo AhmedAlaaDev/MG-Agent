@@ -1,0 +1,12 @@
+services:
+  intelligent-bl-extractor:
+    build: .
+    container_name: intelligent-bl-extractor
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
