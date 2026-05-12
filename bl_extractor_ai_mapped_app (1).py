@@ -648,9 +648,7 @@ Important native-PDF rules:
 - OCR may reveal visual text that native text misses.
 
 Critical Bill of Lading rules:
-- mesco_masterblno is the B/L number. It is ALWAYS found near the label "B/L No.", "B/L NO", "BL NO", or "BILL OF LADING NO".
-- CRITICAL DISAMBIGUATION: The shipper company name (e.g., "SWEDEV AB") is NEVER the B/L number. The B/L number appears on the RIGHT side near the carrier logo.
-- PURE NUMERIC B/L numbers with spaces (e.g., "85 008") are valid when they appear directly after a B/L label. Preserve the space in the value (e.g., return "85 008").
+- mesco_masterblno is the B/L number. It is usually near labels like "BILL OF LADING NO", "B/L No.", "B/L NO", or "BL NO".
 - Do not confuse B/L number with booking number, ACID number, container number, postal code, company name, or address.
 - mesco_bookingnumber is booking/reference number when explicitly labeled booking number.
 - mesco_acidnumber is the Egyptian ACID number. Return digits only.
@@ -798,13 +796,6 @@ def is_likely_bl_number(candidate: str, current_acid: Optional[str] = None) -> b
     if c_compact.isdigit() and len(c_compact) == 19:
         return False
 
-    # NEW: Reject if it looks like a company/person name (all letters, no numbers)
-    # unless it's a known carrier code format (3-4 letters + numbers)
-    if c_compact.isalpha():
-        # Pure alphabetic — only accept carrier-code-like patterns (3-4 uppercase letters as prefix)
-        if not re.match(r'^[A-Z]{3,4}[A-Z0-9]{3,}$', c_compact):
-            return False  # Rejects "SWEDEVAB", "HAMBURG", etc.
-
     if c_compact.isdigit():
         return 5 <= len(c_compact) <= 20
 
@@ -813,34 +804,20 @@ def is_likely_bl_number(candidate: str, current_acid: Optional[str] = None) -> b
 
 def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Optional[str]:
     upper = text.upper()
-    # value pattern: Alphanumeric with optional internal single spaces
-    value_pat = r"([A-Z0-9][A-Z0-9 \-]{3,30}[A-Z0-9])"
-    
+    value = r"([A-Z0-9][A-Z0-9 \-]{3,30}[A-Z0-9])"
     patterns = [
-        # NEW Pattern 0: Exact "B/L No." label (with period) - highest priority for spaced numbers
-        r"B/L\s*No\.?\s*\n?\s*([0-9]+(?: [0-9]+)*)",
-        
-        # Standard labels
-        rf"(?:BILL\s*OF\s*LADING\s*(?:NO|NUMBER|#)|B/L\s*(?:NO|NUMBER|#)|BL\s*(?:NO|NUMBER|#))\.?\s*[:\-]?\s*\n?\s*{value_pat}",
-        rf"\bB/L\s*NO\.?\s*{value_pat}",
-        rf"\bBLNO\.?\s*[:\-]?\s*{value_pat}",
-        rf"\bREF(?:ERENCE)?\s*(?:NO|NUMBER|#)?\.?\s*[:\-]?\s*{value_pat}",
+        rf"(?:BILL\s*OF\s*LADING\s*(?:NO|NUMBER|#)|B/L\s*(?:NO|NUMBER|#)|BL\s*(?:NO|NUMBER|#))\.?\s*[:\-]?\s*\n?\s*{value}",
+        rf"\bB/L\s*NO\.?\s*{value}",
+        rf"\bBLNO\.?\s*[:\-]?\s*{value}",
+        rf"\bREF(?:ERENCE)?\s*(?:NO|NUMBER|#)?\.?\s*[:\-]?\s*{value}",
     ]
     for pat in patterns:
         m = re.search(pat, upper, flags=re.I | re.S)
         if not m:
             continue
-        
-        # Get the captured group (group 1)
-        val = m.group(1)
-        # Stop at double space or newline
-        val = re.split(r"\n| {2,}", val)[0].strip(" ,;:-")
-        
+        val = re.split(r"\n| {4,}", m.group(1))[0].strip(" ,;:-")
         val_compact = val.replace(" ", "")
         if is_likely_bl_number(val_compact, current_acid):
-            # Preserve space for pure numeric spaced B/Ls (e.g. "85 008")
-            if val_compact.isdigit() and " " in val:
-                return val
             return val_compact
 
     # Header fallback only, because B/L number is normally in header.
