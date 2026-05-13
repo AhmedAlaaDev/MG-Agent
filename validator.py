@@ -127,6 +127,23 @@ def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Op
     return None
 
 
+def extract_house_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Optional[str]:
+    patterns = [
+        r"\bmesco_houseblno\s*:\s*([A-Z0-9][A-Z0-9\-]{4,25})",
+        r"\bhbl_no\s*:\s*([A-Z0-9][A-Z0-9\-]{4,25})",
+        r"\bH\s*/?\s*BL\s*(?:NO\.?|NUMBER)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,25})",
+        r"\bHOUSE\s+B\s*/?\s*L\s*(?:NO\.?|NUMBER)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,25})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.I)
+        if not m:
+            continue
+        value = m.group(1).strip().upper()
+        if is_likely_bl_number(value, current_acid):
+            return value
+    return None
+
+
 def extract_acid_regex(text: str) -> Optional[str]:
     upper = text.upper()
     m = re.search(r"\bACID\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([0-9][0-9\s\-]{12,30})", upper)
@@ -221,6 +238,12 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
             data["mesco_masterblno"] = bl
             add_warning(data, "mesco_masterblno filled by regex fallback.")
 
+    if not data.get("mesco_houseblno"):
+        hbl = extract_house_bl_number_regex(raw_text, data.get("mesco_acidnumber"))
+        if hbl:
+            data["mesco_houseblno"] = hbl
+            add_warning(data, "mesco_houseblno filled by regex fallback.")
+
     if not data.get("mesco_hscode"):
         hs = extract_hs_code_regex(raw_text)
         if hs:
@@ -308,7 +331,7 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
 
     data.setdefault("confidence", {})
     data["confidence"]["post_validation"] = "completed"
-    data["confidence"]["bl_number_rule"] = "accepted" if data.get("mesco_masterblno") else "missing"
+    data["confidence"]["bl_number_rule"] = "accepted" if data.get("mesco_masterblno") or data.get("mesco_houseblno") else "missing"
     data["confidence"]["container_number_rule"] = "accepted" if data.get("container_number") else "missing"
 
     return BLEntity(**data).model_dump()

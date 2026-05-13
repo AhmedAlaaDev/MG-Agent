@@ -16,6 +16,7 @@ class ContainerItem(BaseModel):
 class BLEntity(BaseModel):
     document_type: Optional[str] = "Bill of Lading"
     mesco_masterblno: Optional[str] = None
+    mesco_houseblno: Optional[str] = None
     mesco_bookingnumber: Optional[str] = None
     mesco_acidnumber: Optional[str] = None
 

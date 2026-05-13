@@ -13,6 +13,7 @@ JSON_SCHEMA = {
         "properties": {
             "document_type": {"type": ["string", "null"]},
             "mesco_masterblno": {"type": ["string", "null"]},
+            "mesco_houseblno": {"type": ["string", "null"]},
             "mesco_bookingnumber": {"type": ["string", "null"]},
             "mesco_acidnumber": {"type": ["string", "null"]},
             "mesco_shippernamecontactno": {"type": ["string", "null"]},
@@ -83,7 +84,7 @@ JSON_SCHEMA = {
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": [
-            "document_type", "mesco_masterblno", "mesco_bookingnumber", "mesco_acidnumber",
+            "document_type", "mesco_masterblno", "mesco_houseblno", "mesco_bookingnumber", "mesco_acidnumber",
             "mesco_shippernamecontactno", "mesco_shipperaddress",
             "mesco_consigneenamecontactno", "mesco_consigneeaddress",
             "mesco_notify1", "mesco_notifyaddress", "mesco_vessel", "mesco_voytruckno",
@@ -121,7 +122,7 @@ Important source rules:
 - If there are [NATIVE PDF TEXT] and [OCR TEXT FALLBACK / VISUAL TEXT] sections, prefer the value that is most clearly attached to a field label.
 - OCR may reveal visual text that native text misses.
 - Spreadsheets are presented as [SPREADSHEET TEXT] with ROW lines, CELLS lines, and DETECTED KEY/VALUE PAIRS. Use sheet names, row numbers, cell addresses, and nearby headers to map values.
-- For spreadsheet manifests/invoices, a B/L number may be under HBL, HBL NO, HOUSE B/L, MBL, MASTER B/L, B/L NO, or BL NO. Map the actual B/L number to mesco_masterblno when it is the main shipment B/L. Use booking fields only when explicitly a booking number.
+- For spreadsheet manifests/invoices, a B/L number may be under HBL, HBL NO, HOUSE B/L, MBL, MASTER B/L, B/L NO, or BL NO. Map MBL/MASTER B/L to mesco_masterblno and HBL/HOUSE B/L to mesco_houseblno. Use booking fields only when explicitly a booking number.
 
 Critical Bill of Lading rules:
 - mesco_masterblno is the B/L number. It is ALWAYS found near the label "B/L No.", "B/L NO", "BL NO", or "BILL OF LADING NO".
