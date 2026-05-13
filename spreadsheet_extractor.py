@@ -5,6 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, datetime
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import json
@@ -166,6 +167,17 @@ def _spreadsheet_header_score(row: List[str]) -> int:
     return score
 
 
+def _looks_like_spreadsheet_data_identifier(value: str) -> bool:
+    text = (value or "").strip().upper()
+    if not text:
+        return False
+    compact = re.sub(r"[\s\-]", "", text)
+    return bool(
+        re.fullmatch(r"\d{1,6}", compact)
+        or re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*\d{4,}[A-Z0-9]*", compact)
+    )
+
+
 def _looks_like_total_or_summary_row(row: List[str]) -> bool:
     row_text = " ".join(v for v in row if v).strip().upper()
     if not row_text:
@@ -212,6 +224,9 @@ def _extract_table_records_from_grid(sheet_name: str, grid: List[List[str]], max
         score = _spreadsheet_header_score(row)
         if score >= 3:
             headers = [h.strip() for h in row]
+            first_non_empty = next((h for h in headers if h), "")
+            if _looks_like_spreadsheet_data_identifier(first_non_empty):
+                continue
             non_empty_header_count = sum(1 for h in headers if h and not re.match(r'^列\d+$', h))
             if non_empty_header_count >= 4 and not _is_data_row_not_header(row):
                 header_candidates.append((idx, score))
@@ -795,8 +810,8 @@ def extract_xlsx_text(excel_bytes: bytes, filename: str) -> Dict[str, Any]:
         raise ImportError("Missing dependency for .xlsx files. Install: pip install openpyxl") from exc
 
     try:
-        wb_values = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True, read_only=False)
-        wb_formulas = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=False, read_only=False)
+        wb_values = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True, read_only=True)
+        wb_formulas = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=False, read_only=True)
     except Exception as exc:
         return extract_xlsx_text_zipxml(excel_bytes, filename, openpyxl_error=exc)
 
@@ -818,11 +833,15 @@ def extract_xlsx_text(excel_bytes: bytes, filename: str) -> Dict[str, Any]:
         grid: List[List[str]] = []
         formula_notes: List[str] = []
 
-        for r in range(1, max_row + 1):
+        value_rows = ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)
+        formula_rows = ws_formula.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)
+
+        for r, (value_row, formula_row) in enumerate(zip_longest(value_rows, formula_rows, fillvalue=()), start=1):
             row_vals: List[str] = []
             for c in range(1, max_col + 1):
-                value = normalize_spreadsheet_cell(ws.cell(r, c).value)
-                formula_value = ws_formula.cell(r, c).value
+                raw_value = value_row[c - 1] if c - 1 < len(value_row) else None
+                formula_value = formula_row[c - 1] if c - 1 < len(formula_row) else None
+                value = normalize_spreadsheet_cell(raw_value)
                 if isinstance(formula_value, str) and formula_value.startswith("=") and value:
                     if len(formula_notes) < 80:
                         formula_notes.append(f"{_column_name(c)}{r}: {formula_value} => {value}")
