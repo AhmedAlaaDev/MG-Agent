@@ -1517,7 +1517,7 @@
     },
     {
       "key": "clientSecret",
-      "value": "REDACTED_BY_GIT_FILTER_REPO"
+      "value": "REDACTED_BY_GIT_HISTORY_CLEANUP"
     },
     {
       "key": "clientId",
