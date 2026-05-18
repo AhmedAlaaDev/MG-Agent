@@ -1,7 +1,5 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
-
-REQUIRED_FIELDS = []
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ContainerItem(BaseModel):
@@ -14,6 +12,8 @@ class ContainerItem(BaseModel):
 
 
 class BLEntity(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     document_type: Optional[str] = "Bill of Lading"
     mesco_masterblno: Optional[str] = None
     mesco_houseblno: Optional[str] = None
@@ -77,9 +77,6 @@ class BLEntity(BaseModel):
     extraction_quality: Dict[str, Any] = Field(default_factory=dict)
     confidence: Dict[str, Any] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
-
-    class Config:
-        extra = "allow"
 
 
 REQUIRED_FIELDS = list(BLEntity.model_fields.keys())

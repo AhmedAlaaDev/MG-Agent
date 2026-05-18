@@ -173,6 +173,8 @@ def extract_containers_regex(text: str) -> List[Dict[str, Optional[str]]]:
     for m in re.finditer(r"\b([A-Z]{4}\d{7})\b(?:[/\s\-]+([A-Z0-9]{4,20}))?", compact):
         container = m.group(1)
         seal = m.group(2)
+        if seal in {"SEAL", "NO", "NUMBER", "LOADED", "INTO", "CONTAINER"}:
+            seal = None
         if container not in [c["container_number"] for c in containers]:
             containers.append({
                 "container_number": container,
@@ -182,7 +184,33 @@ def extract_containers_regex(text: str) -> List[Dict[str, Optional[str]]]:
                 "gross_weight_kg": None,
                 "measurement_cbm": None,
             })
+    seal_match = re.search(r"\bSEAL\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9]{4,20})\b", compact)
+    if seal_match and containers and not containers[0].get("seal_number"):
+        containers[0]["seal_number"] = seal_match.group(1)
     return containers
+
+
+VOYAGE_BLACKLIST = {
+    "LADING", "NUMBER", "ORIGINAL", "BILL", "BLNO", "PREPAID", "COLLECT",
+    "SHIPPER", "CONSIGNEE", "NOTIFY", "CARRIER", "WEIGHT", "MEASUREMENT",
+    "CONTAINER", "PACKAGES", "DELIVERY", "RECEIPT", "DESTINATION",
+    "DESCRIPTION", "DOCUMENTS", "DOCUMENT", "NEGOTIABLE", "NONNEGOTIABLE",
+    "FREIGHT", "GOODS", "PLACE", "PORT", "VESSEL", "VOYAGE",
+    "COPY", "ORIGIN", "DRAFT", "SIGNED", "TOTAL", "PAGE", "DATE",
+}
+
+
+def _is_likely_voyage(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    upper = value.upper()
+    if upper in VOYAGE_BLACKLIST:
+        return False
+    if re.fullmatch(r"[A-Z]{4,}", upper):
+        return False
+    if not re.search(r"\d", upper):
+        return False
+    return 3 <= len(upper) <= 15
 
 
 def extract_vessel_voyage_port_regex(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -194,13 +222,76 @@ def extract_vessel_voyage_port_regex(text: str) -> Tuple[Optional[str], Optional
         if m:
             vessel = clean_value(m.group(1))
             voyage = clean_value(m.group(2))
+            if voyage and not _is_likely_voyage(voyage):
+                voyage = None
             return vessel, voyage, port
 
     m = re.search(r"(?:OCEAN\s+)?VESSEL\s*[:\-]?\s*([A-Z][A-Z0-9 ]{3,50})(?:\s*/\s*|\s+)([A-Z0-9]{4,12})", upper)
     if m:
-        return clean_value(m.group(1)), clean_value(m.group(2)), None
+        vessel = clean_value(m.group(1))
+        voyage = clean_value(m.group(2))
+        if voyage and not _is_likely_voyage(voyage):
+            voyage = None
+        return vessel, voyage, None
 
     return None, None, None
+
+
+def extract_route_regex(text: str) -> Tuple[Optional[str], Optional[str]]:
+    upper = text.upper()
+    origin = None
+    destination = None
+
+    for pattern in (
+        r"PLACE\s+OF\s+RECEIPT\s+(?:PRECARRI?A?G?E\s+BY\s+)?([A-Z][A-Z ]{2,40})",
+        r"PLACE\s+OF\s+RECEIPT\s*\n(?:PRECARRI?A?G?E\s+BY\s+)?([A-Z][A-Z ]{2,40})",
+    ):
+        m = re.search(pattern, upper)
+        if m:
+            candidate = clean_value(m.group(1))
+            if candidate:
+                for port in sorted(KNOWN_PORTS, key=len, reverse=True):
+                    if port in candidate:
+                        origin = port
+                        break
+                origin = origin or candidate
+                break
+
+    m = re.search(
+        r"PORT\s+OF\s+DISCHARGE\s+PLACE\s+OF\s+DELIVERY\s+FREIGHT\s+PAYABLE.*?\n([A-Z][A-Z ]{3,50})",
+        upper,
+        flags=re.S,
+    )
+    if m:
+        line = clean_value(m.group(1))
+        if line:
+            if "ALEXANDRIA OLD PORT" in line:
+                destination = "ALEXANDRIA OLD PORT"
+            else:
+                for port in sorted(EGYPT_PORTS, key=len, reverse=True):
+                    if port in line:
+                        destination = port
+                        break
+                destination = destination or line
+
+    if not destination:
+        for port in sorted(EGYPT_PORTS, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(port)}\b", upper):
+                destination = port
+                break
+
+    return origin, destination
+
+
+def extract_issue_regex(text: str) -> Tuple[Optional[str], Optional[str]]:
+    m = re.search(
+        r"PLACE\s+AND\s+DATE\s+OF\s+ISSUE\s+.*?\b([A-Z][A-Z ]{2,40})\s+(\d{4}-\d{2}-\d{2})",
+        text.upper(),
+        flags=re.S,
+    )
+    if not m:
+        return None, None
+    return clean_value(m.group(1)), m.group(2)
 
 
 def infer_direction(data: Dict[str, Any]) -> None:
@@ -261,6 +352,25 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
         data["mesco_origin"] = port
         add_warning(data, "mesco_origin inferred from vessel/voyage/port line.")
 
+    origin, destination = extract_route_regex(raw_text)
+    if origin and (
+        not data.get("mesco_origin")
+        or ((data.get("mesco_origin") or "").upper() in EGYPT_PORTS and origin.upper() not in EGYPT_PORTS)
+    ):
+        data["mesco_origin"] = origin
+        add_warning(data, "mesco_origin filled by route fallback.")
+    if destination and not data.get("mesco_destination"):
+        data["mesco_destination"] = destination
+        add_warning(data, "mesco_destination filled by route fallback.")
+
+    place_of_issue, date_of_issue = extract_issue_regex(raw_text)
+    if place_of_issue and not data.get("mesco_placeofissue"):
+        data["mesco_placeofissue"] = place_of_issue
+        add_warning(data, "mesco_placeofissue filled by regex fallback.")
+    if date_of_issue and not data.get("mesco_dateofissue"):
+        data["mesco_dateofissue"] = date_of_issue
+        add_warning(data, "mesco_dateofissue filled by regex fallback.")
+
     found_containers = extract_containers_regex(raw_text)
     if not data.get("containers") and found_containers:
         data["containers"] = found_containers
@@ -312,11 +422,10 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
     upper = raw_text.upper()
     data["mesco_transporttype"] = data.get("mesco_transporttype") or 300000000
 
-    if data.get("mesco_loadtype") is None:
-        if "LCL" in upper:
-            data["mesco_loadtype"] = 300000001
-        elif cleaned_containers or re.search(r"\bFCL\b", upper):
-            data["mesco_loadtype"] = 300000000
+    if "LCL" in upper or " CFS " in f" {upper} " or "CFS TERMINAL" in upper:
+        data["mesco_loadtype"] = 300000001
+    elif data.get("mesco_loadtype") is None and (cleaned_containers or re.search(r"\bFCL\b", upper)):
+        data["mesco_loadtype"] = 300000000
 
     if not data.get("mesco_pcfreightterm"):
         if "FREIGHT COLLECT" in upper:
