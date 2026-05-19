@@ -13,6 +13,7 @@ debug fields into the upload payload.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -54,9 +55,11 @@ _META_KEYS = {
     "schedule", "agent",
     "_mbl_shipper", "_mbl_consignee", "_mbl_acid",
     "_mbl_bookingno", "_mbl_masterblno",
+    "_cargo_page1_references", "_attached_list_house_refs",
+    "mesco_servicetype_text", "cargo_lines",
 }
 
-_MASTER_SKIP = {"mesco_houseblno", "mesco_incoterm", "mesco_hscode"}
+_MASTER_SKIP = {"mesco_houseblno", "mesco_incoterm"}
 _ROOT_METADATA_KEYS = {
     "@odata.context",
     "@Microsoft.Dynamics.CRM.totalrecordcount",
@@ -245,9 +248,31 @@ def _fill_operation_defaults(operation: Dict[str, Any], is_master: bool) -> Dict
     return operation
 
 
+def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
+    cargo = _project_to_template(_first_cargo_template(master_level=True), {})
+    if _has(line.get("mesco_descriptionofgoods")):
+        cargo["mesco_descriptionofgoods"] = line["mesco_descriptionofgoods"]
+    if _has(line.get("mesco_noofpackages")):
+        cargo["mesco_noofpackages"] = line["mesco_noofpackages"]
+    if _has(line.get("mesco_grosskg")):
+        cargo["mesco_grosskg"] = line["mesco_grosskg"]
+    return {k: v for k, v in cargo.items() if _has(v)}
+
+
+def _cargo_rows_from_record(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    lines = rec.get("cargo_lines")
+    if isinstance(lines, list) and lines:
+        rows = [_build_cargo_from_line(ln) for ln in lines if isinstance(ln, dict)]
+        return [row for row in rows if row]
+    cargo = _build_cargo_from_record(rec)
+    return [cargo] if cargo else []
+
+
 def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     desc_parts = []
+    if _has(rec.get("mesco_hscode")):
+        desc_parts.append(f"HS: {rec['mesco_hscode']}")
     if _has(rec.get("mesco_cargodescription")):
         desc_parts.append(rec["mesco_cargodescription"])
     if _has(rec.get("cargo_type")):
@@ -265,11 +290,36 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in cargo.items() if _has(v)}
 
 
-def _build_house(rec: Dict[str, Any]) -> Dict[str, Any]:
-    house = _project_to_template(_first_house_template(), rec, skip={"mesco_houseblno"})
+def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Build a house operation. Returns None when no distinct house B/L exists."""
+    hbl = rec.get("mesco_houseblno")
+    if not _has(hbl):
+        return None
+
+    hbl = str(hbl).strip()
+    master_mbl = (master_mbl or rec.get("mesco_masterblno") or "").strip() or None
+    if master_mbl and hbl.upper() == str(master_mbl).upper():
+        return None
+
+    skip = {"mesco_houseblno", "mesco_masterblno"}
+    if rec.get("_attached_list_house"):
+        skip |= {
+            "cr401_totalpackages",
+            "cr401_totalgrossweight",
+            "cr401_totalvolume",
+            "mesco_cargodescription",
+            "mesco_nooforgbls",
+            "mesco_hscode",
+            "mesco_dateofissue",
+            "mesco_placeofissue",
+            "mesco_shippedonboarddate",
+        }
+
+    house = _project_to_template(_first_house_template(), rec, skip=skip)
     house["mesco_bltype"] = HOUSE_BL_TYPE
-    if _has(rec.get("mesco_houseblno")):
-        house["mesco_masterblno"] = rec["mesco_houseblno"]
+    house["mesco_masterblno"] = hbl
+    if master_mbl:
+        house["mesco_masterbllinkno"] = master_mbl
     _fill_operation_defaults(house, is_master=False)
     return house
 
@@ -331,7 +381,10 @@ def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                         break
             try:
                 if _has(value):
-                    totals[out_key] = totals.get(out_key, 0.0) + float(str(value).replace(",", ""))
+                    num_text = str(value).replace(",", "")
+                    m = re.search(r"(\d+(?:\.\d+)?)", num_text)
+                    if m:
+                        totals[out_key] = totals.get(out_key, 0.0) + float(m.group(1))
             except (TypeError, ValueError):
                 pass
     result: Dict[str, Any] = {}
@@ -343,11 +396,12 @@ def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 def records_to_master_json(
     records: List[Dict[str, Any]],
     extra_context: Optional[Dict[str, Any]] = None,
+    master_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if not records:
+    if not records and not master_record:
         return {}
 
-    first = records[0]
+    first = master_record or records[0]
     extra = extra_context or {}
 
     # Override master-level fields from manifest context meta fields
@@ -355,7 +409,8 @@ def records_to_master_json(
     manifest_overrides = {}
     for meta_keys, crm_key in [
         (("_mbl_shipper", "mbl_shipper"), "mesco_shippernamecontactno"),
-        (("_mbl_consignee", "delivery_agent"), "mesco_consigneenamecontactno"),
+        # Do not map delivery_agent → consignee (PDF house B/Ls use delivery_agent for MESCO notify only).
+        (("_mbl_consignee",), "mesco_consigneenamecontactno"),
         (("_mbl_acid", "mbl_acid"), "mesco_acidnumber"),
         (("_mbl_bookingno", "job_no"), "mesco_bookingnumber"),
         (("_mbl_masterblno",), "mesco_masterblno"),
@@ -376,22 +431,32 @@ def records_to_master_json(
 
     output = master or {}
     output["@odata.context"] = output.get("@odata.context") or _DEFAULT_MASTER_CONTEXT
-    output.update(_aggregate_totals(records))
-    output["mesco_nooforgbls"] = output.get("mesco_nooforgbls") or str(len(records))
+    totals_source = [master_record] if master_record else records
+    output.update(_aggregate_totals(totals_source))
+    master_mbl = output.get("mesco_masterblno")
+    physical_records = [master_record] if master_record else list(records)
+    if len(physical_records) == 1:
+        pkg = physical_records[0].get("cr401_totalpackages")
+        if pkg and re.search(r"PALLETS", str(pkg), re.I):
+            output["cr401_totalpackages"] = pkg
+    if not output.get("mesco_nooforgbls") and master_record:
+        output["mesco_nooforgbls"] = master_record.get("mesco_nooforgbls")
     _fill_operation_defaults(output, is_master=True)
 
-    # Houses
+    # Houses — only when a distinct house B/L is present (never duplicate the MBL).
     houses = []
     for rec in records:
-        house = _build_house(rec)
+        house = _build_house(rec, master_mbl=master_mbl)
         if house:
             houses.append(house)
+    if houses and not output.get("mesco_nooforgbls"):
+        output["mesco_nooforgbls"] = str(len(houses))
     output[MASTER_HOUSES_KEY] = houses
 
     # Containers (deduplicate by number)
     seen_ctnr = set()
     crm_containers = []
-    for rec in records:
+    for rec in physical_records:
         for c in _record_container_items(rec):
             no = c.get("container_number") or f"__row_{len(seen_ctnr)}"
             if no not in seen_ctnr:
@@ -402,12 +467,10 @@ def records_to_master_json(
 
     output[MASTER_CONTAINERS_KEY] = crm_containers
 
-    # Cargo items
+    # Cargo items (one row per groupage shipper line when parsed from PDF)
     cargo = []
-    for rec in records:
-        crg = _build_cargo_from_record(rec)
-        if crg:
-            cargo.append(crg)
+    for rec in physical_records:
+        cargo.extend(_cargo_rows_from_record(rec))
     if not cargo and crm_containers:
         for c in crm_containers:
             cargo.append(_pick(c, "mesco_noofpackages", "mesco_grosskg", "mesco_volcbm"))
@@ -419,6 +482,7 @@ def records_to_master_json(
 def records_to_house_json(
     records: List[Dict[str, Any]],
     master_context: Optional[Dict[str, Any]] = None,
+    master_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     output: Dict[str, Any] = {
         "@odata.context": _DEFAULT_HOUSE_CONTEXT,
@@ -426,11 +490,16 @@ def records_to_house_json(
         "@Microsoft.Dynamics.CRM.totalrecordcountlimitexceeded": False,
     }
     ctx = master_context or {}
+    master_src = master_record or (records[0] if records else {})
 
     value_list = []
     for rec in records:
         # Separate master-level fields to nest inside mesco_Operation
-        master_fields = _project_to_template(_first_master_in_house_template(), rec, skip={"mesco_houseblno"})
+        master_fields = _project_to_template(
+            _first_master_in_house_template(),
+            master_src,
+            skip=_MASTER_SKIP | {"mesco_houseblno"},
+        )
         # Override with manifest-context master values (not house values)
         for meta_key, crm_key in [
             ("_mbl_shipper", "mesco_shippernamecontactno"),
@@ -439,35 +508,39 @@ def records_to_house_json(
             ("_mbl_bookingno", "mesco_bookingnumber"),
             ("_mbl_masterblno", "mesco_masterblno"),
         ]:
-            if _has(rec.get(meta_key)):
-                master_fields[crm_key] = rec[meta_key]
+            if _has(master_src.get(meta_key)):
+                master_fields[crm_key] = master_src[meta_key]
         for k in ctx:
             if k not in master_fields:
                 master_fields[k] = ctx[k]
         master_fields["mesco_bltype"] = MASTER_BL_TYPE
-        master_fields.update(_aggregate_totals(records))
-        master_fields["mesco_nooforgbls"] = master_fields.get("mesco_nooforgbls") or str(len(records))
+        master_fields.update(_aggregate_totals([master_src] if master_record else records))
+        if not master_fields.get("mesco_nooforgbls") and master_src.get("mesco_nooforgbls"):
+            master_fields["mesco_nooforgbls"] = master_src.get("mesco_nooforgbls")
         _fill_operation_defaults(master_fields, is_master=True)
 
-        # House-level entry (includes house BL in mesco_masterblno)
-        house = _project_to_template(_first_house_template(), rec, skip={"mesco_houseblno"})
-        if _has(rec.get("mesco_houseblno")):
-            house["mesco_masterblno"] = rec["mesco_houseblno"]
-        house["mesco_bltype"] = HOUSE_BL_TYPE
-        _fill_operation_defaults(house, is_master=False)
+        house = _build_house(rec, master_mbl=master_fields.get("mesco_masterblno"))
+        if not house:
+            continue
         house[HOUSE_MASTER_KEY] = master_fields
 
-        # Containers per house
+        # Containers per house — shared master equipment for attached-list houses
+        container_source = master_src if master_record else rec
         crm_containers = []
-        for c in _record_container_items(rec):
+        for c in _record_container_items(container_source):
             entry = _build_container_from_item(c, master_level=False)
             if entry:
                 crm_containers.append(entry)
         house[HOUSE_CONTAINERS_KEY] = crm_containers
 
-        # Cargo per house
-        cargo = _build_cargo_from_record(rec)
-        house[HOUSE_CARGO_KEY] = [cargo] if cargo else []
+        # Cargo on master only for consolidated multi-house B/Ls (except manifest PDF rows)
+        manifest_row = rec.get("_manifest_pdf_row") or rec.get("extraction_method") == "pdf_export_lcl_manifest"
+        if master_record and len(records) > 1 and not manifest_row:
+            house[HOUSE_CARGO_KEY] = []
+        else:
+            house[HOUSE_CARGO_KEY] = _cargo_rows_from_record(
+                rec if manifest_row else container_source
+            )
 
         value_list.append(house)
 

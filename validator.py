@@ -50,8 +50,52 @@ def normalize_digits(value: Optional[str]) -> Optional[str]:
     return digits or None
 
 
+def _iso6346_check_digit_valid(compact: str) -> bool:
+    """Return True when the last digit is a valid ISO 6346 check digit."""
+    if not re.fullmatch(r"[A-Z]{4}\d{7}", compact):
+        return False
+    values: List[int] = []
+    for ch in compact:
+        if ch.isdigit():
+            values.append(int(ch))
+        else:
+            values.append(10 + ord(ch) - ord("A"))
+    total = sum(v * (2**i) for i, v in enumerate(values))
+    check = total % 11
+    if check == 10:
+        check = 0
+    return check == int(compact[-1])
+
+
+def format_container_number(value: Optional[str]) -> Optional[str]:
+    """Normalize to ISO 6346 display form when check digit validates; else keep compact OCR form."""
+    if not value:
+        return None
+    original = str(value).upper()
+    slash = re.search(r"\b([A-Z]{4})(\d{6})\s*/\s*(\d)\b", original)
+    if slash:
+        return f"{slash.group(1)}{slash.group(2)}/{slash.group(3)}"
+    compact = re.sub(r"[\s\-/]", "", original)
+    m = re.fullmatch(r"([A-Z]{4})(\d{6})(\d)", compact)
+    if m:
+        candidate = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        if _iso6346_check_digit_valid(candidate):
+            return f"{m.group(1)}{m.group(2)}-{m.group(3)}"
+        return candidate
+    m = re.fullmatch(r"([A-Z]{4})(\d{7})", compact)
+    if m:
+        candidate = compact
+        if _iso6346_check_digit_valid(candidate):
+            return f"{m.group(1)}{m.group(2)[:6]}-{m.group(2)[6]}"
+        return candidate
+    return clean_value(value)
+
+
 def is_container_number(value: Optional[str]) -> bool:
-    return bool(value and re.fullmatch(r"[A-Z]{4}\d{7}", value.strip().upper().replace(" ", "")))
+    if not value:
+        return False
+    compact = re.sub(r"[\s\-/]", "", value.strip().upper())
+    return bool(re.fullmatch(r"[A-Z]{4}\d{7}", compact))
 
 
 def normalize_numeric(value: Any) -> Optional[str]:
@@ -83,6 +127,9 @@ def is_likely_bl_number(candidate: str, current_acid: Optional[str] = None) -> b
     if current_acid and c_compact == re.sub(r"\D", "", current_acid):
         return False
     if c_compact.isdigit() and len(c_compact) == 19:
+        return False
+
+    if re.fullmatch(r"0\d{6,8}", c_compact):
         return False
 
     if c_compact.isalpha():
@@ -170,21 +217,41 @@ def extract_hs_code_regex(text: str) -> Optional[str]:
 def extract_containers_regex(text: str) -> List[Dict[str, Optional[str]]]:
     containers: List[Dict[str, Optional[str]]] = []
     compact = text.upper()
-    for m in re.finditer(r"\b([A-Z]{4}\d{7})\b(?:[/\s\-]+([A-Z0-9]{4,20}))?", compact):
-        container = m.group(1)
-        seal = m.group(2)
-        if seal in {"SEAL", "NO", "NUMBER", "LOADED", "INTO", "CONTAINER"}:
+    seen: set[str] = set()
+
+    patterns = [
+        r"\b([A-Z]{4})(\d{6})\s*/\s*(\d)\b",
+        r"\b([A-Z]{4})\s+(\d{6})[-/](\d)\b",
+        r"\b([A-Z]{4})(\d{6})[-](\d)\b",
+        r"\b([A-Z]{4}\d{7})\b",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, compact):
+            if m.lastindex and m.lastindex >= 3:
+                container = format_container_number(f"{m.group(1)}{m.group(2)}{m.group(3)}")
+            else:
+                container = format_container_number(m.group(1))
+            if not container or container in seen:
+                continue
+            seen.add(container)
             seal = None
-        if container not in [c["container_number"] for c in containers]:
+            tail = compact[m.end() : m.end() + 80]
+            sn = re.search(r"\b(?:SN|SEAL)\s*[:#]?\s*([A-Z0-9]{4,20})\b", tail)
+            if sn:
+                seal = sn.group(1)
+            ctype = None
+            if re.search(r"40\s*'?HC|40\s*HC", tail):
+                ctype = "40HC"
             containers.append({
                 "container_number": container,
                 "seal_number": seal,
-                "container_type": None,
+                "container_type": ctype,
                 "packages": None,
                 "gross_weight_kg": None,
                 "measurement_cbm": None,
             })
-    seal_match = re.search(r"\bSEAL\s*(?:NO|NUMBER)?\.?\s*[:\-]?\s*([A-Z0-9]{4,20})\b", compact)
+
+    seal_match = re.search(r"\b(?:SN|SEAL)\s*(?:NO|NUMBER)?\.?\s*[:\-#]?\s*([A-Z0-9]{4,20})\b", compact)
     if seal_match and containers and not containers[0].get("seal_number"):
         containers[0]["seal_number"] = seal_match.group(1)
     return containers
@@ -305,7 +372,11 @@ def infer_direction(data: Dict[str, Any]) -> None:
         data["mesco_direction"] = 300000001
 
 
-def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
+def validate_and_correct(
+    data: Dict[str, Any],
+    raw_text: str,
+    enrichment_text: Optional[str] = None,
+) -> Dict[str, Any]:
     from pydantic import BaseModel
     from models import BLEntity
 
@@ -317,17 +388,51 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
         if isinstance(v, str):
             data[k] = clean_value(v)
 
-    if not data.get("mesco_acidnumber"):
+    from bl_number_rules import (
+        clean_mesco_notes,
+        correct_record_from_page,
+        extract_ocean_bl_from_page,
+        is_form_or_serial_bl_candidate,
+        is_manifest_header_record,
+        is_manifest_house_record,
+        normalize_packages_field,
+    )
+
+    if not data.get("mesco_acidnumber") and not is_manifest_house_record(data):
         acid = extract_acid_regex(raw_text)
         if acid:
             data["mesco_acidnumber"] = acid
             add_warning(data, "mesco_acidnumber filled by regex fallback.")
 
+    page_bl = extract_ocean_bl_from_page(raw_text)
+    if page_bl:
+        data["mesco_masterblno"] = page_bl
+    elif data.get("mesco_masterblno") and is_form_or_serial_bl_candidate(
+        str(data["mesco_masterblno"]), raw_text
+    ):
+        data.pop("mesco_masterblno", None)
+        add_warning(data, "mesco_masterblno removed (form/serial number, not ocean B/L).")
+
     if not data.get("mesco_masterblno"):
         bl = extract_bl_number_regex(raw_text, data.get("mesco_acidnumber"))
-        if bl:
+        if bl and not is_form_or_serial_bl_candidate(bl, raw_text):
             data["mesco_masterblno"] = bl
             add_warning(data, "mesco_masterblno filled by regex fallback.")
+
+    if is_manifest_header_record(data):
+        pkg_val = data.get("cr401_totalpackages")
+        if isinstance(pkg_val, (int, float)):
+            data["cr401_totalpackages"] = (
+                int(pkg_val) if float(pkg_val) == int(float(pkg_val)) else pkg_val
+            )
+    elif not is_manifest_house_record(data):
+        pkg = normalize_packages_field(data.get("cr401_totalpackages"), raw_text)
+        if pkg:
+            data["cr401_totalpackages"] = pkg
+
+    data = correct_record_from_page(data, raw_text)
+    if data.get("mesco_notes"):
+        data["mesco_notes"] = clean_mesco_notes(data.get("mesco_notes"))
 
     if not data.get("mesco_houseblno"):
         hbl = extract_house_bl_number_regex(raw_text, data.get("mesco_acidnumber"))
@@ -335,16 +440,44 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
             data["mesco_houseblno"] = hbl
             add_warning(data, "mesco_houseblno filled by regex fallback.")
 
-    if not data.get("mesco_hscode"):
-        hs = extract_hs_code_regex(raw_text)
+    if data.get("mesco_houseblno") and data.get("mesco_masterblno"):
+        hbl_compact = re.sub(r"\W", "", str(data["mesco_houseblno"]).upper())
+        mbl_compact = re.sub(r"\W", "", str(data["mesco_masterblno"]).upper())
+        if hbl_compact == mbl_compact:
+            data.pop("mesco_houseblno", None)
+            add_warning(data, "mesco_houseblno dropped because it matched the master B/L.")
+
+    enrich_src = enrichment_text if enrichment_text is not None else raw_text
+
+    if not data.get("mesco_hscode") and not is_manifest_house_record(data):
+        from pdf_bl_enrichment import extract_hs_codes_from_goods
+
+        hs = extract_hs_code_regex(enrich_src) or extract_hs_codes_from_goods(enrich_src)
         if hs:
             data["mesco_hscode"] = hs
             add_warning(data, "mesco_hscode filled by regex fallback.")
+
+    from pdf_bl_enrichment import enrich_bl_from_pdf_text
+
+    data = enrich_bl_from_pdf_text(data, enrich_src)
+
+    hs_val = data.get("mesco_hscode")
+    bl_val = data.get("mesco_masterblno")
+    if hs_val and bl_val:
+        hs_digits = re.sub(r"\D", "", str(hs_val))
+        bl_digits = re.sub(r"\D", "", str(bl_val))
+        if hs_digits and bl_digits and hs_digits == bl_digits:
+            data.pop("mesco_hscode", None)
+            add_warning(data, "mesco_hscode removed (matched B/L number, not HS).")
 
     vessel, voyage, port = extract_vessel_voyage_port_regex(raw_text)
     if vessel and not data.get("mesco_vessel"):
         data["mesco_vessel"] = vessel
         add_warning(data, "mesco_vessel filled by regex fallback.")
+    if data.get("extraction_method") in ("pdf_export_lcl_manifest", "pdf_tur_cargo_manifest"):
+        bad_vessel = (data.get("mesco_vessel") or "").upper()
+        if bad_vessel.startswith("EXPORT LCL") or "MANIFEST" in bad_vessel:
+            data.pop("mesco_vessel", None)
     if voyage and not data.get("mesco_voytruckno"):
         data["mesco_voytruckno"] = voyage
         add_warning(data, "mesco_voytruckno filled by regex fallback.")
@@ -377,7 +510,8 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
         add_warning(data, "containers filled by regex fallback.")
 
     if data.get("mesco_acidnumber"):
-        acid_digits = normalize_digits(data["mesco_acidnumber"])
+        acid_raw = re.sub(r"\\+'?$", "", str(data["mesco_acidnumber"]).strip())
+        acid_digits = normalize_digits(acid_raw)
         data["mesco_acidnumber"] = acid_digits if acid_digits and len(acid_digits) >= 10 else None
 
     if data.get("mesco_masterblno") and data.get("mesco_acidnumber"):
@@ -392,6 +526,15 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
 
     data["cr401_totalgrossweight"] = normalize_numeric(data.get("cr401_totalgrossweight"))
     data["cr401_totalvolume"] = normalize_numeric(data.get("cr401_totalvolume"))
+    pkg_val = data.get("cr401_totalpackages")
+    if is_manifest_house_record(data) and pkg_val is not None:
+        data["cr401_totalpackages"] = re.sub(r"\s+", " ", str(pkg_val)).strip()
+    elif pkg_val is not None and re.search(
+        r"PALLETS|PACKAGES|ROLLS|CARTONS?|UNSTACKABLE", str(pkg_val), re.I
+    ):
+        data["cr401_totalpackages"] = re.sub(r"\s+", " ", str(pkg_val)).strip()
+    else:
+        data["cr401_totalpackages"] = normalize_numeric(pkg_val)
 
     cleaned_containers: List[Dict[str, Optional[str]]] = []
     for item in data.get("containers") or []:
@@ -408,14 +551,18 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
             "measurement_cbm": normalize_numeric(item.get("measurement_cbm")),
         }
         if c["container_number"]:
-            c["container_number"] = c["container_number"].upper().replace(" ", "")
+            c["container_number"] = format_container_number(c["container_number"]) or c[
+                "container_number"
+            ].upper().replace(" ", "")
         if any(c.values()):
             cleaned_containers.append(c)
 
     data["containers"] = cleaned_containers
     if cleaned_containers:
         first = cleaned_containers[0]
-        data["container_number"] = data.get("container_number") or first.get("container_number")
+        data["container_number"] = format_container_number(
+            first.get("container_number") or data.get("container_number")
+        )
         data["seal_number"] = data.get("seal_number") or first.get("seal_number")
         data["mesco_containertype"] = data.get("mesco_containertype") or first.get("container_type")
 
@@ -433,7 +580,11 @@ def validate_and_correct(data: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
         elif "FREIGHT PREPAID" in upper:
             data["mesco_pcfreightterm"] = "PREPAID"
 
-    if "TELEX RELEASE" in upper or "EXPRESS RELEASE" in upper:
+    if (
+        "TELEX RELEASE" in upper
+        or "EXPRESS RELEASE" in upper
+        or "EXPRESS BILL OF LADING" in upper
+    ):
         data["mesco_telexrelease"] = True
 
     infer_direction(data)

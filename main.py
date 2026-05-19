@@ -25,9 +25,14 @@ from dataverse_uploader import _ENTITY, _CONTAINER_ENTITY, _CARGO_ENTITY
 
 from spreadsheet_extractor import extract_document_text_professionally
 from ai_extractor import extract_with_azure_openai
+from document_parser import parse_document_intelligently
+from pdf_batch_processor import process_pdf_bytes
 from crm_mapper import map_crm_operation_to_records
 from validator import validate_and_correct
 from crm_output_formatter import records_to_house_json, records_to_master_json
+from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
+from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
+from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
 
 
 app = FastAPI(
@@ -70,6 +75,194 @@ async def root() -> str:
         <input type="file" name="file" accept=".pdf,.xlsx,.xls,.csv" required>
         <button type="submit">Extract B/L</button>
       </form>
+      <h2>Batch PDF Test</h2>
+      <p><a href="/test/pdf">Open batch upload page</a> (multipart form, multiple PDFs, no Dataverse).</p>
+    </body>
+    </html>
+    """
+
+
+@app.get("/test/pdf", response_class=HTMLResponse, include_in_schema=False)
+async def test_pdf_upload_page() -> str:
+    return """
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Batch PDF Test</title>
+      <style>
+        :root { --ok: #0d7a3f; --bad: #b42318; --warn: #b54708; --bg: #f4f6f8; }
+        body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: #1a1a1a; }
+        .wrap { max-width: 960px; margin: 0 auto; padding: 24px; }
+        h1 { margin: 0 0 8px; font-size: 1.5rem; }
+        p.sub { margin: 0 0 20px; color: #444; }
+        .card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 20px; }
+        label { display: block; font-weight: 600; margin-bottom: 8px; }
+        input[type=file] { width: 100%; padding: 10px; border: 1px dashed #888; border-radius: 8px; background: #fafafa; }
+        .opts { margin: 16px 0; display: flex; flex-wrap: wrap; gap: 16px; }
+        .opts label { font-weight: normal; display: flex; align-items: center; gap: 8px; margin: 0; }
+        button { background: #1565c0; color: #fff; border: none; padding: 12px 20px; font-size: 1rem;
+          border-radius: 8px; cursor: pointer; }
+        button:disabled { opacity: .6; cursor: wait; }
+        button.secondary { background: #555; margin-left: 8px; }
+        #status { margin-top: 12px; font-size: .95rem; }
+        .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .stat { background: #eef2f7; padding: 12px; border-radius: 8px; text-align: center; }
+        .stat b { display: block; font-size: 1.4rem; }
+        .file-row { border: 1px solid #e0e0e0; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+        .file-row.pass { border-left: 4px solid var(--ok); }
+        .file-row.fail { border-left: 4px solid var(--bad); }
+        .file-row.warn { border-left: 4px solid var(--warn); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .8rem; font-weight: 600; }
+        .badge.pass { background: #d4edda; color: var(--ok); }
+        .badge.fail { background: #f8d7da; color: var(--bad); }
+        .issues { margin: 8px 0 0; padding-left: 18px; font-size: .9rem; color: #333; }
+        .issues li.critical { color: var(--bad); }
+        .issues li.warning { color: var(--warn); }
+        pre.json { font-size: 11px; max-height: 200px; overflow: auto; background: #f7f7f7; padding: 10px; border-radius: 6px; }
+        a { color: #1565c0; }
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <h1>Batch PDF test</h1>
+        <p class="sub">Upload one or more PDFs via multipart form. Each file is extracted and validated (no Dataverse upload).</p>
+
+        <div class="card">
+          <form id="uploadForm" enctype="multipart/form-data">
+            <label for="pdfFiles">PDF files</label>
+            <input type="file" id="pdfFiles" name="files" accept=".pdf,application/pdf" multiple required>
+
+            <div class="opts">
+              <label><input type="checkbox" id="includeCrm" checked> Include CRM JSON in response</label>
+              <label><input type="checkbox" id="includeRaw"> Include OCR text preview</label>
+            </div>
+
+            <button type="submit" id="submitBtn">Upload &amp; process</button>
+            <button type="button" class="secondary" id="clearBtn">Clear results</button>
+            <div id="status"></div>
+          </form>
+        </div>
+
+        <div id="results" class="card" style="display:none">
+          <h2 style="margin-top:0">Results</h2>
+          <div class="summary" id="summary"></div>
+          <div id="fileList"></div>
+        </div>
+
+        <p><a href="/">Home</a> &middot; <a href="/docs">API docs</a></p>
+      </div>
+
+      <script>
+        const form = document.getElementById('uploadForm');
+        const statusEl = document.getElementById('status');
+        const resultsEl = document.getElementById('results');
+        const summaryEl = document.getElementById('summary');
+        const fileListEl = document.getElementById('fileList');
+        const submitBtn = document.getElementById('submitBtn');
+
+        document.getElementById('clearBtn').onclick = () => {
+          resultsEl.style.display = 'none';
+          summaryEl.innerHTML = '';
+          fileListEl.innerHTML = '';
+          statusEl.textContent = '';
+        };
+
+        form.onsubmit = async (e) => {
+          e.preventDefault();
+          const input = document.getElementById('pdfFiles');
+          if (!input.files.length) {
+            statusEl.textContent = 'Select at least one PDF.';
+            return;
+          }
+
+          const fd = new FormData();
+          for (const f of input.files) {
+            fd.append('files', f);
+          }
+
+          const params = new URLSearchParams();
+          params.set('include_crm_json', document.getElementById('includeCrm').checked);
+          params.set('include_raw_text', document.getElementById('includeRaw').checked);
+
+          submitBtn.disabled = true;
+          statusEl.textContent = 'Processing ' + input.files.length + ' file(s)... this may take several minutes.';
+
+          try {
+            const res = await fetch('/test/pdf/batch?' + params.toString(), {
+              method: 'POST',
+              body: fd
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              statusEl.textContent = 'Error: ' + (data.detail || res.statusText);
+              return;
+            }
+            statusEl.textContent = 'Done in ' + (data.total_processing_ms / 1000).toFixed(1) + 's.';
+            renderResults(data);
+          } catch (err) {
+            statusEl.textContent = 'Request failed: ' + err.message;
+          } finally {
+            submitBtn.disabled = false;
+          }
+        };
+
+        function renderResults(data) {
+          resultsEl.style.display = 'block';
+          summaryEl.innerHTML = [
+            stat('Total', data.total),
+            stat('Succeeded', data.succeeded),
+            stat('Passed', data.passed),
+            stat('Failed validation', data.failed_validation),
+            stat('Avg score', data.average_score)
+          ].join('');
+
+          fileListEl.innerHTML = (data.results || []).map(renderFile).join('');
+        }
+
+        function stat(label, value) {
+          return '<div class="stat"><b>' + value + '</b>' + label + '</div>';
+        }
+
+        function renderFile(item) {
+          const cls = !item.success ? 'fail' : (item.passed ? 'pass' : 'warn');
+          const badge = !item.success ? 'FAIL' : (item.passed ? 'PASS' : 'REVIEW');
+          const issues = (item.validation && item.validation.issues) || [];
+          const issueHtml = issues.length
+            ? '<ul class="issues">' + issues.map(i =>
+                '<li class="' + i.level + '"><b>' + i.level + '</b>: ' + esc(i.message) + '</li>'
+              ).join('') + '</ul>'
+            : '<p style="color:var(--ok);margin:8px 0 0">No issues reported.</p>';
+
+          const recs = (item.records_summary || []).map(r =>
+            '<div style="font-size:.9rem;margin-top:6px">' +
+            '<strong>B/L</strong> ' + esc(r.mesco_masterblno || '-') +
+            ' &middot; <strong>Cnee</strong> ' + esc(r.mesco_consigneenamecontactno || '-') +
+            ' &middot; <strong>Pkgs</strong> ' + esc(r.cr401_totalpackages || '-') +
+            ' &middot; <strong>GW</strong> ' + esc(r.cr401_totalgrossweight || '-') +
+            '</div>'
+          ).join('');
+
+          let crm = '';
+          if (item.crm_masters) {
+            crm = '<details style="margin-top:8px"><summary>CRM JSON</summary><pre class="json">' +
+              esc(JSON.stringify(item.crm_masters, null, 2)) + '</pre></details>';
+          }
+
+          return '<div class="file-row ' + cls + '">' +
+            '<div><strong>' + esc(item.filename) + '</strong> ' +
+            '<span class="badge ' + (item.passed ? 'pass' : 'fail') + '">' + badge + '</span> ' +
+            'score ' + item.score + ' &middot; ' + item.record_count + ' record(s) &middot; ' +
+            item.processing_ms + ' ms</div>' +
+            (item.error ? '<p style="color:var(--bad)">' + esc(item.error) + '</p>' : '') +
+            recs + issueHtml + crm + '</div>';
+        }
+
+        function esc(s) {
+          return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+      </script>
     </body>
     </html>
     """
@@ -98,6 +291,17 @@ class ExtractResponse(BaseModel):
     extraction_quality: Optional[Dict[str, Any]] = None
     dataverse_result: Optional[Dict[str, Any]] = None
     dataverse_error: Optional[str] = None
+
+
+class BatchPdfTestResponse(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    passed: int
+    failed_validation: int
+    average_score: float
+    total_processing_ms: int
+    results: List[Dict[str, Any]]
 
 
 def upload_crm_json(crm_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -180,24 +384,31 @@ async def upload_to_dataverse_json(
 
 
 def process_single_record(record_text: str, source_info: str) -> Dict[str, Any]:
-    """Process a single record through AI extraction and validation."""
+    """Process a single record through intelligent AI extraction and validation."""
     try:
-        ai_result = extract_with_azure_openai(record_text)
-        validated = validate_and_correct(ai_result, record_text)
+        parse_result = parse_document_intelligently(record_text)
+        if not parse_result.records:
+            raise ValueError("No records extracted from spreadsheet row text.")
+        validated = parse_result.records[0]
         validated["_source_info"] = source_info
-        validated["extraction_method"] = validated.get("extraction_method") or "azure_openai_record"
+        validated["extraction_method"] = validated.get("extraction_method") or "azure_intelligent_record"
         return validated
     except Exception as exc:
         return {"_source_info": source_info, "_error": str(exc)}
 
 
 def process_workbook_with_azure(raw_text: str, extracted: Dict[str, Any], extraction_quality: Dict[str, Any]) -> Dict[str, Any]:
-    """Fallback for future/unknown Excel layouts that direct row mapping does not know."""
-    ai_result = extract_with_azure_openai(raw_text)
-    validated = validate_and_correct(ai_result, raw_text)
-    validated["extraction_method"] = "azure_openai_workbook_fallback"
+    """Intelligent parse for unknown workbook/PDF layouts; returns first validated record."""
+    parse_result = parse_document_intelligently(raw_text, extracted)
+    if not parse_result.records:
+        raise ValueError("Intelligent parser returned no B/L records.")
+    validated = parse_result.records[0]
+    validated["extraction_method"] = validated.get("extraction_method") or "azure_intelligent_workbook"
     validated["source_extraction_method"] = extracted.get("method", "unknown")
-    validated["extraction_quality"] = extraction_quality
+    validated["extraction_quality"] = {**extraction_quality, **parse_result.quality}
+    validated["_document_layout"] = parse_result.document_layout
+    if len(parse_result.records) > 1:
+        validated["_additional_records"] = parse_result.records[1:]
     return validated
 
 
@@ -715,12 +926,26 @@ async def extract_file(
 
             extraction_quality["record_routing"] = route_counts
             if not extracted_records:
-                validated = process_workbook_with_azure(raw_text, extracted, extraction_quality)
-                validated["_routing"] = {
-                    "route": "azure_workbook_fallback",
-                    "reason": "no_processable_spreadsheet_records",
-                }
-                extracted_records = [validated]
+                parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
+                extraction_quality.update(parse_result.quality)
+                if not parse_result.records:
+                    return ExtractResponse(
+                        success=False,
+                        error="No processable records in spreadsheet/workbook.",
+                        extraction_quality=extraction_quality,
+                    )
+                if len(parse_result.records) >= 2:
+                    crm_masters = [records_to_master_json([v]) for v in parse_result.records]
+                    return _build_response(
+                        crm_masters[0],
+                        raw_text,
+                        extraction_quality,
+                        post_to_dataverse,
+                        download,
+                        house_output={"value": []},
+                        crm_records=crm_masters,
+                    )
+                extracted_records = parse_result.records
                 crm_output = records_to_master_json(extracted_records)
                 house_output = records_to_house_json(extracted_records)
                 return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output)
@@ -737,10 +962,132 @@ async def extract_file(
             "policy": "direct_when_confident_else_azure",
             "mode": "whole_document_or_workbook",
         }
-        validated = process_workbook_with_azure(raw_text, extracted, extraction_quality)
-        extracted_records = [validated]
-        crm_output = records_to_master_json(extracted_records)
-        house_output = records_to_house_json(extracted_records)
+        if is_tur_cargo_manifest(raw_text):
+            manifest = parse_tur_cargo_manifest(raw_text)
+            if manifest:
+                house_records = [
+                    validate_and_correct(rec, raw_text)
+                    for rec in manifest["house_records"]
+                ]
+                master_record = validate_and_correct(
+                    manifest["master_record"],
+                    raw_text,
+                )
+                extraction_quality["document_type_detected"] = "tur_cargo_manifest_pdf"
+                extraction_quality["manifest_row_count"] = len(house_records)
+                extraction_quality["record_routing"] = {
+                    "direct": len(house_records),
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_tur_cargo_manifest",
+                    "mode": "manifest_rows",
+                }
+                crm_output = records_to_master_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                house_output = records_to_house_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                )
+
+        if is_export_lcl_manifest(raw_text):
+            manifest = parse_export_lcl_manifest(raw_text)
+            if manifest:
+                house_records = [
+                    validate_and_correct(rec, raw_text)
+                    for rec in manifest["house_records"]
+                ]
+                master_record = validate_and_correct(
+                    manifest["master_record"],
+                    raw_text,
+                )
+                extraction_quality["document_type_detected"] = "export_lcl_manifest_pdf"
+                extraction_quality["manifest_row_count"] = len(house_records)
+                extraction_quality["record_routing"] = {
+                    "direct": len(house_records),
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_export_lcl_manifest",
+                    "mode": "manifest_rows",
+                }
+                crm_output = records_to_master_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                house_output = records_to_house_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                )
+
+        parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
+        extraction_quality.update(parse_result.quality)
+        if parse_result.azure_warnings:
+            extraction_quality["azure_warnings"] = parse_result.azure_warnings
+
+        if not parse_result.records:
+            return ExtractResponse(
+                success=False,
+                error="Could not extract any Bill of Lading records from the document.",
+                raw_text=raw_text[:5000] + "..." if len(raw_text) > 5000 else raw_text,
+                extraction_quality=extraction_quality,
+            )
+
+        extraction_quality["record_routing"] = {
+            "direct": 0,
+            "azure_fallback": len(parse_result.records),
+            "skipped": 0,
+            "policy": "azure_intelligent_with_fallback",
+            "mode": "one_master_per_bl_record",
+            "document_layout": parse_result.document_layout,
+        }
+
+        if len(parse_result.records) >= 2:
+            extraction_quality["multi_bl_count"] = len(parse_result.records)
+            crm_masters = [records_to_master_json([v]) for v in parse_result.records]
+            return _build_response(
+                crm_masters[0],
+                raw_text,
+                extraction_quality,
+                post_to_dataverse,
+                download,
+                house_output={"value": []},
+                crm_records=crm_masters,
+            )
+
+        validated = parse_result.records[0]
+        attached_refs = extract_attached_list_house_refs(raw_text)
+        if attached_refs:
+            house_records = build_house_records_from_attached_list(validated, attached_refs)
+            extraction_quality["attached_list_house_count"] = len(house_records)
+            crm_output = records_to_master_json(
+                house_records,
+                master_record=validated,
+            )
+            house_output = records_to_house_json(
+                house_records,
+                master_record=validated,
+            )
+        else:
+            extracted_records = [validated]
+            crm_output = records_to_master_json(extracted_records)
+            house_output = records_to_house_json(extracted_records)
 
         return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output)
     except Exception as exc:
@@ -754,19 +1101,30 @@ def _build_response(
     post_to_dataverse: bool,
     download: bool = False,
     house_output: Optional[Dict[str, Any]] = None,
+    crm_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
     dataverse_result = None
     dataverse_error = None
+    masters = crm_records if crm_records else None
 
-    if post_to_dataverse and crm_output:
+    if post_to_dataverse:
         try:
-            dataverse_result = upload_crm_json(crm_output)
+            if masters and len(masters) > 1:
+                uploaded = []
+                for idx, crm in enumerate(masters):
+                    uploaded.append({"index": idx, **upload_crm_json(crm)})
+                dataverse_result = {"masters": uploaded, "count": len(uploaded)}
+            elif crm_output:
+                dataverse_result = upload_crm_json(crm_output)
         except Exception as exc:
             dataverse_error = str(exc)
             logger.warning("Dataverse upload failed: %s", dataverse_error)
 
     if download:
-        json_bytes = json.dumps(crm_output, indent=2, default=str).encode("utf-8")
+        payload: Any = crm_output
+        if masters and len(masters) > 1:
+            payload = {"multi_bl": True, "masters": masters}
+        json_bytes = json.dumps(payload, indent=2, default=str).encode("utf-8")
         return Response(
             content=json_bytes,
             media_type="application/json",
@@ -779,11 +1137,86 @@ def _build_response(
     return ExtractResponse(
         success=True,
         data=crm_output,
+        records=masters,
         house_data=house_output,
         raw_text=raw_text[:5000] + "..." if len(raw_text) > 5000 else raw_text,
         extraction_quality=extraction_quality,
         dataverse_result=dataverse_result,
         dataverse_error=dataverse_error,
+    )
+
+
+@app.post(
+    "/test/pdf/batch",
+    response_model=BatchPdfTestResponse,
+    summary="Batch test multiple PDFs (extract + validate, no Dataverse)",
+    description=(
+        "Upload one or more PDF files. Each file is processed through the same extraction "
+        "pipeline as /extract/file (OCR, intelligent parse, validation). Returns per-file "
+        "pass/fail, quality score, issues, and optional CRM JSON. Does not upload to Dataverse."
+    ),
+)
+async def test_pdf_batch(
+    files: List[UploadFile] = File(..., description="One or more PDF files"),
+    include_crm_json: bool = Query(
+        True,
+        description="Include full CRM master JSON per file in each result",
+    ),
+    include_raw_text: bool = Query(
+        False,
+        description="Include OCR text preview (first 3000 chars) per file",
+    ),
+):
+    if not files:
+        return BatchPdfTestResponse(
+            total=0,
+            succeeded=0,
+            failed=0,
+            passed=0,
+            failed_validation=0,
+            average_score=0.0,
+            total_processing_ms=0,
+            results=[],
+        )
+
+    results: List[Dict[str, Any]] = []
+    succeeded = failed = passed_count = failed_validation = 0
+    total_ms = 0
+    scores: List[int] = []
+
+    for upload in files:
+        file_bytes = await upload.read()
+        item = process_pdf_bytes(
+            file_bytes,
+            upload.filename or "upload.pdf",
+            include_raw_text_preview=include_raw_text,
+        )
+        result_dict = item.to_dict(include_crm=include_crm_json, include_raw=include_raw_text)
+        results.append(result_dict)
+
+        total_ms += item.processing_ms
+        if item.success:
+            succeeded += 1
+            scores.append(item.score)
+            if item.passed:
+                passed_count += 1
+            else:
+                failed_validation += 1
+        else:
+            failed += 1
+            scores.append(0)
+
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+
+    return BatchPdfTestResponse(
+        total=len(files),
+        succeeded=succeeded,
+        failed=failed,
+        passed=passed_count,
+        failed_validation=failed_validation,
+        average_score=avg_score,
+        total_processing_ms=total_ms,
+        results=results,
     )
 
 
@@ -794,10 +1227,28 @@ async def extract_text(request: ExtractRequest):
         if not raw_text.strip():
             return ExtractResponse(success=False, error="No text provided.")
 
-        ai_result = extract_with_azure_openai(raw_text)
-        validated = validate_and_correct(ai_result, raw_text)
+        parse_result = parse_document_intelligently(raw_text)
+        if not parse_result.records:
+            return ExtractResponse(success=False, error="No B/L records extracted.", raw_text=raw_text)
 
-        return ExtractResponse(success=True, data=validated, raw_text=raw_text)
+        if len(parse_result.records) >= 2:
+            crm_masters = [records_to_master_json([v]) for v in parse_result.records]
+            return ExtractResponse(
+                success=True,
+                data=crm_masters[0],
+                records=crm_masters,
+                raw_text=raw_text,
+                extraction_quality=parse_result.quality,
+            )
+
+        validated = parse_result.records[0]
+        crm_output = records_to_master_json([validated])
+        return ExtractResponse(
+            success=True,
+            data=crm_output,
+            raw_text=raw_text,
+            extraction_quality=parse_result.quality,
+        )
     except Exception as exc:
         return ExtractResponse(success=False, error=str(exc))
 
@@ -889,6 +1340,52 @@ async def get_dynamics_operation(master_id: str):
         resp = client.get(f"{_ENTITY}({master_id})?$expand={expand}")
         data = resp.json()
         return {"success": True, "data": _clean_dataverse_response(data)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/dynamics/operation/{master_id}/houses")
+async def get_dynamics_houses(master_id: str):
+    """Fetch house bills under a master operation from Dataverse.
+
+    Queries mesco_operations where _mesco_operation_value = master_id
+    (the lookup that links a house to its master). 
+    Returns each house with its containers and cargo.
+    """
+    try:
+        client = DataverseClientService.get_instance()
+        expand = (
+            "mesco_Container_mesco_houses,"
+            "mesco_Cargo_HouseOperation_mesco_Operation"
+        )
+        filter_query = f"_mesco_operation_value eq {master_id}"
+        resp = client.get(
+            f"{_ENTITY}?$filter={filter_query}&$expand={expand}"
+        )
+        data = resp.json()
+        houses = data.get("value", []) if isinstance(data, dict) else []
+        return {
+            "success": True,
+            "master_id": master_id,
+            "count": len(houses),
+            "houses": [_clean_dataverse_response(h) for h in houses],
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/dynamics/house/{house_id}")
+async def get_dynamics_house(house_id: str):
+    """Fetch a single house bill by its ID with containers and cargo."""
+    try:
+        client = DataverseClientService.get_instance()
+        expand = (
+            "mesco_Container_mesco_houses,"
+            "mesco_Cargo_HouseOperation_mesco_Operation"
+        )
+        resp = client.get(f"{_ENTITY}({house_id})?$expand={expand}")
+        data = resp.json()
+        return {"success": True, "house": _clean_dataverse_response(data)}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

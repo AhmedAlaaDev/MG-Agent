@@ -63,7 +63,8 @@ Fix log (vs previous version):
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Set
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from dataverse.client_service import DataverseClientService, RetryConfig
 
@@ -326,21 +327,13 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
             "mesco_Operation",
             "mesco_Container_mesco_houses",
             "mesco_Cargo_HouseOperation_mesco_Operation",
-        },
-
-        "decimals": {
-            "cr401_totalgrossweight",
-            "cr401_totalvolume",
-            "cr401_totalpackages",
-            "cr401_totalteus",
-            "mesco_freetimedestination",
-            "mesco_freetimeorigin",
-            "mesco_invoicevalue",
-            "mesco_quantity",
-            "mesco_quantity2",
-            "mesco_quantity3",
-            "mesco_releasevalue",
-            "mesco_totalotherchargesduecarrier",
+            # Container-type picklist fields — the OCR/Excel extract returns
+            # ISO codes (e.g. "1X40HC") but Dataverse expects a picklist
+            # integer.  The string values cannot be mapped to the existing
+            # option-set, so they are dropped to avoid 400 errors.
+            "mesco_containertype",
+            "mesco_containertype2",
+            "mesco_containertype3",
         },
 
         "picklist_strings": {
@@ -372,6 +365,32 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
         },
 
         "field_map": {},
+
+        # Decimal fields — the Excel/OCR extract often returns these as
+        # strings (e.g. "67.228", "3.0"), which must be coerced to numbers
+        # before sending to Dataverse (Edm.Decimal).
+        "decimals": {
+            "cr401_totalgrossweight",
+            "cr401_totalpackages",
+            "cr401_totalteus",
+            "cr401_totalvolume",
+            "mesco_freetimedestination",
+            "mesco_freetimeorigin",
+            "mesco_invoicevalue",
+            "mesco_quantity",
+            "mesco_quantity2",
+            "mesco_quantity3",
+            "mesco_releasevalue",
+            "mesco_totalotherchargesduecarrier",
+        },
+
+        # String max-length limit (from Dataverse metadata / errors).
+        # Values exceeding this limit are truncated to avoid 400 errors.
+        "max_length": {
+            "mesco_shippernamecontactno":   100,
+            "mesco_consigneenamecontactno": 100,
+            "mesco_notifyaddress":          100,
+        },
     },
 
     # -----------------------------------------------------------------------
@@ -386,6 +405,7 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
         },
         "invalid": {
             "mesco_containerno",
+            "mesco_containertype",
         },
         "field_map": {
             "mesco_containerno": "mesco_containernumber",
@@ -455,7 +475,7 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "mesco_branch":          ["mesco_name", "name"],
     "mesco_shippingline":    ["mesco_name", "name"],
     "mesco_vendor":          ["mesco_name", "name"],
-    "account":               ["name"],
+    "account":               ["name", "accountnumber"],
     "systemuser":            ["fullname", "name"],
     "transactioncurrency":   ["isocurrencycode", "currencyname", "name"],
     "xollsp_country":        ["xollsp_name", "name"],
@@ -466,6 +486,164 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "mesco_operation":       ["mesco_code", "mesco_name", "name"],
 }
 
+# Per-upload cache: (entity logical name, normalized label) → GUID or None
+_LOOKUP_CACHE: Dict[Tuple[str, str], Optional[str]] = {}
+_LOOKUP_WARNED: Set[Tuple[str, str]] = set()
+
+# Common B/L text → labels used in Mesco Dataverse (see sample_output / CRM usage)
+_LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
+    "xollsp_address": {
+        "ALEXANDRIA": [
+            "ALEXANDRIA OLD PORT",
+            "ALEXANDRIA, EG",
+            "ALEXANDRIA EG",
+        ],
+        "SHANGHAI": ["SHANGHAI, CN", "SHANGHAI CN", "CNSHA"],
+    },
+    "account": {
+        "MARINE AND ENGINEERING SERVICES COMPANY (MESCO)": [
+            "MESCO",
+            "MARINE AND ENGINEERING SERVICES COMPANY",
+            "MARINE AND ENGINEERING SERVICES CO",
+        ],
+    },
+    "mesco_shippingline": {
+        "EVERGREEN MARINE (ASIA) PTE. LTD.": [
+            "EVERGREEN LINE",
+            "EVERGREEN",
+            "EMC",
+            "EVERGREEN MARINE",
+        ],
+        "EVERGREEN MARINE (ASIA) PTE LTD": [
+            "EVERGREEN LINE",
+            "EVERGREEN",
+            "EMC",
+        ],
+    },
+}
+
+
+def _odata_escape(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _normalize_lookup_label(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").upper())
+
+
+def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
+    """Build ordered search strings (exact first, then CRM-friendly alternates)."""
+    base = re.sub(r"\s+", " ", (name_value or "").strip())
+    if not base:
+        return []
+
+    seen: set[str] = set()
+    variants: List[str] = []
+
+    def add(label: str) -> None:
+        text = re.sub(r"\s+", " ", (label or "").strip())
+        if not text:
+            return
+        key = text.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        variants.append(text)
+
+    add(base)
+
+    paren = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", base)
+    if paren:
+        add(paren.group(1))
+        add(paren.group(2))
+
+    upper = base.upper()
+    hints = _LOOKUP_LABEL_HINTS.get(logical_name, {})
+    for hint_key, alternates in hints.items():
+        if _normalize_lookup_label(hint_key) == _normalize_lookup_label(base):
+            for alt in alternates:
+                add(alt)
+        elif _normalize_lookup_label(hint_key) in _normalize_lookup_label(base):
+            for alt in alternates:
+                add(alt)
+
+    if logical_name == "account" and "MESCO" in upper:
+        add("MESCO")
+        add("MARINE AND ENGINEERING SERVICES COMPANY")
+
+    if logical_name == "xollsp_address":
+        port = upper.split(",")[0].strip()
+        if port and port != upper:
+            add(port)
+        if "ALEXANDRIA" in upper and "ALEXANDRIA" not in seen:
+            add("ALEXANDRIA")
+
+    if logical_name == "mesco_shippingline" and "EVERGREEN" in upper:
+        add("EVERGREEN LINE")
+        add("EVERGREEN")
+
+    return variants
+
+
+def _match_score(search: str, candidate: str) -> int:
+    s = _normalize_lookup_label(search)
+    c = _normalize_lookup_label(candidate)
+    if not s or not c:
+        return 0
+    if s == c:
+        return 100
+    if c.startswith(s) or s.startswith(c):
+        return 90
+    if s in c or c in s:
+        return 75
+    search_tokens = set(re.findall(r"[A-Z0-9]{3,}", search.upper()))
+    cand_tokens = set(re.findall(r"[A-Z0-9]{3,}", candidate.upper()))
+    if search_tokens and cand_tokens:
+        overlap = len(search_tokens & cand_tokens)
+        if overlap:
+            return int(60 * overlap / max(len(search_tokens), len(cand_tokens)))
+    return 0
+
+
+def _pick_best_row(
+    rows: List[Dict[str, Any]],
+    id_field: str,
+    name_fields: List[str],
+    search: str,
+) -> Optional[str]:
+    best_guid: Optional[str] = None
+    best_score = 0
+    for row in rows:
+        for name_field in name_fields:
+            label = row.get(name_field)
+            if not isinstance(label, str):
+                continue
+            score = _match_score(search, label)
+            if score > best_score:
+                best_score = score
+                best_guid = row.get(id_field)
+    return best_guid if best_score >= 60 else None
+
+
+def _query_lookup_rows(
+    client: DataverseClientService,
+    entity_set: str,
+    id_field: str,
+    name_field: str,
+    filter_expr: str,
+    select_fields: List[str],
+    top: int = 5,
+) -> List[Dict[str, Any]]:
+    select = ",".join(dict.fromkeys([*select_fields, id_field, name_field]))
+    query = (
+        f"{entity_set}?$filter={filter_expr}"
+        f"&$select={select}&$top={top}"
+    )
+    resp = client.get(query)
+    data = resp.json() if resp.content else {}
+    values = data.get("value", []) if isinstance(data, dict) else []
+    return values if isinstance(values, list) else []
+
 
 def _resolve_lookup(
     client: DataverseClientService,
@@ -474,8 +652,8 @@ def _resolve_lookup(
 ) -> Optional[str]:
     """Query Dataverse to find the GUID of *name_value* in *logical_name*.
 
-    Returns the GUID string on success, None on miss or error.
-    Logs a warning (not an exception) on miss; caller must drop the field.
+    Tries exact match, then startswith/contains with scoring (CRM names often
+    differ from B/L text, e.g. ALEXANDRIA → ALEXANDRIA OLD PORT).
     """
     if not name_value or not isinstance(name_value, str):
         return None
@@ -483,39 +661,102 @@ def _resolve_lookup(
     if not name_value:
         return None
 
-    entity_set  = _entity_set_name(logical_name)
-    id_field    = _id_field(logical_name)
-    name_fields = _NAME_FIELDS_BY_ENTITY.get(logical_name, ["mesco_name", "name"])
+    cache_key = (logical_name, _normalize_lookup_label(name_value))
+    if cache_key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[cache_key]
 
-    for name_field in name_fields:
-        try:
-            safe_value = name_value.replace("'", "''")
-            query = (
-                f"{entity_set}"
-                f"?$filter={name_field} eq '{safe_value}'"
-                f"&$select={name_field},{id_field}"
-                f"&$top=1"
-            )
-            resp = client.get(query)
-            data = resp.json() if resp.content else {}
-            values = data.get("value", []) if isinstance(data, dict) else []
-            if values:
-                guid = values[0].get(id_field)
-                if guid:
-                    logger.debug(
-                        "Resolved %s '%s' → %s",
-                        logical_name, name_value, guid,
-                    )
-                    return guid
-        except Exception as exc:
-            logger.debug("Lookup probe %s.%s failed: %s", logical_name, name_field, exc)
+    entity_set = _entity_set_name(logical_name)
+    id_field = _id_field(logical_name)
+    name_fields = _NAME_FIELDS_BY_ENTITY.get(logical_name, ["mesco_name", "name"])
+    select_fields = list(name_fields)
+
+    for variant in _lookup_search_variants(logical_name, name_value):
+        safe = _odata_escape(variant)
+        for name_field in name_fields:
+            try:
+                rows = _query_lookup_rows(
+                    client,
+                    entity_set,
+                    id_field,
+                    name_field,
+                    f"{name_field} eq '{safe}'",
+                    select_fields,
+                    top=1,
+                )
+                if rows:
+                    guid = rows[0].get(id_field)
+                    if guid:
+                        logger.info(
+                            "Resolved %s '%s' (as '%s') → %s",
+                            logical_name,
+                            name_value,
+                            variant,
+                            guid,
+                        )
+                        _LOOKUP_CACHE[cache_key] = guid
+                        return guid
+            except Exception as exc:
+                logger.debug(
+                    "Lookup eq %s.%s='%s' failed: %s",
+                    logical_name,
+                    name_field,
+                    variant,
+                    exc,
+                )
+
+        if len(_normalize_lookup_label(variant)) < 3:
             continue
 
-    logger.warning(
-        "Could not resolve lookup '%s'='%s' in entity '%s' — field will be dropped",
-        logical_name, name_value, entity_set,
-    )
+        for name_field in name_fields:
+            for op in ("startswith", "contains"):
+                try:
+                    rows = _query_lookup_rows(
+                        client,
+                        entity_set,
+                        id_field,
+                        name_field,
+                        f"{op}({name_field},'{safe}')",
+                        select_fields,
+                        top=8,
+                    )
+                    guid = _pick_best_row(rows, id_field, name_fields, variant)
+                    if guid:
+                        logger.info(
+                            "Resolved %s '%s' via %s on '%s' → %s",
+                            logical_name,
+                            name_value,
+                            op,
+                            variant,
+                            guid,
+                        )
+                        _LOOKUP_CACHE[cache_key] = guid
+                        return guid
+                except Exception as exc:
+                    logger.debug(
+                        "Lookup %s %s.%s='%s' failed: %s",
+                        op,
+                        logical_name,
+                        name_field,
+                        variant,
+                        exc,
+                    )
+
+    if cache_key not in _LOOKUP_WARNED:
+        _LOOKUP_WARNED.add(cache_key)
+        logger.warning(
+            "Could not resolve lookup '%s'='%s' in entity '%s' — field will be dropped",
+            logical_name,
+            name_value,
+            entity_set,
+        )
+    _LOOKUP_CACHE[cache_key] = None
     return None
+
+
+def clear_lookup_cache() -> None:
+    """Reset lookup cache (useful between tests or batch uploads)."""
+    _LOOKUP_CACHE.clear()
+    _LOOKUP_WARNED.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +797,7 @@ def _preprocess_payload(
     field_map: Dict = schema.get("field_map", {})
     decimals: Set   = schema.get("decimals", set())
     picklists: Dict = schema.get("picklist_strings", {})
+    max_length: Dict = schema.get("max_length", {})
 
     cleaned: Dict[str, Any] = {}
 
@@ -606,14 +848,8 @@ def _preprocess_payload(
                     cleaned[bind_key] = f"/{target_set}({guid})"
                     already_bound.add(key.lower())               # [FIX-9] case-insensitive
                 else:
-                    # [FIX-1] / [FIX-2] Resolution failed.
-                    # Do NOT write the @odata.bind key.
-                    # Do NOT write the bare string value.
-                    # The field is simply omitted from the cleaned payload.
-                    logger.warning(
-                        "Lookup '%s'='%s' unresolvable — field dropped from %s payload",
-                        key, value, entity_set,
-                    )
+                    # [FIX-1] / [FIX-2] Resolution failed — field omitted (warn once in resolver).
+                    pass
             # Without a client we cannot resolve → drop to avoid 400
             continue
 
@@ -652,6 +888,16 @@ def _preprocess_payload(
             # Already an integer — pass through unchanged
             cleaned[key] = value
             continue
+
+        # --- Truncate string values that exceed Dataverse max length ---
+        if isinstance(value, str) and key in max_length:
+            max_len = max_length[key]
+            if len(value) > max_len:
+                logger.warning(
+                    "Truncating '%s' from %d to %d chars (Dataverse max length)",
+                    key, len(value), max_len,
+                )
+                value = value[:max_len]
 
         # --- Pass through (bool, int, plain string, etc.) ---
         cleaned[key] = value
@@ -708,6 +954,18 @@ def _create_entity(
 
 def _lookup_bind_key(relationship_name: str) -> str:
     return f"{relationship_name}@odata.bind"
+
+
+def _link_container_to_house(
+    client: DataverseClientService,
+    house_id: str,
+    container_id: str,
+) -> None:
+    """Associate a container with a house operation (many-to-many)."""
+    rel = "mesco_Container_mesco_houses"
+    url = f"{_ENTITY}({house_id})/{rel}/$ref"
+    container_url = f"{client.base_url.rstrip('/')}/{_CONTAINER_ENTITY}({container_id})"
+    client.post(url, json={"@odata.id": container_url})
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +1052,7 @@ def upload_crm_json(
             "cargo":      [{"index": 0, "id": "<guid>"}],
         }
     """
+    clear_lookup_cache()
     crm_data = _normalize_upload_payload(crm_data)
     client   = DataverseClientService.get_instance(retry_config or RetryConfig())
 
@@ -845,9 +1104,14 @@ def upload_crm_json(
             "index": idx,
             "id":    house_id,
             "hbl":   house.get("mesco_masterblno"),
+            "mbl":   house.get("mesco_masterbllinkno"),
         })
         logger.info(
-            "  House [%d] hbl=%s → %s", idx, house.get("mesco_masterblno"), house_id,
+            "  House [%d] hbl=%s mbl=%s → %s",
+            idx,
+            house.get("mesco_masterblno"),
+            house.get("mesco_masterbllinkno"),
+            house_id,
         )
 
     # ------------------------------------------------------------------
@@ -876,9 +1140,24 @@ def upload_crm_json(
         })
         logger.info("  Container [%d] %s → %s", idx, container_no, ctn_id)
 
+    # Link each container to every house on the operation (shared equipment).
+    if result["houses"] and result["containers"]:
+        for house_info in result["houses"]:
+            for ctn_info in result["containers"]:
+                try:
+                    _link_container_to_house(client, house_info["id"], ctn_info["id"])
+                except Exception as exc:
+                    logger.warning(
+                        "Container %s ↔ house %s association failed: %s",
+                        ctn_info.get("container_no"),
+                        house_info.get("hbl"),
+                        exc,
+                    )
+
     # ------------------------------------------------------------------
     # 4. Cargo items  (linked to master + matching house + matching container)
     # ------------------------------------------------------------------
+    multi_house = len(result["houses"]) > 1
     for idx, cargo in enumerate(cargo_list):
         cargo_clean = _clean_odata_meta(cargo)
         cargo_clean = _strip_null(cargo_clean)
@@ -887,8 +1166,8 @@ def upload_crm_json(
         cargo_clean[_lookup_bind_key("mesco_MasterOperation")] = (
             f"/{_ENTITY}({master_id})"
         )
-        # Link to the matching house (1-to-1 by index)
-        if idx < len(result["houses"]):
+        # Single-house shipments link cargo to the house; consolidated masters keep cargo on master only.
+        if not multi_house and idx < len(result["houses"]):
             house_id = result["houses"][idx]["id"]
             cargo_clean[_lookup_bind_key("mesco_HouseOperation")] = (
                 f"/{_ENTITY}({house_id})"
