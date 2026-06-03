@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from config import settings
+from config import normalize_azure_openai_endpoint, settings
 from pdf_extractor import normalize_text
 
 
@@ -156,44 +156,102 @@ You receive text extracted from a PDF or spreadsheet. It may be:
 - hybrid text containing both,
 - or spreadsheet text from XLSX/XLS/CSV rows.
 
-Return ONLY valid JSON matching the schema.
+Return ONLY valid JSON matching the schema. Use null (not empty string) for any
+field you cannot find with high confidence on the relevant page.
 
 ## Document layout (document_layout field)
-- single_bl: one ocean/master B/L in the document.
+- single_bl: one ocean/master B/L in the document (possibly spanning continuation pages).
 - multi_bl_pages: two or more SEPARATE ocean B/L numbers, typically one full B/L form per page.
-- master_with_houses: one master B/L plus distinct house B/L numbers (attachment list).
-- manifest: spreadsheet-style manifest with many rows.
+- master_with_houses: one master B/L plus distinct house B/L numbers (attachment list / manifest).
+- manifest: spreadsheet-style manifest with many house rows under one master.
 - unknown: cannot determine.
 
 ## Multiple B/L pages (CRITICAL)
-- When PAGE 1 has B/L number A and PAGE 2 has B/L number B, return TWO records in the records array.
+- When PAGE 1 has B/L number A and PAGE 2 has B/L number B, return TWO records in `records`.
 - NEVER merge data from different pages into one record.
-- Each record must use consignee, packages, gross weight, CBM, and ACID visible on THAT page only.
+- Each record uses consignee, packages, gross weight, CBM, and ACID visible on THAT page only.
 - Set source_page to the page number (1, 2, ...) for each record.
 - Shared fields (same shipper, vessel, container on every page) may repeat on each record.
 
+## Continuation pages (CRITICAL — "Continued on Next Sheet")
+- When the SAME B/L number spans multiple sheets (page 1 shows "Continued on Next Sheet"
+  and the next page shows "Continued From Previous Sheet" with the same B/L number),
+  return ONE record that aggregates content from ALL continuation pages:
+    * mesco_cargodescription must include EVERY cargo line from every continuation page
+      (deduplicate exact repeats; preserve order).
+    * mesco_hscode must include EVERY HS code listed across continuation pages,
+      pipe-separated (e.g. "85334000|3809910000|39269090"), in document order, no duplicates.
+- This is the difference between page-anchored multi_bl_pages and continuation
+  single_bl. If the B/L number on page 2+ equals page 1, it is continuation, not multi.
+
+## Manifest / master-with-houses
+- For manifest layouts, emit ONE record per house row plus, if visible, a record for the
+  master B/L. Master totals (cr401_totalpackages / totalgrossweight / totalvolume) belong
+  on the master record only — do not copy them onto each house.
+- Per-house ACID, HS code, packages, weight, CBM must come from THAT house's row, never
+  from the master totals or another house.
+
 ## Field rules
-- mesco_masterblno: ocean B/L number near "BILL OF LADING NO" / "B/L NO" — NOT shipper name, NOT ACID.
-- mesco_houseblno: only when a distinct house B/L exists; null on straight master B/L.
-- mesco_bookingnumber: only when explicitly labeled booking (not the same as B/L unless labeled).
-- mesco_acidnumber: Egyptian ACID — digits only.
-- mesco_hscode: null unless "HS CODE" / tariff codes appear in goods. NEVER use B/L number, booking, or ACID as HS code.
-- Consignee: party under CONSIGNEE header (importer). Delivery agent / "FOR DELIVERY PLEASE APPLY TO" (e.g. MESCO) is NOT consignee — put in mesco_notes.
-- mesco_notify1: use literal "same as cnee" when the document says so.
-- Container: 4 letters + 6 digits + check digit; OCR may show CSLU203520 / 4 — preserve slash form or full number.
-- Packages: extract count and unit (e.g. 7 PALLETS). OCR may show "ALLETS" for "2 PALLETS" — infer when clearly pallets row.
-- Weights: gross weight in KGS and volume in CBM from the goods table on that page.
-- Vessel/voyage: split correctly; port of loading is mesco_origin, discharge/delivery is mesco_destination.
-- Freight: FREIGHT PREPAID -> mesco_pcfreightterm PREPAID; COLLECT -> COLLECT.
+- mesco_masterblno: ocean B/L number near "BILL OF LADING NO" / "B/L NO" / "MASTER B/L".
+  NOT the shipper name, NOT the ACID, NOT the booking number unless explicitly labeled.
+- mesco_houseblno: only when a distinct HOUSE B/L exists (manifest row, attached list).
+  Null on a straight master B/L.
+- mesco_bookingnumber: only when explicitly labeled "BOOKING NO" / "BOOKING REF".
+- mesco_acidnumber: Egyptian ACID is EXACTLY 19 digits. Strip any letters/spaces.
+  Do NOT concatenate adjacent numeric fields (KGS, CBM, weight) into the ACID — those
+  belong in their own fields. If OCR glues digits, return the first 19 contiguous digits.
+- mesco_importerstaxno / mesco_foreignsupplierregistrationnumber: Egyptian tax IDs.
+  Common Egyptian Freight Forwarder Tax ID lengths are 9 digits (e.g. "297923900").
+  These are NEVER HS codes — never copy them into mesco_hscode.
+- mesco_hscode: 6–10 digit numeric tariff codes appearing under a goods description and
+  explicitly labeled as HS CODE / TARIFF / COMMODITY CODE, or sitting on a goods line.
+  Pipe-separate multiple codes ("85334000|3809910000"). NEVER use:
+    * the B/L number, booking number, container number, ACID, vessel IMO,
+    * a Tax ID (any number adjacent to "TAX ID", "EXPORTER ID", "FORWARDER ID",
+      "REGISTRATION NO"),
+    * a weight, volume, or package count.
+- mesco_consigneenamecontactno: the party UNDER the CONSIGNEE header. CRITICAL rules:
+    * Form-printed boilerplate ("EXPORT REFERENCES", "FORWARDING AGENT REFERENCES",
+      "FOR DELIVERY PLEASE APPLY TO", "ALSO NOTIFY", "TO ORDER") is NEVER the consignee
+      — those are column titles, not party names.
+    * The delivery agent at destination (e.g. MESCO / "MARINE & ENGINEERING SERVICES
+      COMPANY") IS the consignee when the form lists them under CONSIGNEE; do not
+      confuse them with the notify party.
+    * Include the full multi-line address in mesco_consigneeaddress (street, city, country).
+- mesco_shippernamecontactno: only the SHIPPER company name (first 1–2 lines under SHIPPER).
+  Do NOT include the address (that goes in mesco_shipperaddress), HS codes, cargo
+  descriptions, exporter IDs, or marks-and-numbers.
+- mesco_notify1: literal "same as cnee" when document says "SAME AS CONSIGNEE".
+- Container number: 4 letters + 6 digits + check digit. Preserve full form; OCR slash
+  forms (CSLU203520 / 4) are acceptable as-is.
+- mesco_containertype: ISO type ONLY ("40HC", "20GP", "40RF") with NO count prefix.
+  Strip leading "1 x ", "2x", "N X " etc. — that count belongs in cr401_totalteus.
+- Packages: count + unit verbatim from the goods row ("7 PALLETS", "101 ROLLS",
+  "9 PACKAGES", "243 CARTONS"). OCR may show "ALLETS" for "PALLETS" — infer.
+- Weights/CBM: from the goods table on the same page (or continuation pages for one B/L).
+- Vessel/voyage: split correctly. Port of loading -> mesco_origin; discharge -> mesco_destination.
+- Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
 - mesco_transporttype: 300000000 for sea.
 - mesco_loadtype: LCL = 300000001; FCL = 300000000.
-- mesco_direction: import 300000000 if Egypt is destination; export 300000001 if Egypt is origin.
+- mesco_direction: 300000001 (import) when Egypt is destination; 300000000 (export) when Egypt is origin.
+- mesco_handlinginformation: collect special-handling notes — "***UNSTACKABLE***",
+  "DO NOT STACK", "FRAGILE", "KEEP DRY", "HAZARDOUS" — when visible.
 - Do not guess. Use null when not visible on that page/record.
+
+## Dataverse length limits (DO NOT EXCEED)
+- mesco_cargodescription: max 1500 chars. Deduplicate repeated lines; keep the cleanest
+  narrative. Do NOT repeat the container row, package totals, or numeric weight rows.
+- mesco_shippernamecontactno / mesco_consigneenamecontactno / mesco_notify1: max 100 chars.
+- mesco_shipperaddress / mesco_consigneeaddress / mesco_deliveryaddress: max 250 chars.
+- mesco_masterblno / mesco_houseblno: max 100 chars.
+- If the source text is longer, return the most informative truncated value; the
+  downstream pipeline will not retry on overflow.
 
 ## OCR / PDF quirks
 - Prefer values tied to field labels over reading order.
 - Duplicate OCR blocks on the same page: use the clearest cargo row (Container:/PALLETS/CSLU/ACID).
-- Ignore boilerplate legal text for data fields.
+- Ignore boilerplate legal text and disclaimers ("RECEIVED IN APPARENT GOOD ORDER", "ON
+  BOARD CONDITION OF CARRIAGE", "SHIPPER'S LOAD STOW AND COUNT") for data fields.
 """
 
 
@@ -220,8 +278,9 @@ class AzureClient:
         if not settings.azure_openai_endpoint or not settings.azure_openai_api_key:
             raise ValueError("Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY.")
 
+        endpoint = normalize_azure_openai_endpoint(settings.azure_openai_endpoint)
         cls._client = OpenAIClient(
-            azure_endpoint=settings.azure_openai_endpoint,
+            azure_endpoint=endpoint,
             api_key=settings.azure_openai_api_key,
             api_version=settings.azure_openai_api_version,
         )

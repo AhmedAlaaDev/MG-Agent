@@ -22,12 +22,14 @@ from pydantic import BaseModel
 
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_uploader import _ENTITY, _CONTAINER_ENTITY, _CARGO_ENTITY
+from dataverse_field_limits import cap_nested_payload
 
 from spreadsheet_extractor import extract_document_text_professionally
 from ai_extractor import extract_with_azure_openai
 from document_parser import parse_document_intelligently
 from pdf_batch_processor import process_pdf_bytes
 from crm_mapper import map_crm_operation_to_records
+from config import settings
 from validator import validate_and_correct
 from crm_output_formatter import records_to_house_json, records_to_master_json
 from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
@@ -270,7 +272,25 @@ async def test_pdf_upload_page() -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.0.0"}
+    import os
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    return {
+        "status": "ok",
+        "version": "4.0.0",
+        "azure_openai_configured": bool(
+            settings.azure_openai_endpoint and settings.azure_openai_api_key
+        ),
+        "azure_openai_deployment": settings.azure_openai_deployment or None,
+        "dataverse_configured": bool(
+            os.environ.get("AZURE_APP_API_URL")
+            and os.environ.get("TENANT_ID")
+            and os.environ.get("CLIENT_ID")
+            and os.environ.get("CLIENT_SECRET")
+        ),
+    }
 
 
 class CrmExtractRequest(BaseModel):
@@ -1106,6 +1126,17 @@ def _build_response(
     dataverse_result = None
     dataverse_error = None
     masters = crm_records if crm_records else None
+
+    # Final defensive guard: enforce Dataverse string-column length caps on
+    # every master payload before either Dataverse POST or response download.
+    # This prevents a single oversized field (e.g. mesco_cargodescription >
+    # 1500 chars) from blocking the entire save with a 0x80048d19 / 400 error.
+    if isinstance(crm_output, dict) and crm_output:
+        cap_nested_payload(crm_output)
+    if masters:
+        for m in masters:
+            if isinstance(m, dict):
+                cap_nested_payload(m)
 
     if post_to_dataverse:
         try:

@@ -251,7 +251,10 @@ def _fill_operation_defaults(operation: Dict[str, Any], is_master: bool) -> Dict
 def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     if _has(line.get("mesco_descriptionofgoods")):
-        cargo["mesco_descriptionofgoods"] = line["mesco_descriptionofgoods"]
+        cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
+            str(line["mesco_descriptionofgoods"]),
+            _DATAVERSE_DESC_OF_GOODS_MAX,
+        )
     if _has(line.get("mesco_noofpackages")):
         cargo["mesco_noofpackages"] = line["mesco_noofpackages"]
     if _has(line.get("mesco_grosskg")):
@@ -268,19 +271,43 @@ def _cargo_rows_from_record(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [cargo] if cargo else []
 
 
+_DATAVERSE_DESC_OF_GOODS_MAX = 1500
+
+
+def _truncate_to_limit(value: str, limit: int) -> str:
+    """Truncate at the last full line/sentence boundary inside the limit."""
+    if len(value) <= limit:
+        return value
+    snippet = value[:limit]
+    cut_at = max(snippet.rfind("\n"), snippet.rfind(". "), snippet.rfind("; "))
+    if cut_at > limit * 0.6:
+        snippet = snippet[:cut_at].rstrip(" .,;\n")
+    return snippet.rstrip()
+
+
 def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     desc_parts = []
-    if _has(rec.get("mesco_hscode")):
-        desc_parts.append(f"HS: {rec['mesco_hscode']}")
-    if _has(rec.get("mesco_cargodescription")):
-        desc_parts.append(rec["mesco_cargodescription"])
+    hs_value = rec.get("mesco_hscode")
+    cargo_desc = rec.get("mesco_cargodescription")
+
+    # Avoid duplicating HS codes that already appear inline in the cargo text.
+    if _has(hs_value):
+        if cargo_desc and re.search(r"\bHS\s*CODE\b", str(cargo_desc), re.I):
+            pass
+        else:
+            desc_parts.append(f"HS: {hs_value}")
+    if _has(cargo_desc):
+        desc_parts.append(str(cargo_desc))
     if _has(rec.get("cargo_type")):
         ct = str(rec["cargo_type"]).strip()
         if ct not in " ".join(desc_parts):
             desc_parts.append(ct)
     if desc_parts:
-        cargo["mesco_descriptionofgoods"] = "\n".join(desc_parts)
+        cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
+            "\n".join(desc_parts),
+            _DATAVERSE_DESC_OF_GOODS_MAX,
+        )
     if _has(rec.get("cr401_totalpackages")):
         cargo["mesco_noofpackages"] = rec["cr401_totalpackages"]
     if _has(rec.get("cr401_totalgrossweight")):

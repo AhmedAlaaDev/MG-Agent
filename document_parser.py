@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional
 
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
+from pdf_isaly_draft_bl import (
+    detect_isaly_draft_multi_bl,
+    extract_isaly_draft_records,
+)
 from pdf_multi_bl import (
     detect_and_extract_multi_bl_records,
     detect_multi_bl_candidate,
@@ -178,13 +182,21 @@ def parse_document_intelligently(
     }
     azure_warnings: List[str] = []
     document_layout = "unknown"
+    isaly_expected = detect_isaly_draft_multi_bl(raw_text)
     multi_expected = detect_multi_bl_candidate(raw_text)
+    quality["isaly_draft_expected"] = isaly_expected
     quality["multi_bl_expected"] = multi_expected
 
-    canonical = detect_and_extract_multi_bl_records(raw_text) if multi_expected else None
+    canonical = None
+    if isaly_expected:
+        canonical = extract_isaly_draft_records(raw_text)
+    if not canonical and multi_expected:
+        canonical = detect_and_extract_multi_bl_records(raw_text)
 
-    if multi_expected and canonical and len(canonical) >= 2:
-        quality["parser_mode"] = "multi_bl_page_anchored"
+    if canonical and len(canonical) >= 2:
+        quality["parser_mode"] = (
+            "isaly_draft_page_anchored" if isaly_expected else "multi_bl_page_anchored"
+        )
         quality["canonical_bl_count"] = len(canonical)
         quality["fallback_used"] = True
         document_layout = "multi_bl_pages"
@@ -194,11 +206,11 @@ def parse_document_intelligently(
             quality["azure_attempted"] = True
             quality["per_page_azure_calls"] = len(canonical)
         except Exception as exc:
-            logger.warning("Multi-B/L Azure enrichment skipped: %s", exc)
+            logger.warning("Per-page Azure enrichment skipped: %s", exc)
             azure_warnings.append(str(exc))
             azure_records = [dict(c) for c in canonical]
 
-        method = "multi_bl_page_anchored"
+        method = "isaly_draft_page_anchored" if isaly_expected else "multi_bl_page_anchored"
     else:
         azure_records: List[Dict[str, Any]] = []
         try:
@@ -214,7 +226,11 @@ def parse_document_intelligently(
             azure_warnings.append(f"azure_whole_document_error: {exc}")
             quality["azure_error"] = str(exc)
 
-        fallback_records = detect_and_extract_multi_bl_records(raw_text) or []
+        fallback_records = (
+            extract_isaly_draft_records(raw_text)
+            or detect_and_extract_multi_bl_records(raw_text)
+            or []
+        )
         if fallback_records and (not azure_records or len(fallback_records) > len(azure_records)):
             from record_reconciliation import reconcile_record_lists
 

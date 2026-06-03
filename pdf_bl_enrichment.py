@@ -44,9 +44,10 @@ def _cargo_pages_text(raw_text: str) -> str:
 
 
 _CARGO_LINE_STOP_RE = re.compile(
-    r"^(CONSOLIDATED CARGO|ACID\s*:|EGYPTIAN FREIGHT|FOREIGN FREIGHT|"
+    r"^(CONSOLIDATED CARGO|CARGO IN TRANSIT|ACID\s*:|EGYPTIAN FREIGHT|FOREIGN FREIGHT|"
     r"Continued on Next Sheet|Continued From Previous|ABOVE PARTICULARS|"
-    r"SAY ONE HUNDRED|Shipped on Board|Weight in Kgs Total|SIGNED FOR THE CARRIER)",
+    r"SAY ONE HUNDRED|SAY \w+ HUNDRED|Shipped on Board|Weight in Kgs Total|"
+    r"SIGNED FOR THE CARRIER|FREIGHT (?:PREPAID|COLLECT)|SHIPPED ON BOARD)",
     re.I,
 )
 _CARGO_LINE_SKIP_RE = re.compile(
@@ -54,10 +55,24 @@ _CARGO_LINE_SKIP_RE = re.compile(
     r"GROSS WEIGHT|TARE|MEASUREMENT|SHIPPER'?S LOAD|SAID TO CONTAIN|"
     r"VOYAGE|BILL OF LADING|PRE CARRIAGE|VESSEL|PORT OF LOADING|"
     r"PORT OF DISCHARGE|FINAL PLACE|COPY NON|BILL OF LADING NUMBER|"
-    r"PLACE OF RECEIPT|FREIGHT TO BE|NUMBER OF ORIGINAL|KGS\s*$|CBM\s*$|"
-    r"\*{3,}|SHENZHEN THREE)",
+    r"PLACE OF RECEIPT|FREIGHT TO BE|NUMBER OF ORIGINAL|"
+    r"KGS\s*$|CBM\s*$|KGS\s+KGS\s+CBM|"
+    r"\*{3,}|SHENZHEN THREE|"
+    r"(?:TLLU|MSCU|CMAU|SEGU|OOLU|TCNU|TGHU|MEDU|GESU|CSLU|TGBU|HLBU|MSKU|MAEU)[A-Z0-9]{4,})",
     re.I,
 )
+# Container header row e.g. "TLLU4178846 1 x 40HC 179 PACKAGE(S) 14801.730 3900 50.657"
+_CARGO_CONTAINER_ROW_RE = re.compile(
+    r"^[A-Z]{4}\d{6,7}\s+\d+\s*x\s*\d{2}[A-Z]{0,3}\s+\d+\s+PACKAGE",
+    re.I,
+)
+_CARGO_NUMERIC_NOISE_RE = re.compile(
+    r"^[\d.,\s]+(?:KGS?|CBM|PACKAGE\(?S?\)?)?[\d.,\s]*$",
+    re.I,
+)
+# Maximum length we emit so the master cargo row stays under the
+# Dataverse 1500-char limit (formatter prepends "HS: ...\n" too).
+_CARGO_DESCRIPTION_MAX = 1200
 
 
 def _first_group(pattern: str, text: str, flags: int = re.I | re.S) -> Optional[str]:
@@ -65,22 +80,73 @@ def _first_group(pattern: str, text: str, flags: int = re.I | re.S) -> Optional[
     return m.group(1).strip() if m else None
 
 
+_TAX_ID_CONTEXT_RE = re.compile(
+    r"(?:ACID|TAX\s*ID|TAX\s*NO|VAT\s*NO|FORWARDER\s*ID|FORWARDER\s*REGISTRATION|"
+    r"IMPORTER\s*ID|EXPORTER\s*ID|REGISTRATION\s*ID|SHIPPER\s*REGISTRATION|"
+    r"FOREIGN\s*FREIGHT|EGYPTIAN\s*FREIGHT)",
+    re.I,
+)
+
+
+def _looks_like_phone_or_contact(code: str) -> bool:
+    """Egyptian mobiles / contact numbers must never be treated as HS codes."""
+    digits = re.sub(r"\D", "", code or "")
+    if not digits:
+        return True
+    if len(digits) >= 19:
+        return True
+    if re.match(r"^20\d{8,10}$", digits):
+        return True
+    if re.match(r"^01\d{8,9}$", digits):
+        return True
+    if re.match(r"^201\d{7,9}$", digits):
+        return True
+    return False
+
+
+def _collect_tax_ids(cargo_text: str) -> set:
+    """Numeric identifiers that look like Tax/ACID/Registration/contact IDs, not HS codes."""
+    ids: set = set()
+    lines = cargo_text.splitlines()
+    for idx, line in enumerate(lines):
+        upper = line.upper()
+        context_lines = [upper]
+        if idx > 0:
+            context_lines.append(lines[idx - 1].upper())
+        if idx > 1:
+            context_lines.append(lines[idx - 2].upper())
+        ctx_blob = " | ".join(context_lines)
+        contact_ctx = bool(
+            re.search(
+                r"TEL\b|MOB\b|FAX\b|VAT\s*NR|@\w|\.COM|PHONE|CONTACT\s*NO",
+                ctx_blob,
+                re.I,
+            )
+        )
+        if _TAX_ID_CONTEXT_RE.search(ctx_blob) or contact_ctx:
+            for m in re.finditer(r"\b(\d{6,19})\b", line):
+                ids.add(m.group(1))
+        if re.match(r"^\d{10,11}(?:-\d+)?\s*$", line.strip()):
+            for m in re.finditer(r"\d{10,11}", line):
+                ids.add(m.group(0))
+    return ids
+
+
 def extract_hs_codes_from_goods(text: str) -> Optional[str]:
     """HS codes from all cargo pages (page 1 + continuation sheets)."""
     codes: List[str] = []
     cargo_text = _cargo_pages_text(text)
+    tax_ids = _collect_tax_ids(cargo_text)
 
-    def add_code(code: str) -> None:
-        code = code.strip()
+    def add_code(code: str, *, explicit_hs: bool) -> None:
+        code = re.sub(r"\D", "", (code or "").strip())
         if not code or code in codes:
             return
-        if len(code) >= 19:
+        if len(code) >= 19 or _looks_like_phone_or_contact(code):
             return
-        if len(code) == 9 and re.search(
-            rf"(?:TAX\s*ID|FORWARDER\s*TAX)[^\n]*\b{re.escape(code)}\b",
-            cargo_text,
-            re.I,
-        ):
+        if not explicit_hs and code in tax_ids:
+            return
+        if not explicit_hs and len(code) >= 8:
             return
         codes.append(code)
 
@@ -89,7 +155,7 @@ def extract_hs_codes_from_goods(text: str) -> Optional[str]:
         cargo_text,
         re.I,
     ):
-        add_code(m.group(1))
+        add_code(m.group(1), explicit_hs=True)
 
     for line in cargo_text.splitlines():
         line = line.strip()
@@ -101,6 +167,7 @@ def extract_hs_codes_from_goods(text: str) -> Optional[str]:
             for k in (
                 "ACID",
                 "TAX ID",
+                "TAX NO",
                 "VAT:",
                 "TEL:",
                 "FAX:",
@@ -108,20 +175,39 @@ def extract_hs_codes_from_goods(text: str) -> Optional[str]:
                 "BOOKING NO",
                 "EQUIPMENT SERVICES",
                 "EXPORT REFERENCES",
+                "FORWARDER",
+                "IMPORTER ID",
+                "EXPORTER ID",
+                "REGISTRATION",
             )
         ):
             continue
-        for m in re.finditer(r"\b(\d{6,12})\b", line):
-            if re.search(r"HS\s*CODE|H\.?S\.?\s*CODE", line, re.I):
-                add_code(m.group(1))
-                continue
-            if len(m.group(1)) >= 8:
-                add_code(m.group(1))
+        explicit_hs = bool(re.search(r"HS\s*CODE|H\.?S\.?\s*CODE", line, re.I))
+        if explicit_hs:
+            for part in re.split(r"[/,\s]+", line):
+                part_digits = re.sub(r"\D", "", part)
+                if 6 <= len(part_digits) <= 12:
+                    add_code(part_digits, explicit_hs=True)
     return ", ".join(codes) if codes else None
 
 
+def _is_goods_noise(line: str) -> bool:
+    """Container header rows, package totals, or numeric-only lines — not goods."""
+    if _CARGO_CONTAINER_ROW_RE.match(line):
+        return True
+    if re.match(r"^SEAL\s+", line, re.I):
+        return True
+    if re.match(r"^\d+\s*x\s*\d{2}[A-Z]{0,3}\b", line, re.I):
+        return True
+    if re.match(r"^\d+\s+PACKAGE", line, re.I):
+        return True
+    if _CARGO_NUMERIC_NOISE_RE.match(line):
+        return True
+    return False
+
+
 def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
-    """Goods lines from all cargo pages (including 'Continued on Next Sheet')."""
+    """Goods lines from all cargo pages (continuation sheets included), deduped and capped."""
     lines_out: List[str] = []
     seen: set[str] = set()
 
@@ -130,7 +216,7 @@ def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
         if not s or len(s) < 3:
             return
         key = re.sub(r"[^A-Z0-9]+", "", s.upper())[:80]
-        if key in seen:
+        if not key or key in seen:
             return
         seen.add(key)
         lines_out.append(s)
@@ -154,19 +240,16 @@ def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
                 break
             if _CARGO_LINE_SKIP_RE.match(s):
                 continue
-            if re.match(r"^(TLLU|MSCU|CMAU|SEGU|OOLU)[A-Z0-9]+$", s, re.I):
-                continue
-            if re.match(r"^SEAL\s+", s, re.I):
-                continue
-            if re.match(r"^\d+\s*x\s*\d", s, re.I):
-                continue
-            if re.match(r"^\d+\s+PACKAGE", s, re.I):
-                continue
-            if re.fullmatch(r"[\d.,]+", s):
+            if _is_goods_noise(s):
                 continue
             add_line(s)
 
-    return "\n".join(lines_out) if lines_out else None
+    if not lines_out:
+        return None
+    description = "\n".join(lines_out)
+    if len(description) > _CARGO_DESCRIPTION_MAX:
+        description = description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
+    return description
 
 
 def _merge_hs_codes(existing: Optional[str], pdf_hs: Optional[str]) -> Optional[str]:
@@ -191,23 +274,45 @@ def _merge_cargo_description(
     existing: Optional[str],
     pdf_desc: Optional[str],
 ) -> Optional[str]:
+    """
+    Combine Azure summary + PDF goods lines without duplicating content.
+
+    When the PDF already covers every Azure token, keep the PDF version only.
+    Otherwise union them, dedupe semantically, and cap to fit Dataverse 1500-char limit.
+    """
+    if not pdf_desc and not existing:
+        return None
     if not pdf_desc:
         return existing
     if not existing:
         return pdf_desc
-    merged: List[str] = []
-    seen: set[str] = set()
-    for chunk in (existing, pdf_desc):
-        for ln in re.split(r"[\n;]+", chunk):
-            s = ln.strip()
-            if not s:
-                continue
-            key = re.sub(r"[^A-Z0-9]+", "", s.upper())[:80]
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(s)
-    return "\n".join(merged) if merged else existing
+
+    def _split(value: str) -> List[str]:
+        return [p.strip() for p in re.split(r"[\n;,]+", value) if p.strip()]
+
+    def _key(value: str) -> str:
+        return re.sub(r"[^A-Z0-9]+", "", value.upper())
+
+    existing_tokens = {_key(t) for t in _split(existing) if _key(t)}
+    pdf_tokens = {_key(t) for t in _split(pdf_desc) if _key(t)}
+
+    if existing_tokens and existing_tokens.issubset(pdf_tokens):
+        merged_lines = _split(pdf_desc)
+    else:
+        merged_lines = []
+        seen: set[str] = set()
+        for chunk in (existing, pdf_desc):
+            for s in _split(chunk):
+                k = _key(s)
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                merged_lines.append(s)
+
+    description = "\n".join(merged_lines)
+    if len(description) > _CARGO_DESCRIPTION_MAX:
+        description = description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
+    return description or existing
 
 
 def extract_marks_and_numbers(text: str) -> Optional[str]:
@@ -1007,8 +1112,8 @@ def enrich_bl_from_pdf_text(data: Dict[str, Any], raw_text: str) -> Dict[str, An
     if not raw_text:
         return data
 
-    # Manifest house rows already have per-B/L consignee, notify, and packages.
-    if data.get("_manifest_pdf_row"):
+    # Manifest / ISALY draft rows already have per-B/L fields from the dedicated parser.
+    if data.get("_manifest_pdf_row") or data.get("_isaly_draft_row"):
         return data
 
     attached = extract_attached_list_house_refs(raw_text)

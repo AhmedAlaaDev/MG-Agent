@@ -67,6 +67,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from dataverse.client_service import DataverseClientService, RetryConfig
+from dataverse_field_limits import limit_for as _registry_limit_for
 
 logger = logging.getLogger(__name__)
 
@@ -890,9 +891,15 @@ def _preprocess_payload(
             continue
 
         # --- Truncate string values that exceed Dataverse max length ---
-        if isinstance(value, str) and key in max_length:
-            max_len = max_length[key]
-            if len(value) > max_len:
+        # Two layers: entity-local override map (legacy) first, then the
+        # central dataverse_field_limits registry as a safety net so a single
+        # oversized field (e.g. mesco_cargodescription > 1500) can never
+        # block the entire save with a 0x80048d19 / 400 error again.
+        if isinstance(value, str):
+            max_len = max_length.get(key)
+            if max_len is None:
+                max_len = _registry_limit_for(entity_set, key)
+            if max_len and len(value) > max_len:
                 logger.warning(
                     "Truncating '%s' from %d to %d chars (Dataverse max length)",
                     key, len(value), max_len,

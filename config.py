@@ -1,12 +1,38 @@
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+
+def normalize_azure_openai_endpoint(endpoint: str) -> str:
+    """
+    AzureOpenAI SDK expects the resource root, e.g.
+    https://houseblreader-resource.openai.azure.com/
+    not the portal copy-paste path .../openai/v1
+    """
+    url = (endpoint or "").strip().rstrip("/")
+    for suffix in ("/openai/v1", "/openai"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return f"{url}/" if url else ""
 
 
 class Settings(BaseSettings):
     azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")
     azure_openai_api_key: str = Field(default="", alias="AZURE_OPENAI_API_KEY")
     azure_openai_api_version: str = Field(default="2024-08-01-preview", alias="AZURE_OPENAI_API_VERSION")
-    azure_openai_deployment: str = Field(default="gpt-4o-mini", alias="AZURE_OPENAI_DEPLOYMENT")
+    azure_openai_deployment: str = Field(default="gpt-4o", alias="AZURE_OPENAI_DEPLOYMENT")
+    azure_openai_project_url: str = Field(
+        default="",
+        alias="AZURE_OPENAI_PROJECT_URL",
+        description="Azure AI Foundry project URL (informational; SDK uses AZURE_OPENAI_ENDPOINT)",
+    )
+
+    @field_validator("azure_openai_endpoint", mode="before")
+    @classmethod
+    def _normalize_endpoint(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip():
+            return normalize_azure_openai_endpoint(v)
+        return v
 
     ocr_dpi: int = Field(default=300, alias="OCR_DPI")
     tesseract_lang: str = Field(default="eng", alias="TESSERACT_LANG")

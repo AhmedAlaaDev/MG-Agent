@@ -1,12 +1,56 @@
+# Load secrets from .env (copy from .env.example). Compose substitutes ${VAR} from .env.
 services:
   intelligent-bl-extractor:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-https://ftp.debian.org/debian}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-https://security.debian.org/debian-security}
+    image: intelligent-bl-extractor:latest
     container_name: intelligent-bl-extractor
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     ports:
-      - "8001:8000"
+      - "${API_PORT:-8000}:8000"
     env_file:
       - .env
+    environment:
+      # ── Azure OpenAI (required) ───────────────────────────────────────────
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      AZURE_OPENAI_PROJECT_URL: ${AZURE_OPENAI_PROJECT_URL:-}
+
+      # ── OCR (Linux paths inside container) ────────────────────────────────
+      OCR_DPI: ${OCR_DPI:-300}
+      TESSERACT_LANG: ${TESSERACT_LANG:-eng}
+      TESSERACT_CMD: /usr/bin/tesseract
+
+      # ── Extraction limits ─────────────────────────────────────────────────
+      MAX_INPUT_CHARS: ${MAX_INPUT_CHARS:-90000}
+      NATIVE_MIN_CHARS: ${NATIVE_MIN_CHARS:-600}
+      NATIVE_MIN_FIELD_HITS: ${NATIVE_MIN_FIELD_HITS:-5}
+      EXCEL_MAX_ROWS_PER_SHEET: ${EXCEL_MAX_ROWS_PER_SHEET:-2500}
+      EXCEL_MAX_COLS_PER_SHEET: ${EXCEL_MAX_COLS_PER_SHEET:-80}
+      EXCEL_MAX_CELL_CHARS: ${EXCEL_MAX_CELL_CHARS:-500}
+
+      # ── Dynamics 365 / Dataverse (required for post_to_dataverse=true) ───
+      TENANT_ID: ${TENANT_ID}
+      CLIENT_ID: ${CLIENT_ID}
+      CLIENT_SECRET: ${CLIENT_SECRET}
+      BASE_URL: ${BASE_URL}
+      AZURE_APP_API_URL: ${AZURE_APP_API_URL}
+
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

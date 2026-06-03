@@ -66,13 +66,18 @@ class DataverseClientService:
         from dataverse.env_service import EnvService as _EnvService
         env = _EnvService.get_instance()
 
-        self.base_url = env.get("AZURE_APP_API_URL")
+        self.base_url = (env.get("AZURE_APP_API_URL") or "").rstrip("/")
         if not self.base_url:
             raise ValueError("AZURE_APP_API_URL is not configured")
 
         self._tenant_id = env.get("TENANT_ID")
         self._client_id = env.get("CLIENT_ID")
         self._client_secret = env.get("CLIENT_SECRET")
+        # OAuth scope root: prefer explicit BASE_URL, else strip OData path from API URL
+        self._resource_url = (
+            env.get_optional("BASE_URL", "").rstrip("/")
+            or self.base_url.replace("/api/data/v9.2", "").rstrip("/")
+        )
 
         if not all([self._tenant_id, self._client_id, self._client_secret]):
             raise ValueError(
@@ -119,7 +124,7 @@ class DataverseClientService:
             return self._cached_token.access_token
 
         token_url = _TOKEN_URL.format(tenant=self._tenant_id)
-        scope = _TOKEN_SCOPE.format(base_url=self.base_url.rstrip("/api/data/v9.2").rstrip("/"))
+        scope = _TOKEN_SCOPE.format(base_url=self._resource_url)
         data = {
             "grant_type": "client_credentials",
             "client_id": self._client_id,

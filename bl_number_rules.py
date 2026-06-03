@@ -8,7 +8,7 @@ page-anchored ocean B/L numbers from the shipper header row.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from pdf_multi_bl import detect_and_extract_multi_bl_records, detect_multi_bl_candidate, split_pdf_pages
 from record_reconciliation import merge_record_fields
@@ -28,12 +28,108 @@ def _digits(val: Any) -> str:
     return re.sub(r"\D", "", str(val or ""))
 
 
+def fmc_organization_numbers(text: str) -> Set[str]:
+    """FMC Organization numbers are regulatory refs, never ocean B/L numbers."""
+    nums: Set[str] = set()
+    for m in re.finditer(r"FMCG?\s+ORGANIZATION\s+NO\.?\s*(\d{5,8})\b", text or "", re.I):
+        raw = m.group(1)
+        nums.add(raw)
+        nums.add(raw.lstrip("0") or raw)
+        nums.add(_digits(raw))
+    return nums
+
+
+def is_fmc_organization_number(bl: str, page_text: str = "") -> bool:
+    compact = _digits(bl)
+    if not compact:
+        return False
+    return compact in {_digits(n) for n in fmc_organization_numbers(page_text)}
+
+
+def extract_shipper_glued_bl_number(page_text: str) -> Optional[str]:
+    """
+    SACO / Tellus-style B/L printed beside the shipper block (OCR glues it to the street line).
+
+    Example OCR::
+        Shipper B/L No
+        SWEDEV AB
+        FABRIKSVAGEN 1 85 008
+        684 22 MUNKFORS
+    → B/L is ``85 008``, not part of the address.
+    """
+    if not page_text:
+        return None
+    header = page_text[:3000]
+    if not re.search(r"SHIPPER\s+B/?\s*L\s*NO|B/?\s*L\s*NO\.?", header, re.I):
+        return None
+
+    m = re.search(
+        r"([A-Z][A-Z\s]{4,40}\s+\d{1,5})\s+(\d{2,3})\s+(\d{2,4})\s*\n\s*(\d{2,3}\s+\d{2,4}\s+[A-Z]{3,})",
+        header,
+        re.I,
+    )
+    if not m:
+        return None
+
+    bl = f"{m.group(2)} {m.group(3)}"
+    if is_fmc_organization_number(bl, page_text):
+        return None
+    return bl
+
+
+def clean_shipper_address_bl_bleed(
+    address: Optional[str],
+    bl_no: Optional[str],
+    page_text: str = "",
+) -> Optional[str]:
+    """Remove a shipper-header B/L number accidentally included in the address."""
+    if not address:
+        return address
+    addr = re.sub(r"\s+", " ", str(address)).strip()
+    if not bl_no:
+        glued = extract_shipper_glued_bl_number(page_text)
+        if glued:
+            bl_no = glued
+    if not bl_no:
+        return addr
+
+    bl = str(bl_no).strip()
+    parts = bl.split()
+    if len(parts) == 2:
+        addr = re.sub(
+            rf"\s+{re.escape(parts[0])}\s+{re.escape(parts[1])}\b",
+            "",
+            addr,
+            flags=re.I,
+        )
+    addr = re.sub(rf"\b{re.escape(bl)}\b", "", addr, flags=re.I)
+    addr = re.sub(r"\s+", " ", addr).strip(" ,")
+
+    if page_text and not re.search(r"\d{5}\s+\d{2,4}\s+[A-Z]", addr, re.I):
+        m = re.search(
+            r"([A-Z][A-Z\s]{4,40}\s+\d{1,5})\s+\d{2,3}\s+\d{2,4}\s*\n\s*(\d{2,3}\s+\d{2,4}\s+[A-Z]{3,}.*?)\n\s*([A-Z]{4,})",
+            page_text[:3000],
+            re.I,
+        )
+        if m:
+            street = re.sub(r"\s+\d{2,3}\s+\d{2,4}\s*$", "", m.group(1).strip(), flags=re.I)
+            city = re.sub(r"\s*Carrier:?\s*$", "", m.group(2).strip(), flags=re.I)
+            country = re.sub(r"\s*Carrier:?\s*$", "", m.group(3).strip(), flags=re.I)
+            addr = f"{street}, {city}, {country}"
+
+    addr = re.sub(r",?\s*Carrier:?\s*,?", ",", addr, flags=re.I)
+    addr = re.sub(r"\s+", " ", addr).strip(" ,")
+    return addr or None
+
+
 def is_form_or_serial_bl_candidate(bl: str, page_text: str = "") -> bool:
     """True when the value is a MESCO form no. / header serial, not an ocean B/L."""
     compact = _digits(bl)
     if not compact:
         return True
     if compact in _FORM_SERIAL_BLOCKLIST:
+        return True
+    if is_fmc_organization_number(bl, page_text):
         return True
     # Leading zeros + short length → form stamp (0038260, 0038255)
     if re.fullmatch(r"0\d{6,8}", compact):
@@ -58,6 +154,11 @@ def is_valid_ocean_bl_number(bl: str, page_text: str = "", acid: Optional[str] =
     if is_form_or_serial_bl_candidate(str(bl), page_text):
         return False
     compact = _digits(bl)
+    if is_fmc_organization_number(bl, page_text):
+        return False
+    # Short numeric B/L beside shipper header (e.g. SACO "85 008")
+    if re.match(r"^\d{2,3}\s+\d{2,4}$", str(bl).strip()):
+        return True
     # Ocean B/L on these scans: 9–12 digits, typically 202512xxxx
     if compact.isdigit() and len(compact) >= 9:
         return True
@@ -65,9 +166,12 @@ def is_valid_ocean_bl_number(bl: str, page_text: str = "", acid: Optional[str] =
 
 
 def extract_ocean_bl_from_page(page_text: str) -> Optional[str]:
-    """Authoritative ocean B/L from shipper header (Combicon / MESCO layout)."""
+    """Authoritative ocean B/L from shipper header (Combicon / MESCO / SACO layout)."""
     if not page_text:
         return None
+    glued = extract_shipper_glued_bl_number(page_text)
+    if glued:
+        return glued
     patterns = [
         r"HEAVY\s+EQUIPMENT\s+SERVICES\s+(\d{9,12})\b",
         r"SHIPPER\s+EXPORTER[^\n]*BILL\s+OF\s+LADING\s+NO\.?[^\n]*\n\s*[^\n]+\s+(\d{9,12})\b",
@@ -104,6 +208,11 @@ def is_manifest_header_record(rec: Dict[str, Any]) -> bool:
 def is_manifest_house_record(rec: Dict[str, Any]) -> bool:
     """Per-house row from a parsed manifest PDF (packages/consignee are row-specific)."""
     return bool(rec.get("_manifest_pdf_row"))
+
+
+def is_isaly_draft_record(rec: Dict[str, Any]) -> bool:
+    """Per-page ISALY draft B/L (STAR CONCORD / MESCO scan, one B/L per page)."""
+    return bool(rec.get("_isaly_draft_row")) or rec.get("extraction_method") == "pdf_isaly_draft_direct"
 
 
 def normalize_packages_field(value: Any, page_text: str = "") -> Optional[str]:
@@ -195,7 +304,10 @@ def correct_record_from_page(
 
     acid = out.get("mesco_acidnumber")
     current_bl = out.get("mesco_masterblno")
-    if current_bl and is_form_or_serial_bl_candidate(str(current_bl), page_text):
+    if current_bl and (
+        is_form_or_serial_bl_candidate(str(current_bl), page_text)
+        or is_fmc_organization_number(str(current_bl), page_text)
+    ):
         if bl:
             out["mesco_masterblno"] = bl
             out["mesco_bookingnumber"] = bl
@@ -205,7 +317,7 @@ def correct_record_from_page(
     out["mesco_consigneenamecontactno"] = normalize_consignee_name(
         out.get("mesco_consigneenamecontactno")
     )
-    if not is_manifest_header_record(out) and not is_manifest_house_record(out):
+    if not is_manifest_header_record(out) and not is_manifest_house_record(out) and not is_isaly_draft_record(out):
         pkg = normalize_packages_field(out.get("cr401_totalpackages"), page_text)
         if pkg:
             out["cr401_totalpackages"] = pkg
@@ -247,6 +359,13 @@ def correct_record_from_page(
         for c in out.get("containers") or []:
             if isinstance(c, dict):
                 c["gross_weight_kg"] = out["cr401_totalgrossweight"]
+
+    if out.get("mesco_shipperaddress") or out.get("mesco_masterblno"):
+        out["mesco_shipperaddress"] = clean_shipper_address_bl_bleed(
+            out.get("mesco_shipperaddress"),
+            out.get("mesco_masterblno"),
+            page_text,
+        )
 
     return out
 

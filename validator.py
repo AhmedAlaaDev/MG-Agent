@@ -143,6 +143,21 @@ def is_likely_bl_number(candidate: str, current_acid: Optional[str] = None) -> b
 
 
 def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Optional[str]:
+    from bl_number_rules import (
+        extract_shipper_glued_bl_number,
+        fmc_organization_numbers,
+        is_fmc_organization_number,
+    )
+
+    glued = extract_shipper_glued_bl_number(text)
+    if glued and not is_fmc_organization_number(glued, text):
+        return glued
+
+    fmc_nums = {_digits(n) for n in fmc_organization_numbers(text)}
+
+    def _reject_fmc(val: str) -> bool:
+        return _digits(val) in fmc_nums or is_fmc_organization_number(val, text)
+
     upper = text.upper()
     value_pat = r"([A-Z0-9][A-Z0-9 \-]{3,30}[A-Z0-9])"
 
@@ -162,6 +177,8 @@ def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Op
         val = m.group(1)
         val = re.split(r"\n| {2,}", val)[0].strip(" ,;:-")
         val_compact = val.replace(" ", "")
+        if _reject_fmc(val):
+            continue
         if is_likely_bl_number(val_compact, current_acid):
             if val_compact.isdigit() and " " in val:
                 return val
@@ -169,6 +186,8 @@ def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Op
 
     header = upper[:2000]
     for val in re.findall(r"\b[A-Z]{2,5}\d[A-Z0-9\-]{4,20}\b|\b\d{5,20}\b", header):
+        if _reject_fmc(val):
+            continue
         if is_likely_bl_number(val, current_acid):
             return val
     return None
@@ -393,19 +412,20 @@ def validate_and_correct(
         correct_record_from_page,
         extract_ocean_bl_from_page,
         is_form_or_serial_bl_candidate,
+        is_isaly_draft_record,
         is_manifest_header_record,
         is_manifest_house_record,
         normalize_packages_field,
     )
 
-    if not data.get("mesco_acidnumber") and not is_manifest_house_record(data):
+    if not data.get("mesco_acidnumber") and not is_manifest_house_record(data) and not is_isaly_draft_record(data):
         acid = extract_acid_regex(raw_text)
         if acid:
             data["mesco_acidnumber"] = acid
             add_warning(data, "mesco_acidnumber filled by regex fallback.")
 
     page_bl = extract_ocean_bl_from_page(raw_text)
-    if page_bl:
+    if page_bl and not is_isaly_draft_record(data):
         data["mesco_masterblno"] = page_bl
     elif data.get("mesco_masterblno") and is_form_or_serial_bl_candidate(
         str(data["mesco_masterblno"]), raw_text
@@ -425,12 +445,13 @@ def validate_and_correct(
             data["cr401_totalpackages"] = (
                 int(pkg_val) if float(pkg_val) == int(float(pkg_val)) else pkg_val
             )
-    elif not is_manifest_house_record(data):
+    elif not is_manifest_house_record(data) and not is_isaly_draft_record(data):
         pkg = normalize_packages_field(data.get("cr401_totalpackages"), raw_text)
         if pkg:
             data["cr401_totalpackages"] = pkg
 
-    data = correct_record_from_page(data, raw_text)
+    if not is_isaly_draft_record(data):
+        data = correct_record_from_page(data, raw_text)
     if data.get("mesco_notes"):
         data["mesco_notes"] = clean_mesco_notes(data.get("mesco_notes"))
 
@@ -449,7 +470,7 @@ def validate_and_correct(
 
     enrich_src = enrichment_text if enrichment_text is not None else raw_text
 
-    if not data.get("mesco_hscode") and not is_manifest_house_record(data):
+    if not data.get("mesco_hscode") and not is_manifest_house_record(data) and not is_isaly_draft_record(data):
         from pdf_bl_enrichment import extract_hs_codes_from_goods
 
         hs = extract_hs_code_regex(enrich_src) or extract_hs_codes_from_goods(enrich_src)
@@ -459,7 +480,8 @@ def validate_and_correct(
 
     from pdf_bl_enrichment import enrich_bl_from_pdf_text
 
-    data = enrich_bl_from_pdf_text(data, enrich_src)
+    if not is_isaly_draft_record(data):
+        data = enrich_bl_from_pdf_text(data, enrich_src)
 
     hs_val = data.get("mesco_hscode")
     bl_val = data.get("mesco_masterblno")
@@ -536,6 +558,26 @@ def validate_and_correct(
     else:
         data["cr401_totalpackages"] = normalize_numeric(pkg_val)
 
+    def _normalize_container_type(value: Optional[str]) -> Optional[str]:
+        """Drop leading container count, e.g. '1 x 40HC' -> '40HC'."""
+        if value is None:
+            return None
+        text = re.sub(r"\s+", " ", str(value)).strip().upper()
+        if not text:
+            return None
+        m = re.match(r"^\d+\s*X\s*(\d{2}[A-Z]{0,3})$", text)
+        if m:
+            return m.group(1).replace(" ", "")
+        text = re.sub(r"^\d+\s*X\s*", "", text)
+        return text or None
+
+    if data.get("mesco_containertype"):
+        data["mesco_containertype"] = _normalize_container_type(data["mesco_containertype"])
+    if data.get("mesco_containertype2"):
+        data["mesco_containertype2"] = _normalize_container_type(data["mesco_containertype2"])
+    if data.get("mesco_containertype3"):
+        data["mesco_containertype3"] = _normalize_container_type(data["mesco_containertype3"])
+
     cleaned_containers: List[Dict[str, Optional[str]]] = []
     for item in data.get("containers") or []:
         if isinstance(item, BaseModel):
@@ -545,7 +587,7 @@ def validate_and_correct(
         c = {
             "container_number": clean_value(item.get("container_number")),
             "seal_number": clean_value(item.get("seal_number")),
-            "container_type": clean_value(item.get("container_type")),
+            "container_type": _normalize_container_type(item.get("container_type")),
             "packages": clean_value(item.get("packages")),
             "gross_weight_kg": normalize_numeric(item.get("gross_weight_kg")),
             "measurement_cbm": normalize_numeric(item.get("measurement_cbm")),
@@ -588,6 +630,35 @@ def validate_and_correct(
         data["mesco_telexrelease"] = True
 
     infer_direction(data)
+
+    # Cap free-text fields so they fit Dataverse column limits.
+    cargo_desc = data.get("mesco_cargodescription")
+    if isinstance(cargo_desc, str) and len(cargo_desc) > 1500:
+        snippet = cargo_desc[:1500]
+        cut = max(snippet.rfind("\n"), snippet.rfind(". "), snippet.rfind("; "))
+        if cut > 900:
+            snippet = snippet[:cut].rstrip(" .,;\n")
+        data["mesco_cargodescription"] = snippet.rstrip()
+
+    from bl_number_rules import (
+        clean_shipper_address_bl_bleed,
+        extract_shipper_glued_bl_number,
+        is_fmc_organization_number,
+    )
+
+    if data.get("mesco_masterblno") and is_fmc_organization_number(
+        str(data["mesco_masterblno"]), raw_text
+    ):
+        alt = extract_shipper_glued_bl_number(raw_text)
+        if alt:
+            data["mesco_masterblno"] = alt
+            data["mesco_bookingnumber"] = alt
+
+    data["mesco_shipperaddress"] = clean_shipper_address_bl_bleed(
+        data.get("mesco_shipperaddress"),
+        data.get("mesco_masterblno"),
+        raw_text,
+    )
 
     data.setdefault("confidence", {})
     data["confidence"]["post_validation"] = "completed"

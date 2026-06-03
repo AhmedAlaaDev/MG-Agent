@@ -1,43 +1,56 @@
-FROM ubuntu:22.04
+# Intelligent B/L Extractor — FastAPI + Tesseract OCR + Azure OpenAI + Dataverse
+FROM python:3.11-slim-bookworm
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
+# deb.debian.org often returns 403 / TLS errors behind corporate proxies; ftp.debian.org usually works.
+# Override: docker build --build-arg APT_MIRROR=https://deb.debian.org/debian .
+ARG APT_MIRROR=https://ftp.debian.org/debian
+ARG APT_SECURITY_MIRROR=https://security.debian.org/debian-security
 
-# Set work directory
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    TESSERACT_CMD=/usr/bin/tesseract \
+    TESSERACT_LANG=eng
+
 WORKDIR /app
 
-# Install Python and system dependencies
-# Ubuntu mirrors are often more accessible and cached by ISPs
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        python3.10 \
-        python3-pip \
+# Default slim image uses http://deb.debian.org → 403 on some networks. Force HTTPS mirrors.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'Types: deb' \
+        "URIs: ${APT_MIRROR}" \
+        'Suites: bookworm bookworm-updates' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        '' \
+        'Types: deb' \
+        "URIs: ${APT_SECURITY_MIRROR}" \
+        'Suites: bookworm-security' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         tesseract-ocr-eng \
         libgl1 \
         libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
         libgomp1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Set python3 as default python
-RUN ln -sf /usr/bin/python3 /usr/bin/python
-
-# Install Python dependencies
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Copy project files
 COPY . .
 
-# Expose port 8000 for FastAPI
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
-# Use uvicorn to run the FastAPI application
-CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
