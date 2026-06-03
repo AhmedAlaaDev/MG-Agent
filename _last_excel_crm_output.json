@@ -1,0 +1,172 @@
+{
+  "success": true,
+  "data": {
+    "mesco_bltype": 886150001,
+    "mesco_houseblno": "TPSALX20260203",
+    "mesco_bookingnumber": "2311135",
+    "mesco_acidnumber": "3399875451002110010",
+    "mesco_shippernamecontactno": "STRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5, YAU LEE CENTRE, 45 HOI YUEN ROAD, KWUN TONG HONG KONG NATIONAL COMPANY REGISTRATION NUMBER: 76276736",
+    "mesco_consigneenamecontactno": "STRAIGHT LINE 52 MAKRAM EBID, NASR CITY, CAIRO, EGYPT TEL: +201140039916 TAX NO. 339987545",
+    "mesco_origin": "SHENZHEN",
+    "mesco_destination": "ALEXANDRIA",
+    "mesco_transhipmentport": "Alexandria",
+    "cr401_totalpackages": "40",
+    "package_type": "cartons",
+    "cr401_totalgrossweight": "704.2",
+    "cr401_totalvolume": "5.505",
+    "mesco_incoterm": "EXW",
+    "nomination_term": "Nominated",
+    "delivery_term": "EXW",
+    "shipment_status": "Gate in",
+    "carrier": "COSCO",
+    "mbl_shipper": "TP",
+    "delivery_agent": "MESCO",
+    "mbl_acid": "2979239001003910084",
+    "schedule": "Port Of Loading",
+    "mesco_transporttype": 300000000,
+    "mesco_loadtype": 300000001,
+    "mesco_direction": 300000000,
+    "mesco_etdorigin": "2026-03-05 00:00:00",
+    "agent": "MESCO",
+    "containers": [
+      {
+        "packages": "40",
+        "gross_weight_kg": "704.2",
+        "measurement_cbm": "5.505"
+      }
+    ],
+    "mesco_Operation_mesco_Operation_mesco_Operation": [
+      {
+        "mesco_bookingnumber": "2311135",
+        "mesco_acidnumber": "3399875451002110010",
+        "mesco_shippernamecontactno": "STRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5, YAU LEE CENTRE, 45 HOI YUEN ROAD, KWUN TONG HONG KONG NATIONAL COMPANY REGISTRATION NUMBER: 76276736",
+        "mesco_consigneenamecontactno": "STRAIGHT LINE 52 MAKRAM EBID, NASR CITY, CAIRO, EGYPT TEL: +201140039916 TAX NO. 339987545",
+        "mesco_origin": "SHENZHEN",
+        "mesco_destination": "ALEXANDRIA",
+        "mesco_transhipmentport": "Alexandria",
+        "cr401_totalpackages": "40",
+        "package_type": "cartons",
+        "cr401_totalgrossweight": "704.2",
+        "cr401_totalvolume": "5.505",
+        "mesco_incoterm": "EXW",
+        "nomination_term": "Nominated",
+        "delivery_term": "EXW",
+        "shipment_status": "Gate in",
+        "carrier": "COSCO",
+        "mbl_shipper": "TP",
+        "delivery_agent": "MESCO",
+        "mbl_acid": "2979239001003910084",
+        "schedule": "Port Of Loading",
+        "mesco_transporttype": 300000000,
+        "mesco_loadtype": 300000001,
+        "mesco_direction": 300000000,
+        "mesco_etdorigin": "2026-03-05 00:00:00",
+        "agent": "MESCO",
+        "mesco_bltype": 886150002,
+        "mesco_masterblno": "TPSALX20260203"
+      },
+      {
+        "mesco_bookingnumber": "2311135",
+        "mesco_acidnumber": "2025806521002410015",
+        "mesco_shippernamecontactno": "KELI MOTOR GROUP CO.,LTD. NO.49 NANZHENG NORTH ROAD LIJIAPING QIYANG COUNTY HUNAN 426181 P.R.CHINA",
+        "mesco_consigneenamecontactno": "ENGINEERING COMPANY FOR INDUSTRIAL FEEDING {ECIF} INDUSTRIAL ZONE ARD ELMAHAGER AREA 24 BG - EGYPT- OBOUR CITY-CAIRO-EGYPT TEL:+20243430317 TAX ID: 202580652",
+        "mesco_origin": "SHENZHEN",
+        "mesco_destination": "ALEXANDRIA",
+        "mesco_transhipmentport": "Alexandria",
+        "cr401_totalpackages": "21",
+        "package_type": "pallets",
+        "cr401_totalgrossweight": "8285",
+        "cr401_totalvolume": "27.429",
+        "mesco_incoterm": "FOB SZX",
+        "nomination_term": "Nominated",
+        "delivery_term": "FOB SZX",
+        "shipment_status": "Gate in",
+        "carrier": "COSCO",
+        "mbl_shipper": "TP",
+        "delivery_agent": "MESCO",
+        "mbl_acid": "2979239001003910084",
+        "schedule": "Port Of Loading",
+        "mesco_transporttype": 300000000,
+        "mesco_loadtype": 300000001,
+        "mesco_direction": 300000000,
+        "mesco_etdorigin": "2026-03-05 00:00:00",
+        "agent": "MESCO",
+        "mesco_bltype": 886150002,
+        "mesco_masterblno": "TPSALX20260204"
+      },
+      {
+        "mesco_bookingnumber": "2311135",
+        "mesco_acidnumber": "3399875451003210025",
+        "mesco_shippernamecontactno": "STRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5,YAU LEE CENTRE, 45 HOI YUEN ROAD, KWUN TONG HONG KONG 999077 HONG KONG;HONG KONG NATIONAL COMPANY REGISTRATION NUMBER: 76276736",
+        "mesco_consigneenamecontactno": "STRAIGHT LINE 52 MAKRAM EBID, NASR CITY, CAIRO, EGYPT TEL: +201140039916 TAX NO. 339987545",
+        "mesco_origin": "SHENZHEN",
+        "mesco_destination": "ALEXANDRIA",
+        "mesco_transhipmentport": "Alexandria",
+        "cr401_totalpackages": "5",
+        "package_type": "PACKAGE",
+        "cr401_totalgrossweight": "2810",
+        "cr401_totalvolume": "13.515",
+        "mesco_incoterm": "EXW",
+        "nomination_term": "Nominated",
+        "delivery_term": "EXW",
+        "shipment_status": "Gate in",
+        "carrier": "COSCO",
+        "mbl_shipper": "TP",
+        "delivery_agent": "MESCO",
+        "mbl_acid": "2979239001003910084",
+        "schedule": "Port Of Loading",
+        "mesco_transporttype": 300000000,
+        "mesco_loadtype": 300000001,
+        "mesco_direction": 300000000,
+        "mesco_etdorigin": "2026-03-05 00:00:00",
+        "agent": "MESCO",
+        "mesco_bltype": 886150002,
+        "mesco_masterblno": "TPSALX20260210"
+      }
+    ],
+    "mesco_Container_MasterOperation_mesco_Operation": [],
+    "mesco_Cargo_MasterOperation_mesco_Operation": [
+      {
+        "mesco_noofpackages": "40",
+        "mesco_grosskg": "704.2",
+        "mesco_volcbm": "5.505"
+      },
+      {
+        "mesco_noofpackages": "21",
+        "mesco_grosskg": "8285",
+        "mesco_volcbm": "27.429"
+      },
+      {
+        "mesco_noofpackages": "5",
+        "mesco_grosskg": "2810",
+        "mesco_volcbm": "13.515"
+      }
+    ]
+  },
+  "records": null,
+  "error": null,
+  "raw_text": "[SPREADSHEET TEXT]\n\nFilename: 2311135-MESCO LCL-SZ TO ALEX.xlsx\n\nWorkbook sheets: SHENZHEN TO ALEX\n\nInstructions for AI: Values are presented with row numbers and cell addresses. Use explicit labels and nearby values.\n\n--- SHEET: SHENZHEN TO ALEX ---\nNon-empty rows included: 12; business-keyword rows: 9\nROW 1: LCL Loading Sheet SAILING\nCELLS 1: A1=LCL Loading Sheet SAILING\nROW 3: Tentative Schedule M/BL\nCELLS 3: A3=Tentative Schedule | I3=M/BL\nROW 4: Port Of Loading\tPort Of Discharging\tW/H CLS\tC/Y CLS\tETD\tCarrier\tJOB NO. M/BL Shipper\tDelivery Agent\tM/BL ACID\nCELLS 4: A4=Port Of Loading | B4=Port Of Discharging | C4=W/H CLS | D4=C/Y CLS | E4=ETD | F4=Carrier | G4=JOB NO. | I4=M/BL Shipper | J4=Delivery Agent | K4=M/BL ACID\nROW 5: shenzhen\tAlexandria 2026-03-05 00:00:00\tCOSCO\t2311135 TP\tMESCO\t2979239001003910084\nCELLS 5: A5=shenzhen | B5=Alexandria | E5=2026-03-05 00:00:00 | F5=COSCO | G5=2311135 | I5=TP | J5=MESCO | K5=2979239001003910084\nROW 7: H/BL Nos.\tTerm (Nominated / Free Hand)\tDelivery Term\tStatus\tShipper\tConsignee\tPlace of Receipt\tPlace of Delivery\tNos. Of Packages\tPacking\tGross Weight (KG)\tMeasurments (CBM)\tCargo Type\tH/BL ACID\tRemarks\tRATE\t\u52171\t\u52172\t\u52173\t\u52174\t\u52175\t\u52176\t\u52177\t\u52178\t\u52179\t\u521710\t\u521711\t\u521712\t\u521713\t\u521714\t\u521715\t\u521716\t\u521717\t\u521718\t\u521719\t\u521720\t\u521721\t\u521722\t\u521723\t\u521724\t\u521725\t\u521726\t\u521727\t\u521728\t\u521729\t\u521730\t\u521731\t\u521732\t\u521733\t\u521734\t\u521735\t\u521736\t\u521737\t\u521738\t\u521739\t\u521740\t\u521741\t\u521742\t\u521743\t\u521744\t\u521745\t\u521746\t\u521747\t\u521748\t\u521749\t\u521750\t\u521751\t\u521752\t\u521753\t\u521754\t\u521755\t\u521756\t\u521757\t\u521758\t\u521759\t\u521760\t\u521761\t\u521762\t\u521763\t\u521764\nCELLS 7: A7=H/BL Nos. | B7=Term (Nominated / Free Hand) | C7=Delivery Term | D7=Status | E7=Shipper | F7=Consignee | G7=Place of Receipt | H7=Place of Delivery | I7=Nos. Of Packages | J7=Packing | K7=Gross Weight (KG) | L7=Measurments (CBM) | M7=Cargo Type | N7=H/BL ACID | O7=Remarks | P7=RATE | Q7=\u52171 | R7=\u52172 | S7=\u52173 | T7=\u52174 | U7=\u52175 | V7=\u52176 | W7=\u52177 | X7=\u52178 | Y7=\u52179 | Z7=\u521710 | AA7=\u521711 | AB7=\u521712 | AC7=\u521713 | AD7=\u521714 | AE7=\u521715 | AF7=\u521716 | AG7=\u521717 | AH7=\u521718 | AI7=\u521719 | AJ7=\u521720 | AK7=\u521721 | AL7=\u521722 | AM7=\u521723 | AN7=\u521724 | AO7=\u521725 | AP7=\u521726 | AQ7=\u521727 | AR7=\u521728 | AS7=\u521729 | AT7=\u521730 | AU7=\u521731 | AV7=\u521732 | AW7=\u521733 | AX7=\u521734 | AY7=\u521735 | AZ7=\u521736 | BA7=\u521737 | BB7=\u521738 | BC7=\u521739 | BD7=\u521740 | BE7=\u521741 | BF7=\u521742 | BG7=\u521743 | BH7=\u521744 | BI7=\u521745 | BJ7=\u521746 | BK7=\u521747 | BL7=\u521748 | BM7=\u521749 | BN7=\u521750 | BO7=\u521751 | BP7=\u521752 | BQ7=\u521753 | BR7=\u521754 | BS7=\u521755 | BT7=\u521756 | BU7=\u521757 | BV7=\u521758 | BW7=\u521759 | BX7=\u521760 | BY7=\u521761 | BZ7=\u521762 | CA7=\u521763 | CB7=\u521764\nROW 8: TPSALX20260203\tNominated\tEXW\tGate in\tSTRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5, YAU LEE CENTRE, 45 HOI YUEN ROAD, KWUN TONG HONG KONG NATIONAL COMPANY REGISTRATION NUMBER: 76276736\tSTRAIGHT LINE 52 MAKRAM EBID, NASR CITY, CAIRO, EGYPT TEL: +201140039916 TAX NO. 339987545\tSHENZHEN\tALEXANDRIA\t40\tcartons\t704.2\t5.505\tCNC MACHINE HS-CODE:8477590000 ACID: 3399875451002110010 CONSOLIDATED CARGO IN TRANSIT TO CARGO IN TRANSIT TO MERGHEM BONDED WAREHOUSE ON CONSIGNEE'S RISK AND ACCOUNT.\t3399875451002110010\tTELEX\nCELLS 8: A8=TPSALX20260203 | B8=Nominated | C8=EXW | D8=Gate in | E8=STRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5, YAU LEE CENTRE, 45 HOI YUEN ROAD, KWUN TONG HONG KONG NATIONAL COMPANY REGISTRATION NUMBER: 76276736 | F8=STRAIGHT LINE 52 MAKRAM EBID, NASR CITY, CAIRO, EGYPT TEL: +201140039916 TAX NO. 339987545 | G8=SHENZHEN | H8=ALEXANDRIA | I8=40 | J8=cartons | K8=704.2 | L8=5.505 | M8=CNC MACHINE HS-CODE:8477590000 ACID: 3399875451002110010 CONSOLIDATED CARGO IN TRANSIT TO CARGO IN TRANSIT TO MERGHEM BONDED WAREHOUSE ON CONSIGNEE'S RISK AND ACCOUNT. | N8=3399875451002110010 | O8=TELEX\nROW 9: TPSALX20260204\tNominated\tFOB SZX\tGate in\tKELI MOTOR GROUP CO.,LTD. NO.49 NANZHENG NORTH ROAD LIJIAPING QIYANG COUNTY HUNAN 426181 P.R.CHINA\tENGINEERING COMPANY FOR INDUSTRIAL FEEDING {ECIF} INDUSTRIAL ZONE ARD ELMAHAGER AREA 24 BG - EGYPT- OBOUR CITY-CAIRO-EGYPT TEL:+20243430317 TAX ID: 202580652\tSHENZHEN\tALEXANDRIA\t21\tpallets\t8285\t27.429\tCOST-REDUCTION 22W OVEN FAN MOTOR WITH 930RPM YJ61-12A-HZ02 KELI CODE:B2344YJ003A HS CODE:8501100000 ACID:2025806521002410015 EGYPTIAN IMPORTER TAX ID:202580652 FOREIGN EXPORTER REGISTRATION TYPE:VAT NUMBER FOREIGN EXPORTER ID:91431100561723591P FOREIGN EXPORTER COUNTRY:CHINA\t2025806521002410015\tORIGINAL\nCELLS 9: A9=TPSALX20260204 | B9=Nominated | C9=FOB SZX | D9=Gate in | E9=KELI MOTOR GROUP CO.,LTD. NO.49 NANZHENG NORTH ROAD LIJIAPING QIYANG COUNTY HUNAN 426181 P.R.CHINA | F9=ENGINEERING COMPANY FOR INDUSTRIAL FEEDING {ECIF} INDUSTRIAL ZONE ARD ELMAHAGER AREA 24 BG - EGYPT- OBOUR CITY-CAIRO-EGYPT TEL:+20243430317 TAX ID: 202580652 | G9=SHENZHEN | H9=ALEXANDRIA | I9=21 | J9=pallets | K9=8285 | L9=27.429 | M9=COST-REDUCTION 22W OVEN FAN MOTOR WITH 930RPM YJ61-12A-HZ02 KELI CODE:B2344YJ003A HS CODE:8501100000 ACID:2025806521002410015 EGYPTIAN IMPORTER TAX ID:202580652 FOREIGN EXPORTER REGISTRATION TYPE:VAT NUMBER FOREIGN EXPORTER ID:91431100561723591P FOREIGN EXPORTER COUNTRY:CHINA | N9=2025806521002410015 | O9=ORIGINAL\nROW 10: TPSALX20260210\tNominated\tEXW\tGate in\tSTRAIGHT LINE LOGISTIC & TRADE LIMITED ADDRESS: RM 5003, /F 5,YAU LEE CENTRE, 45 HOI YUEN ROAD,...",
+  "extraction_quality": {
+    "document_type_detected": "spreadsheet",
+    "sheet_count": 1,
+    "sheets": [
+      {
+        "sheet_name": "SHENZHEN TO ALEX ",
+        "max_row_seen": 32,
+        "max_col_seen": 80,
+        "non_empty_rows": 12,
+        "detected_key_value_pairs": 16
+      }
+    ],
+    "char_count": 10211,
+    "field_hits": 10,
+    "detected_key_value_pairs": 16,
+    "detected_record_count": 3,
+    "record_routing": {
+      "direct": 3,
+      "azure_fallback": 0,
+      "skipped": 0,
+      "policy": "direct_when_confident_else_azure"
+    }
+  }
+}

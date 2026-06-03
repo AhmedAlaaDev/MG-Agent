@@ -1,0 +1,1575 @@
+{
+  "info": {
+    "_postman_id": "48156ce4-d910-4c73-9b5d-9042c73c7fe9",
+    "name": "Dynamics",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "45508356",
+    "_collection_link": "https://go.postman.co/collection/45508356-48156ce4-d910-4c73-9b5d-9042c73c7fe9?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "Entity Definitions",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrlMGS}}/EntityDefinitions(LogicalName='team')?$expand=Attributes,ManyToManyRelationships,ManyToOneRelationships,OneToManyRelationships",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "EntityDefinitions(LogicalName='team')"
+          ],
+          "query": [
+            {
+              "key": "$select",
+              "value": "LogicalName,SchemaName,DisplayName",
+              "disabled": true
+            },
+            {
+              "key": "$expand",
+              "value": "Attributes,ManyToManyRelationships,ManyToOneRelationships,OneToManyRelationships"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Metadata",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/xml",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrl}}/$metadata",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "$metadata"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Security Roles",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrlMGS}}/roles?$filter=contains(name,'mg supply') and _businessunitid_value eq 286209ae-20dd-f011-8406-002248a0018d",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "roles"
+          ],
+          "query": [
+            {
+              "key": "$top",
+              "value": "1",
+              "disabled": true
+            },
+            {
+              "key": "$count",
+              "value": "true",
+              "disabled": true
+            },
+            {
+              "key": "$select",
+              "value": "name",
+              "disabled": true
+            },
+            {
+              "key": "$filter",
+              "value": "contains(name,'mg supply') and _businessunitid_value eq 286209ae-20dd-f011-8406-002248a0018d"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Export Word Document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "let json = {};\r",
+              "try { json = pm.response.json(); } catch (e) { console.log('parse error', e); }\r",
+              "\r",
+              "const b64 = json.WordFile || \"\";            // لو PDF استخدم json.PdfFile\r",
+              "pm.visualizer.set(`\r",
+              "  <style>\r",
+              "    body { font-family: system-ui, Arial; padding: 12px }\r",
+              "    a.btn { display:inline-block; padding:.6rem 1rem; border:1px solid #444; border-radius:6px; text-decoration:none }\r",
+              "  </style>\r",
+              "  <h3>Exported Word</h3>\r",
+              "  {{#hasFile}}\r",
+              "    <a class=\"btn\"\r",
+              "       download=\"PurchaseOrder.docx\"\r",
+              "       href=\"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{{{b64}}}\">\r",
+              "      ⬇️ Download PurchaseOrder.docx\r",
+              "    </a>\r",
+              "  {{/hasFile}}\r",
+              "  {{^hasFile}}\r",
+              "    <p style=\"color:#b00\">⚠️ مفيش WordFile في الريسبونس.</p>\r",
+              "  {{/hasFile}}\r",
+              "`, { b64, hasFile: !!b64 });\r",
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {}
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"EntityTypeCode\": 11664,\r\n  \"SelectedTemplate\": {\r\n    \"@odata.type\": \"Microsoft.Dynamics.CRM.personaldocumenttemplate\",\r\n    \"personaldocumenttemplateid\": \"83a0c516-ea66-f011-bec3-6045bd8fdd93\"\r\n  },\r\n  \"SelectedRecords\": \"[\\\"{9005CDA1-DE7C-F011-B4CB-7C1E5229C266}\\\"]\"\r\n}\r\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrl}}/ExportWordDocument",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "ExportWordDocument"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Calculate Rollup Field",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrl}}/CalculateRollupField(Target=@p1,FieldName=@p2)?@p1={'@odata.id':'mesco_userrequests(d8dec363-debe-f011-bbd2-6045bd9f5783)'}&@p2='mesco_totalexpectedprice'",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "CalculateRollupField(Target=@p1,FieldName=@p2)"
+          ],
+          "query": [
+            {
+              "key": "@p1",
+              "value": "{'@odata.id':'mesco_userrequests(d8dec363-debe-f011-bbd2-6045bd9f5783)'}"
+            },
+            {
+              "key": "@p2",
+              "value": "'mesco_totalexpectedprice'"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Status",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrl}}/EntityDefinitions(LogicalName='mesco_userrequest')/Attributes(LogicalName='statuscode')/Microsoft.Dynamics.CRM.StatusAttributeMetadata?$select=LogicalName&$expand=OptionSet($select=Options)",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "EntityDefinitions(LogicalName='mesco_userrequest')",
+            "Attributes(LogicalName='statuscode')",
+            "Microsoft.Dynamics.CRM.StatusAttributeMetadata"
+          ],
+          "query": [
+            {
+              "key": "$select",
+              "value": "LogicalName"
+            },
+            {
+              "key": "$expand",
+              "value": "OptionSet($select=Options)"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrlProd}}/mesco_operations?$filter=(mesco_operationid eq 'ebc2427e-3ddb-f011-8543-000d3abc7744' or mesco_operationid eq '345c9b0e-3edb-f011-8543-000d3abc7744' or mesco_operationid eq '7f004195-40db-f011-8544-6045bd8b6fe4' or mesco_operationid eq 'a82a0b1f-41db-f011-8544-6045bd8b6fe4')&$expand=mesco_Operation,mesco_Container_mesco_houses,mesco_Cargo_HouseOperation_mesco_Operation",
+          "host": [
+            "{{apiUrlProd}}"
+          ],
+          "path": [
+            "mesco_operations"
+          ],
+          "query": [
+            {
+              "key": "$top",
+              "value": "1",
+              "disabled": true
+            },
+            {
+              "key": "$filter",
+              "value": "(mesco_operationid eq 'ebc2427e-3ddb-f011-8543-000d3abc7744' or mesco_operationid eq '345c9b0e-3edb-f011-8543-000d3abc7744' or mesco_operationid eq '7f004195-40db-f011-8544-6045bd8b6fe4' or mesco_operationid eq 'a82a0b1f-41db-f011-8544-6045bd8b6fe4')"
+            },
+            {
+              "key": "$expand",
+              "value": "mesco_Operation,mesco_Container_mesco_houses,mesco_Cargo_HouseOperation_mesco_Operation"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "One",
+      "protocolProfileBehavior": {
+        "disabledSystemHeaders": {
+          "connection": true
+        }
+      },
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrlProd}}/mesco_containers(ffafff5e-3ddb-f011-8543-000d3abc7744)?$expand=mesco_ContainerNo",
+          "host": [
+            "{{apiUrlProd}}"
+          ],
+          "path": [
+            "mesco_containers(ffafff5e-3ddb-f011-8543-000d3abc7744)"
+          ],
+          "query": [
+            {
+              "key": "$expand",
+              "value": "mesco_ContainerNo"
+            }
+          ]
+        }
+      },
+      "response": [
+        {
+          "name": "One",
+          "originalRequest": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "OData-MaxVersion",
+                "value": "4.0",
+                "type": "text"
+              },
+              {
+                "key": "OData-Version",
+                "value": "4.0",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json; charset=utf-8",
+                "type": "text"
+              },
+              {
+                "key": "Prefer",
+                "value": "odata.include-annotations=\"*\"",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{apiUrlProd}}/mesco_operations(2920ffd1-3cdb-f011-8543-000d3abc7744)?$expand=mesco_Operation_mesco_Operation_mesco_Operation,mesco_Container_MasterOperation_mesco_Operation,mesco_Cargo_MasterOperation_mesco_Operation",
+              "host": [
+                "{{apiUrlProd}}"
+              ],
+              "path": [
+                "mesco_operations(2920ffd1-3cdb-f011-8543-000d3abc7744)"
+              ],
+              "query": [
+                {
+                  "key": "$expand",
+                  "value": "mesco_Operation_mesco_Operation_mesco_Operation,mesco_Container_MasterOperation_mesco_Operation,mesco_Cargo_MasterOperation_mesco_Operation"
+                }
+              ]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_previewlanguage": null,
+          "header": [
+            {
+              "key": ":status",
+              "value": 200
+            },
+            {
+              "key": "cache-control",
+              "value": "no-cache"
+            },
+            {
+              "key": "allow",
+              "value": "OPTIONS,GET,HEAD,POST"
+            },
+            {
+              "key": "content-type",
+              "value": "application/json; odata.metadata=minimal"
+            },
+            {
+              "key": "content-encoding",
+              "value": "br"
+            },
+            {
+              "key": "expires",
+              "value": "-1"
+            },
+            {
+              "key": "etag",
+              "value": "W/\"123923278\""
+            },
+            {
+              "key": "vary",
+              "value": "Accept-Encoding"
+            },
+            {
+              "key": "x-ms-service-request-id",
+              "value": "33564696-b315-4b37-bc05-fcf691219ce6"
+            },
+            {
+              "key": "strict-transport-security",
+              "value": "max-age=31536000; includeSubDomains"
+            },
+            {
+              "key": "req_id",
+              "value": "33564696-b315-4b37-bc05-fcf691219ce6"
+            },
+            {
+              "key": "authactivityid",
+              "value": "58cb4578-619d-4d45-ad65-9bb9eaf70503"
+            },
+            {
+              "key": "x-ms-dop-hint",
+              "value": "48"
+            },
+            {
+              "key": "x-ms-ratelimit-time-remaining-xrm-requests",
+              "value": "1,198.91"
+            },
+            {
+              "key": "x-ms-ratelimit-burst-remaining-xrm-requests",
+              "value": "7991"
+            },
+            {
+              "key": "x-content-type-options",
+              "value": "nosniff"
+            },
+            {
+              "key": "odata-version",
+              "value": "4.0"
+            },
+            {
+              "key": "preference-applied",
+              "value": "odata.include-annotations=\"*\""
+            },
+            {
+              "key": "x-source",
+              "value": "22752861203179680141140152181171404987541122092822140106220704418818023218978182, 17619514059132236381091412351641119246107261668822018990155702061769112717018454102205"
+            },
+            {
+              "key": "public",
+              "value": "OPTIONS,GET,HEAD,POST"
+            },
+            {
+              "key": "date",
+              "value": "Sun, 17 May 2026 09:01:42 GMT"
+            },
+            {
+              "key": "content-length",
+              "value": "5350"
+            }
+          ],
+          "cookie": [],
+          "body": "{\n    \"@odata.context\": \"https://mgc.crm4.dynamics.com/api/data/v9.2/$metadata#mesco_operations(mesco_Operation_mesco_Operation_mesco_Operation(),mesco_Container_MasterOperation_mesco_Operation(),mesco_Cargo_MasterOperation_mesco_Operation())/$entity\",\n    \"@odata.etag\": \"W/\\\"123923278\\\"\",\n    \"mesco_handlinginformation\": null,\n    \"_mesco_destination_value@OData.Community.Display.V1.FormattedValue\": \"Port Said West\",\n    \"_mesco_destination_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Destination\",\n    \"_mesco_destination_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n    \"_mesco_destination_value\": \"acd5c76b-938a-ed11-81ad-6045bd8f9d49\",\n    \"_mesco_freightforwarder_value\": null,\n    \"mesco_direction@OData.Community.Display.V1.FormattedValue\": \"Import\",\n    \"mesco_direction\": 300000000,\n    \"_mesco_branch_value\": null,\n    \"mesco_airothercharges\": null,\n    \"mesco_importerstaxno\": null,\n    \"mesco_consigneecontactname\": null,\n    \"_mesco_vessel_value@OData.Community.Display.V1.FormattedValue\": \"MUSTAFA DAYI\",\n    \"_mesco_vessel_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Vessel\",\n    \"_mesco_vessel_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_vesselsmis\",\n    \"_mesco_vessel_value\": \"5fa630bd-cd8d-ee11-8179-6045bd8c5aa8\",\n    \"cr401_totalvolume@OData.Community.Display.V1.FormattedValue\": \"15.54\",\n    \"cr401_totalvolume\": 15.54,\n    \"mesco_transitflightdate\": null,\n    \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n    \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n    \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n    \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n    \"_mesco_salesman_value\": null,\n    \"importsequencenumber\": null,\n    \"mesco_totalsalesmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:57\",\n    \"mesco_totalsalesmaster_date\": \"2026-05-17T08:57:39Z\",\n    \"utcconversiontimezonecode\": null,\n    \"mesco_totalcostsmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:57\",\n    \"mesco_totalcostsmaster_date\": \"2026-05-17T08:57:40Z\",\n    \"overriddencreatedon\": null,\n    \"mesco_freetimedestination\": null,\n    \"mesco_freightpayableat\": null,\n    \"mesco_cargodescription\": null,\n    \"mesco_bltype@OData.Community.Display.V1.FormattedValue\": \"Master\",\n    \"mesco_bltype\": 886150001,\n    \"_mesco_notify2_value\": null,\n    \"_transactioncurrencyid_value@OData.Community.Display.V1.FormattedValue\": \"Egyptian Pound\",\n    \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"transactioncurrencyid\",\n    \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"transactioncurrency\",\n    \"_transactioncurrencyid_value\": \"2976d792-d81c-ed11-b83b-0022487f2774\",\n    \"mesco_declaredvalueforcarriage\": null,\n    \"mesco_dodate\": null,\n    \"mesco_truckername\": null,\n    \"mesco_totalsales@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalsales\": 0,\n    \"mesco_freetimeorigin\": null,\n    \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n    \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n    \"mesco_releasevalue\": null,\n    \"_mesco_airline_value\": null,\n    \"_mesco_incoterm_value\": null,\n    \"mesco_ponumber\": null,\n    \"_mesco_consignee_value@OData.Community.Display.V1.FormattedValue\": \"Mesco - Marine and engineering services co.\",\n    \"_mesco_consignee_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Consignee\",\n    \"_mesco_consignee_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"account\",\n    \"_mesco_consignee_value\": \"afe95e17-9462-ee11-8df0-6045bd8c5402\",\n    \"mesco_etdorigin@OData.Community.Display.V1.FormattedValue\": \"11/12/2025\",\n    \"mesco_etdorigin\": \"2025-12-11T00:00:00Z\",\n    \"mesco_invoicevalue\": null,\n    \"_mesco_bookingpartner_value\": null,\n    \"mesco_shippercontactname\": null,\n    \"mesco_originbl\": null,\n    \"mesco_transitflightno\": null,\n    \"_mesco_operationperson_value\": null,\n    \"mesco_expectedpickupdate\": null,\n    \"mesco_foreignsupplierregistrationnumber\": null,\n    \"mesco_totalcostsmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n    \"mesco_totalcostsmaster_state\": 1,\n    \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n    \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n    \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n    \"mesco_hideconsignee@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_hideconsignee\": false,\n    \"mesco_crossbooking@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_crossbooking\": false,\n    \"mesco_shippernamecontactno\": null,\n    \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Moataz Ali\",\n    \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n    \"_modifiedby_value\": \"b377815c-be28-f011-8c4e-6045bd99391b\",\n    \"_mesco_transhipmentport_value\": null,\n    \"_mesco_country_value\": null,\n    \"mesco_totalcosts@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalcosts\": 0,\n    \"timezoneruleversionnumber@OData.Community.Display.V1.FormattedValue\": \"4\",\n    \"timezoneruleversionnumber\": 4,\n    \"_mesco_agent_value@OData.Community.Display.V1.FormattedValue\": \"UTT LOGISTICS AND FOREIGN TRADE LTD.\",\n    \"_mesco_agent_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Agent\",\n    \"_mesco_agent_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_agent\",\n    \"_mesco_agent_value\": \"55a8a506-a1a5-ee11-be37-6045bd8f91c7\",\n    \"mesco_masterblno\": \"10225983\",\n    \"mesco_routenotes\": null,\n    \"_owningteam_value\": null,\n    \"_mesco_supplier_value\": null,\n    \"mesco_bookingterm\": null,\n    \"mesco_voytruckno\": null,\n    \"mesco_notifyaddress\": null,\n    \"mesco_imoclass\": null,\n    \"_modifiedonbehalfby_value\": null,\n    \"mesco_bookingnumber\": null,\n    \"mesco_form13delivered@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_form13delivered\": false,\n    \"mesco_notes\": null,\n    \"mesco_consolidation@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_consolidation\": false,\n    \"mesco_flightno\": null,\n    \"_mesco_origin_value@OData.Community.Display.V1.FormattedValue\": \"KUMPORT\",\n    \"_mesco_origin_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Origin\",\n    \"_mesco_origin_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n    \"_mesco_origin_value\": \"ad9f3f9f-c239-ee11-bdf4-6045bdf49a78\",\n    \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n    \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n    \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n    \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n    \"mesco_totalsalesmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalsalesmaster\": 0,\n    \"mesco_totalotherchargesduecarrier\": null,\n    \"mesco_form13\": null,\n    \"_createdonbehalfby_value\": null,\n    \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:57\",\n    \"modifiedon\": \"2026-05-17T08:57:58Z\",\n    \"mesco_atadestination@OData.Community.Display.V1.FormattedValue\": \"21/12/2025\",\n    \"mesco_atadestination\": \"2025-12-21T00:00:00Z\",\n    \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Draft Operation\",\n    \"statuscode\": 1,\n    \"mesco_declaredvalueforcustoms\": null,\n    \"cr401_totalgrossweight@OData.Community.Display.V1.FormattedValue\": \"3,455.84\",\n    \"cr401_totalgrossweight\": 3455.84,\n    \"mesco_masterbllinkno\": null,\n    \"mesco_totalsalesmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n    \"mesco_totalsalesmaster_state\": 1,\n    \"mesco_consigneecontactnumber\": null,\n    \"mesco_atdorigin\": null,\n    \"_mesco_servicetype_value\": null,\n    \"mesco_containertype\": null,\n    \"mesco_shipperaddress\": null,\n    \"mesco_customerreference\": null,\n    \"mesco_totalcosts_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n    \"mesco_totalcosts_date\": \"2026-05-17T08:44:12Z\",\n    \"mesco_quoteid\": null,\n    \"mesco_nooforgbls\": \"3\",\n    \"_mesco_notify1_value\": null,\n    \"mesco_consigneeaddress\": null,\n    \"mesco_acidnumber\": null,\n    \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"123,923,278\",\n    \"versionnumber\": 123923278,\n    \"mesco_totalmargin@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalmargin\": 0,\n    \"_mesco_operation_value\": null,\n    \"mesco_alternativeconsignee\": null,\n    \"mesco_customsyard\": null,\n    \"mesco_amountofinsurance\": null,\n    \"mesco_roadno\": null,\n    \"mesco_telexrelease@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_telexrelease\": false,\n    \"mesco_releasenumber\": null,\n    \"mesco_closedate\": null,\n    \"_mesco_shipper_value\": null,\n    \"mesco_form13date\": null,\n    \"_mesco_currency_value\": null,\n    \"mesco_deliveryaddress\": null,\n    \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n    \"statecode\": 0,\n    \"cr401_totalteus@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n    \"cr401_totalteus\": 1,\n    \"mesco_locationoverride\": null,\n    \"mesco_totalsales_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n    \"mesco_totalsales_date\": \"2026-05-17T08:44:12Z\",\n    \"mesco_bldraftconfirmed@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_bldraftconfirmed\": false,\n    \"mesco_quantity\": null,\n    \"mesco_oppositebl\": null,\n    \"mesco_blstatus@OData.Community.Display.V1.FormattedValue\": \"Original\",\n    \"mesco_blstatus\": 886150000,\n    \"mesco_etadestination\": null,\n    \"mesco_cutoffdate\": null,\n    \"mesco_totalmarginmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalmarginmaster\": 0,\n    \"exchangerate@OData.Community.Display.V1.FormattedValue\": \"1.000000000000\",\n    \"exchangerate\": 1,\n    \"mesco_totalcostsmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n    \"mesco_totalcostsmaster\": 0,\n    \"mesco_transporttype@OData.Community.Display.V1.FormattedValue\": \"Sea\",\n    \"mesco_transporttype\": 300000000,\n    \"mesco_code\": \"O-1617\",\n    \"mesco_totalcosts_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n    \"mesco_totalcosts_state\": 1,\n    \"mesco_quantity2\": null,\n    \"mesco_quantity3\": null,\n    \"mesco_drivername\": null,\n    \"mesco_dono\": null,\n    \"mesco_aciddetails\": null,\n    \"mesco_shippercontactnumber\": null,\n    \"mesco_typeofregistrationnumber\": null,\n    \"mesco_supplierreference\": null,\n    \"mesco_pcfreightterm\": null,\n    \"mesco_pickupdate\": null,\n    \"mesco_flightdate\": null,\n    \"mesco_operationid\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n    \"mesco_consigneenamecontactno\": null,\n    \"mesco_certificatenumber\": null,\n    \"mesco_containertype3\": null,\n    \"mesco_releasedate\": null,\n    \"_mesco_shippingline_value@OData.Community.Display.V1.FormattedValue\": \"TURKON\",\n    \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ShippingLine\",\n    \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_shippingline\",\n    \"_mesco_shippingline_value\": \"b2866fe0-9ba5-ee11-be37-6045bd8f91c7\",\n    \"mesco_totalsales_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n    \"mesco_totalsales_state\": 1,\n    \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:37\",\n    \"createdon\": \"2025-12-17T11:37:57Z\",\n    \"_mesco_countryoforigin_value\": null,\n    \"mesco_shippertoagent@OData.Community.Display.V1.FormattedValue\": \"No\",\n    \"mesco_shippertoagent\": false,\n    \"mesco_pickupaddress\": null,\n    \"mesco_unnumber\": null,\n    \"_mesco_consignee2_value\": null,\n    \"cr401_totalpackages@OData.Community.Display.V1.FormattedValue\": \"51.00\",\n    \"cr401_totalpackages\": 51,\n    \"mesco_etaoriign\": null,\n    \"mesco_loadtype@OData.Community.Display.V1.FormattedValue\": \"LCL\",\n    \"mesco_loadtype\": 300000001,\n    \"_mesco_xollsp_tariffquote_value\": null,\n    \"mesco_containertype2\": null,\n    \"_mesco_commodity_value\": null,\n    \"mesco_receivedinwarehousedate\": null,\n    \"mesco_Operation_mesco_Operation_mesco_Operation\": [\n        {\n            \"@odata.etag\": \"W/\\\"122413569\\\"\",\n            \"mesco_handlinginformation\": null,\n            \"_mesco_destination_value@OData.Community.Display.V1.FormattedValue\": \"Port Said West\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Destination\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_destination_value\": \"acd5c76b-938a-ed11-81ad-6045bd8f9d49\",\n            \"_mesco_freightforwarder_value\": null,\n            \"mesco_direction@OData.Community.Display.V1.FormattedValue\": \"Import\",\n            \"mesco_direction\": 300000000,\n            \"_mesco_branch_value\": null,\n            \"mesco_airothercharges\": null,\n            \"mesco_importerstaxno\": \"323747604\",\n            \"mesco_consigneecontactname\": null,\n            \"_mesco_vessel_value@OData.Community.Display.V1.FormattedValue\": \"MUSTAFA DAYI\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Vessel\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_vesselsmis\",\n            \"_mesco_vessel_value\": \"5fa630bd-cd8d-ee11-8179-6045bd8c5aa8\",\n            \"cr401_totalvolume@OData.Community.Display.V1.FormattedValue\": \"2.91\",\n            \"cr401_totalvolume\": 2.91,\n            \"mesco_transitflightdate\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_mesco_salesman_value\": null,\n            \"importsequencenumber\": null,\n            \"mesco_totalsalesmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsalesmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"utcconversiontimezonecode\": null,\n            \"mesco_totalcostsmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcostsmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"overriddencreatedon\": null,\n            \"mesco_freetimedestination\": null,\n            \"mesco_freightpayableat\": null,\n            \"mesco_cargodescription\": null,\n            \"mesco_bltype@OData.Community.Display.V1.FormattedValue\": \"House\",\n            \"mesco_bltype\": 886150002,\n            \"_mesco_notify2_value\": null,\n            \"_transactioncurrencyid_value@OData.Community.Display.V1.FormattedValue\": \"Egyptian Pound\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"transactioncurrencyid\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"transactioncurrency\",\n            \"_transactioncurrencyid_value\": \"2976d792-d81c-ed11-b83b-0022487f2774\",\n            \"mesco_declaredvalueforcarriage\": null,\n            \"mesco_dodate\": null,\n            \"mesco_truckername\": null,\n            \"mesco_totalsales@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsales\": 0,\n            \"mesco_freetimeorigin\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_releasevalue\": null,\n            \"_mesco_airline_value\": null,\n            \"_mesco_incoterm_value\": null,\n            \"mesco_ponumber\": null,\n            \"_mesco_consignee_value@OData.Community.Display.V1.FormattedValue\": \"ALSHROUQ FOR IMPORT & EXPORT\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Consignee\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"account\",\n            \"_mesco_consignee_value\": \"f3c22c40-50de-f011-8407-7c1e525f312d\",\n            \"mesco_etdorigin@OData.Community.Display.V1.FormattedValue\": \"11/12/2025\",\n            \"mesco_etdorigin\": \"2025-12-11T00:00:00Z\",\n            \"mesco_invoicevalue\": null,\n            \"_mesco_bookingpartner_value\": null,\n            \"mesco_shippercontactname\": null,\n            \"mesco_originbl\": null,\n            \"mesco_transitflightno\": null,\n            \"_mesco_operationperson_value\": null,\n            \"mesco_expectedpickupdate\": null,\n            \"mesco_foreignsupplierregistrationnumber\": \"797743887RT0001\",\n            \"mesco_totalcostsmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcostsmaster_state\": 1,\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_hideconsignee@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_hideconsignee\": false,\n            \"mesco_crossbooking@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_crossbooking\": false,\n            \"mesco_shippernamecontactno\": \"KALISAN KAUCUK SAN. VE TIC. A.S.\",\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"# MGOperation\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"c1e813d8-e980-f011-b4cc-000d3a2034b0\",\n            \"_mesco_transhipmentport_value\": null,\n            \"_mesco_country_value@OData.Community.Display.V1.FormattedValue\": \"Canada\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Country\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_country\",\n            \"_mesco_country_value\": \"78142c2a-7a8a-ed11-81ad-6045bd8f9d49\",\n            \"mesco_totalcosts@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcosts\": 0,\n            \"timezoneruleversionnumber@OData.Community.Display.V1.FormattedValue\": \"4\",\n            \"timezoneruleversionnumber\": 4,\n            \"_mesco_agent_value@OData.Community.Display.V1.FormattedValue\": \"UTT LOGISTICS AND FOREIGN TRADE LTD.\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Agent\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_agent\",\n            \"_mesco_agent_value\": \"55a8a506-a1a5-ee11-be37-6045bd8f91c7\",\n            \"mesco_masterblno\": \"ISTPSD-250567\",\n            \"mesco_routenotes\": null,\n            \"_owningteam_value\": null,\n            \"_mesco_supplier_value\": null,\n            \"mesco_bookingterm\": null,\n            \"mesco_voytruckno\": null,\n            \"mesco_notifyaddress\": null,\n            \"mesco_imoclass\": null,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_bookingnumber\": null,\n            \"mesco_form13delivered@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_form13delivered\": false,\n            \"mesco_notes\": null,\n            \"mesco_consolidation@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_consolidation\": false,\n            \"mesco_flightno\": null,\n            \"_mesco_origin_value@OData.Community.Display.V1.FormattedValue\": \"KUMPORT\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Origin\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_origin_value\": \"ad9f3f9f-c239-ee11-bdf4-6045bdf49a78\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_totalsalesmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsalesmaster\": 0,\n            \"mesco_totalotherchargesduecarrier\": null,\n            \"mesco_form13\": null,\n            \"_createdonbehalfby_value\": null,\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"25/04/2026 15:05\",\n            \"modifiedon\": \"2026-04-25T15:05:26Z\",\n            \"mesco_atadestination\": null,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Draft Operation\",\n            \"statuscode\": 1,\n            \"mesco_declaredvalueforcustoms\": null,\n            \"cr401_totalgrossweight@OData.Community.Display.V1.FormattedValue\": \"478.00\",\n            \"cr401_totalgrossweight\": 478,\n            \"mesco_masterbllinkno\": \"10225983\",\n            \"mesco_totalsalesmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsalesmaster_state\": 1,\n            \"mesco_consigneecontactnumber\": null,\n            \"mesco_atdorigin\": null,\n            \"_mesco_servicetype_value\": null,\n            \"mesco_containertype\": null,\n            \"mesco_shipperaddress\": null,\n            \"mesco_customerreference\": null,\n            \"mesco_totalcosts_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcosts_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_quoteid\": null,\n            \"mesco_nooforgbls\": \"0\",\n            \"_mesco_notify1_value\": null,\n            \"mesco_consigneeaddress\": null,\n            \"mesco_acidnumber\": \"3237476042025110057\",\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"122,413,569\",\n            \"versionnumber\": 122413569,\n            \"mesco_totalmargin@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmargin\": 0,\n            \"_mesco_operation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Operation\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_operation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"mesco_alternativeconsignee\": null,\n            \"mesco_customsyard\": null,\n            \"mesco_amountofinsurance\": null,\n            \"mesco_roadno\": null,\n            \"mesco_telexrelease@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_telexrelease\": false,\n            \"mesco_releasenumber\": null,\n            \"mesco_closedate\": null,\n            \"_mesco_shipper_value\": null,\n            \"mesco_form13date\": null,\n            \"_mesco_currency_value\": null,\n            \"mesco_deliveryaddress\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"cr401_totalteus@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"cr401_totalteus\": 1,\n            \"mesco_locationoverride\": null,\n            \"mesco_totalsales_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsales_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_bldraftconfirmed@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_bldraftconfirmed\": false,\n            \"mesco_quantity\": null,\n            \"mesco_oppositebl\": null,\n            \"mesco_blstatus@OData.Community.Display.V1.FormattedValue\": \"Telex\",\n            \"mesco_blstatus\": 886150001,\n            \"mesco_etadestination@OData.Community.Display.V1.FormattedValue\": \"21/12/2025\",\n            \"mesco_etadestination\": \"2025-12-21T00:00:00Z\",\n            \"mesco_cutoffdate\": null,\n            \"mesco_totalmarginmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmarginmaster\": 0,\n            \"exchangerate@OData.Community.Display.V1.FormattedValue\": \"1.000000000000\",\n            \"exchangerate\": 1,\n            \"mesco_totalcostsmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcostsmaster\": 0,\n            \"mesco_transporttype@OData.Community.Display.V1.FormattedValue\": \"Sea\",\n            \"mesco_transporttype\": 300000000,\n            \"mesco_code\": \"O-1618\",\n            \"mesco_totalcosts_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcosts_state\": 1,\n            \"mesco_quantity2\": null,\n            \"mesco_quantity3\": null,\n            \"mesco_drivername\": null,\n            \"mesco_dono\": null,\n            \"mesco_aciddetails\": null,\n            \"mesco_shippercontactnumber\": null,\n            \"mesco_typeofregistrationnumber@OData.Community.Display.V1.FormattedValue\": \"Tax Number\",\n            \"mesco_typeofregistrationnumber\": 886150001,\n            \"mesco_supplierreference\": null,\n            \"mesco_pcfreightterm@OData.Community.Display.V1.FormattedValue\": \"Collect\",\n            \"mesco_pcfreightterm\": 100000001,\n            \"mesco_pickupdate\": null,\n            \"mesco_flightdate\": null,\n            \"mesco_operationid\": \"ebc2427e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_consigneenamecontactno\": null,\n            \"mesco_certificatenumber\": null,\n            \"mesco_containertype3\": null,\n            \"mesco_releasedate\": null,\n            \"_mesco_shippingline_value@OData.Community.Display.V1.FormattedValue\": \"TURKON\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ShippingLine\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_shippingline\",\n            \"_mesco_shippingline_value\": \"b2866fe0-9ba5-ee11-be37-6045bd8f91c7\",\n            \"mesco_totalsales_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsales_state\": 1,\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:42\",\n            \"createdon\": \"2025-12-17T11:42:51Z\",\n            \"_mesco_countryoforigin_value\": null,\n            \"mesco_shippertoagent@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_shippertoagent\": false,\n            \"mesco_pickupaddress\": null,\n            \"mesco_unnumber\": null,\n            \"_mesco_consignee2_value\": null,\n            \"cr401_totalpackages@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"cr401_totalpackages\": 1,\n            \"mesco_etaoriign\": null,\n            \"mesco_loadtype@OData.Community.Display.V1.FormattedValue\": \"LCL\",\n            \"mesco_loadtype\": 300000001,\n            \"_mesco_xollsp_tariffquote_value\": null,\n            \"mesco_containertype2\": null,\n            \"_mesco_commodity_value\": null,\n            \"mesco_receivedinwarehousedate\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"122413572\\\"\",\n            \"mesco_handlinginformation\": null,\n            \"_mesco_destination_value@OData.Community.Display.V1.FormattedValue\": \"Port Said West\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Destination\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_destination_value\": \"acd5c76b-938a-ed11-81ad-6045bd8f9d49\",\n            \"_mesco_freightforwarder_value\": null,\n            \"mesco_direction@OData.Community.Display.V1.FormattedValue\": \"Import\",\n            \"mesco_direction\": 300000000,\n            \"_mesco_branch_value\": null,\n            \"mesco_airothercharges\": null,\n            \"mesco_importerstaxno\": \"352410094\",\n            \"mesco_consigneecontactname\": null,\n            \"_mesco_vessel_value@OData.Community.Display.V1.FormattedValue\": \"MUSTAFA DAYI\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Vessel\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_vesselsmis\",\n            \"_mesco_vessel_value\": \"5fa630bd-cd8d-ee11-8179-6045bd8c5aa8\",\n            \"cr401_totalvolume@OData.Community.Display.V1.FormattedValue\": \"4.04\",\n            \"cr401_totalvolume\": 4.04,\n            \"mesco_transitflightdate\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_mesco_salesman_value@OData.Community.Display.V1.FormattedValue\": \"Key Account Manager Key Account Manager\",\n            \"_mesco_salesman_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_mesco_salesman_value\": \"9f815f60-257f-ef11-ac21-000d3abbb96d\",\n            \"importsequencenumber\": null,\n            \"mesco_totalsalesmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsalesmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"utcconversiontimezonecode\": null,\n            \"mesco_totalcostsmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcostsmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"overriddencreatedon\": null,\n            \"mesco_freetimedestination\": null,\n            \"mesco_freightpayableat\": null,\n            \"mesco_cargodescription\": null,\n            \"mesco_bltype@OData.Community.Display.V1.FormattedValue\": \"House\",\n            \"mesco_bltype\": 886150002,\n            \"_mesco_notify2_value\": null,\n            \"_transactioncurrencyid_value@OData.Community.Display.V1.FormattedValue\": \"Egyptian Pound\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"transactioncurrencyid\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"transactioncurrency\",\n            \"_transactioncurrencyid_value\": \"2976d792-d81c-ed11-b83b-0022487f2774\",\n            \"mesco_declaredvalueforcarriage\": null,\n            \"mesco_dodate\": null,\n            \"mesco_truckername\": null,\n            \"mesco_totalsales@OData.Community.Display.V1.FormattedValue\": \"5,781.99\",\n            \"mesco_totalsales\": 5781.99,\n            \"mesco_freetimeorigin\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_releasevalue\": null,\n            \"_mesco_airline_value\": null,\n            \"_mesco_incoterm_value@OData.Community.Display.V1.FormattedValue\": \"EXW\",\n            \"_mesco_incoterm_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Incoterm\",\n            \"_mesco_incoterm_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_incoterm\",\n            \"_mesco_incoterm_value\": \"b87e2fe5-888a-ed11-81ad-6045bd8f9d49\",\n            \"mesco_ponumber\": null,\n            \"_mesco_consignee_value@OData.Community.Display.V1.FormattedValue\": \"ELARABY UNITED COMPANY FOR INDUSTRIAL AND COMMERCIAL INVESTMENT\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Consignee\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"account\",\n            \"_mesco_consignee_value\": \"2d2f999b-8bb0-ef11-b8e8-7c1e525dc6dc\",\n            \"mesco_etdorigin@OData.Community.Display.V1.FormattedValue\": \"11/12/2025\",\n            \"mesco_etdorigin\": \"2025-12-11T00:00:00Z\",\n            \"mesco_invoicevalue\": null,\n            \"_mesco_bookingpartner_value@OData.Community.Display.V1.FormattedValue\": \"ELARABY UNITED COMPANY FOR INDUSTRIAL AND COMMERCIAL INVESTMENT\",\n            \"_mesco_bookingpartner_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_BookingPartner\",\n            \"_mesco_bookingpartner_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"account\",\n            \"_mesco_bookingpartner_value\": \"2d2f999b-8bb0-ef11-b8e8-7c1e525dc6dc\",\n            \"mesco_shippercontactname\": null,\n            \"mesco_originbl\": null,\n            \"mesco_transitflightno\": null,\n            \"_mesco_operationperson_value@OData.Community.Display.V1.FormattedValue\": \"Mohamed Rashid\",\n            \"_mesco_operationperson_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_mesco_operationperson_value\": \"b5786a3d-701e-ed11-b83d-000d3a23c82c\",\n            \"mesco_expectedpickupdate\": null,\n            \"mesco_foreignsupplierregistrationnumber\": \"7340100159\",\n            \"mesco_totalcostsmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcostsmaster_state\": 1,\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_hideconsignee@OData.Community.Display.V1.FormattedValue\": \"Yes\",\n            \"mesco_hideconsignee\": true,\n            \"mesco_crossbooking@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_crossbooking\": false,\n            \"mesco_shippernamecontactno\": \"REMA METAL TEKSTIL INSAAT GIDA SAN TIC LTD STI\",\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"# MGOperation\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"c1e813d8-e980-f011-b4cc-000d3a2034b0\",\n            \"_mesco_transhipmentport_value\": null,\n            \"_mesco_country_value@OData.Community.Display.V1.FormattedValue\": \"Turkey\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Country\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_country\",\n            \"_mesco_country_value\": \"ce152c2a-7a8a-ed11-81ad-6045bd8f9d49\",\n            \"mesco_totalcosts@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcosts\": 0,\n            \"timezoneruleversionnumber@OData.Community.Display.V1.FormattedValue\": \"4\",\n            \"timezoneruleversionnumber\": 4,\n            \"_mesco_agent_value@OData.Community.Display.V1.FormattedValue\": \"UTT LOGISTICS AND FOREIGN TRADE LTD.\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Agent\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_agent\",\n            \"_mesco_agent_value\": \"55a8a506-a1a5-ee11-be37-6045bd8f91c7\",\n            \"mesco_masterblno\": \"ISTPSD-250568\",\n            \"mesco_routenotes\": null,\n            \"_owningteam_value\": null,\n            \"_mesco_supplier_value\": null,\n            \"mesco_bookingterm\": null,\n            \"mesco_voytruckno\": null,\n            \"mesco_notifyaddress\": null,\n            \"mesco_imoclass\": null,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_bookingnumber\": null,\n            \"mesco_form13delivered@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_form13delivered\": false,\n            \"mesco_notes\": null,\n            \"mesco_consolidation@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_consolidation\": false,\n            \"mesco_flightno\": null,\n            \"_mesco_origin_value@OData.Community.Display.V1.FormattedValue\": \"Istanbul Port\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Origin\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_origin_value\": \"d3e1443e-948a-ed11-81ad-6045bd8f9d49\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_totalsalesmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsalesmaster\": 0,\n            \"mesco_totalotherchargesduecarrier\": null,\n            \"mesco_form13\": null,\n            \"_createdonbehalfby_value\": null,\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"25/04/2026 15:05\",\n            \"modifiedon\": \"2026-04-25T15:05:27Z\",\n            \"mesco_atadestination\": null,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Draft Operation\",\n            \"statuscode\": 1,\n            \"mesco_declaredvalueforcustoms\": null,\n            \"cr401_totalgrossweight@OData.Community.Display.V1.FormattedValue\": \"768.00\",\n            \"cr401_totalgrossweight\": 768,\n            \"mesco_masterbllinkno\": \"10225983\",\n            \"mesco_totalsalesmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsalesmaster_state\": 1,\n            \"mesco_consigneecontactnumber\": null,\n            \"mesco_atdorigin\": null,\n            \"_mesco_servicetype_value@OData.Community.Display.V1.FormattedValue\": \"Sea Freight\",\n            \"_mesco_servicetype_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ServiceType\",\n            \"_mesco_servicetype_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_servicedefinition\",\n            \"_mesco_servicetype_value\": \"15519a0d-988a-ed11-81ad-6045bd8f9de3\",\n            \"mesco_containertype\": null,\n            \"mesco_shipperaddress\": null,\n            \"mesco_customerreference\": null,\n            \"mesco_totalcosts_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcosts_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_quoteid\": null,\n            \"mesco_nooforgbls\": \"3\",\n            \"_mesco_notify1_value\": null,\n            \"mesco_consigneeaddress\": \"ELARABY UNITED COMPANY FOR INDUSTRIAL AND COMMERCIAL INVESTMENT\",\n            \"mesco_acidnumber\": \"3524100942025111464\",\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"122,413,572\",\n            \"versionnumber\": 122413572,\n            \"mesco_totalmargin@OData.Community.Display.V1.FormattedValue\": \"5,781.99\",\n            \"mesco_totalmargin\": 5781.99,\n            \"_mesco_operation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Operation\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_operation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"mesco_alternativeconsignee\": null,\n            \"mesco_customsyard\": null,\n            \"mesco_amountofinsurance\": null,\n            \"mesco_roadno\": null,\n            \"mesco_telexrelease@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_telexrelease\": false,\n            \"mesco_releasenumber\": null,\n            \"mesco_closedate\": null,\n            \"_mesco_shipper_value\": null,\n            \"mesco_form13date\": null,\n            \"_mesco_currency_value\": null,\n            \"mesco_deliveryaddress\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"cr401_totalteus@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"cr401_totalteus\": 1,\n            \"mesco_locationoverride\": null,\n            \"mesco_totalsales_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsales_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_bldraftconfirmed@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_bldraftconfirmed\": false,\n            \"mesco_quantity\": null,\n            \"mesco_oppositebl\": null,\n            \"mesco_blstatus@OData.Community.Display.V1.FormattedValue\": \"Original\",\n            \"mesco_blstatus\": 886150000,\n            \"mesco_etadestination@OData.Community.Display.V1.FormattedValue\": \"21/12/2025\",\n            \"mesco_etadestination\": \"2025-12-21T00:00:00Z\",\n            \"mesco_cutoffdate\": null,\n            \"mesco_totalmarginmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmarginmaster\": 0,\n            \"exchangerate@OData.Community.Display.V1.FormattedValue\": \"1.000000000000\",\n            \"exchangerate\": 1,\n            \"mesco_totalcostsmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcostsmaster\": 0,\n            \"mesco_transporttype@OData.Community.Display.V1.FormattedValue\": \"Sea\",\n            \"mesco_transporttype\": 300000000,\n            \"mesco_code\": \"O-1619\",\n            \"mesco_totalcosts_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcosts_state\": 1,\n            \"mesco_quantity2\": null,\n            \"mesco_quantity3\": null,\n            \"mesco_drivername\": null,\n            \"mesco_dono\": null,\n            \"mesco_aciddetails\": null,\n            \"mesco_shippercontactnumber\": null,\n            \"mesco_typeofregistrationnumber@OData.Community.Display.V1.FormattedValue\": \"Tax Number\",\n            \"mesco_typeofregistrationnumber\": 886150001,\n            \"mesco_supplierreference\": null,\n            \"mesco_pcfreightterm@OData.Community.Display.V1.FormattedValue\": \"Collect\",\n            \"mesco_pcfreightterm\": 100000001,\n            \"mesco_pickupdate\": null,\n            \"mesco_flightdate\": null,\n            \"mesco_operationid\": \"345c9b0e-3edb-f011-8543-000d3abc7744\",\n            \"mesco_consigneenamecontactno\": null,\n            \"mesco_certificatenumber\": null,\n            \"mesco_containertype3\": null,\n            \"mesco_releasedate\": null,\n            \"_mesco_shippingline_value@OData.Community.Display.V1.FormattedValue\": \"TURKON\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ShippingLine\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_shippingline\",\n            \"_mesco_shippingline_value\": \"b2866fe0-9ba5-ee11-be37-6045bd8f91c7\",\n            \"mesco_totalsales_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsales_state\": 1,\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:46\",\n            \"createdon\": \"2025-12-17T11:46:50Z\",\n            \"_mesco_countryoforigin_value\": null,\n            \"mesco_shippertoagent@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_shippertoagent\": false,\n            \"mesco_pickupaddress\": null,\n            \"mesco_unnumber\": null,\n            \"_mesco_consignee2_value\": null,\n            \"cr401_totalpackages@OData.Community.Display.V1.FormattedValue\": \"3.00\",\n            \"cr401_totalpackages\": 3,\n            \"mesco_etaoriign\": null,\n            \"mesco_loadtype@OData.Community.Display.V1.FormattedValue\": \"LCL\",\n            \"mesco_loadtype\": 300000001,\n            \"_mesco_xollsp_tariffquote_value@OData.Community.Display.V1.FormattedValue\": \"IMP25/4205 // SPARE PARTS // EUC // EXW // TURKEY // PSDW // LCL // MESCO // ACID: 35241009420251114\",\n            \"_mesco_xollsp_tariffquote_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_xollsp_TariffQuote\",\n            \"_mesco_xollsp_tariffquote_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_tariffquote\",\n            \"_mesco_xollsp_tariffquote_value\": \"a9b42afa-71de-f011-8407-6045bd8b657e\",\n            \"mesco_containertype2\": null,\n            \"_mesco_commodity_value\": null,\n            \"mesco_receivedinwarehousedate\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"122416848\\\"\",\n            \"mesco_handlinginformation\": null,\n            \"_mesco_destination_value@OData.Community.Display.V1.FormattedValue\": \"Port Said West\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Destination\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_destination_value\": \"acd5c76b-938a-ed11-81ad-6045bd8f9d49\",\n            \"_mesco_freightforwarder_value\": null,\n            \"mesco_direction@OData.Community.Display.V1.FormattedValue\": \"Import\",\n            \"mesco_direction\": 300000000,\n            \"_mesco_branch_value\": null,\n            \"mesco_airothercharges\": null,\n            \"mesco_importerstaxno\": \"269134336\",\n            \"mesco_consigneecontactname\": null,\n            \"_mesco_vessel_value@OData.Community.Display.V1.FormattedValue\": \"MUSTAFA DAYI\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Vessel\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_vesselsmis\",\n            \"_mesco_vessel_value\": \"5fa630bd-cd8d-ee11-8179-6045bd8c5aa8\",\n            \"cr401_totalvolume@OData.Community.Display.V1.FormattedValue\": \"5.08\",\n            \"cr401_totalvolume\": 5.08,\n            \"mesco_transitflightdate\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_mesco_salesman_value\": null,\n            \"importsequencenumber\": null,\n            \"mesco_totalsalesmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsalesmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"utcconversiontimezonecode\": null,\n            \"mesco_totalcostsmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcostsmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"overriddencreatedon\": null,\n            \"mesco_freetimedestination\": null,\n            \"mesco_freightpayableat\": null,\n            \"mesco_cargodescription\": null,\n            \"mesco_bltype@OData.Community.Display.V1.FormattedValue\": \"House\",\n            \"mesco_bltype\": 886150002,\n            \"_mesco_notify2_value\": null,\n            \"_transactioncurrencyid_value@OData.Community.Display.V1.FormattedValue\": \"Egyptian Pound\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"transactioncurrencyid\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"transactioncurrency\",\n            \"_transactioncurrencyid_value\": \"2976d792-d81c-ed11-b83b-0022487f2774\",\n            \"mesco_declaredvalueforcarriage\": null,\n            \"mesco_dodate\": null,\n            \"mesco_truckername\": null,\n            \"mesco_totalsales@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsales\": 0,\n            \"mesco_freetimeorigin\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_releasevalue\": null,\n            \"_mesco_airline_value\": null,\n            \"_mesco_incoterm_value\": null,\n            \"mesco_ponumber\": null,\n            \"_mesco_consignee_value\": null,\n            \"mesco_etdorigin@OData.Community.Display.V1.FormattedValue\": \"11/12/2025\",\n            \"mesco_etdorigin\": \"2025-12-11T00:00:00Z\",\n            \"mesco_invoicevalue\": null,\n            \"_mesco_bookingpartner_value\": null,\n            \"mesco_shippercontactname\": null,\n            \"mesco_originbl\": null,\n            \"mesco_transitflightno\": null,\n            \"_mesco_operationperson_value\": null,\n            \"mesco_expectedpickupdate\": null,\n            \"mesco_foreignsupplierregistrationnumber\": \"9510068847\",\n            \"mesco_totalcostsmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcostsmaster_state\": 1,\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_hideconsignee@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_hideconsignee\": false,\n            \"mesco_crossbooking@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_crossbooking\": false,\n            \"mesco_shippernamecontactno\": \"PIRGE BICAK SAN. TIC. IML. ITH. VE IHR. LTD. STI.\",\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"# MGOperation\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"c1e813d8-e980-f011-b4cc-000d3a2034b0\",\n            \"_mesco_transhipmentport_value\": null,\n            \"_mesco_country_value@OData.Community.Display.V1.FormattedValue\": \"Turkey\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Country\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_country\",\n            \"_mesco_country_value\": \"ce152c2a-7a8a-ed11-81ad-6045bd8f9d49\",\n            \"mesco_totalcosts@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcosts\": 0,\n            \"timezoneruleversionnumber@OData.Community.Display.V1.FormattedValue\": \"4\",\n            \"timezoneruleversionnumber\": 4,\n            \"_mesco_agent_value@OData.Community.Display.V1.FormattedValue\": \"UTT LOGISTICS AND FOREIGN TRADE LTD.\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Agent\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_agent\",\n            \"_mesco_agent_value\": \"55a8a506-a1a5-ee11-be37-6045bd8f91c7\",\n            \"mesco_masterblno\": \"ISTPSD-250569\",\n            \"mesco_routenotes\": null,\n            \"_owningteam_value\": null,\n            \"_mesco_supplier_value\": null,\n            \"mesco_bookingterm\": null,\n            \"mesco_voytruckno\": null,\n            \"mesco_notifyaddress\": null,\n            \"mesco_imoclass\": null,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_bookingnumber\": null,\n            \"mesco_form13delivered@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_form13delivered\": false,\n            \"mesco_notes\": null,\n            \"mesco_consolidation@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_consolidation\": false,\n            \"mesco_flightno\": null,\n            \"_mesco_origin_value@OData.Community.Display.V1.FormattedValue\": \"KUMPORT\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Origin\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_origin_value\": \"ad9f3f9f-c239-ee11-bdf4-6045bdf49a78\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_totalsalesmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsalesmaster\": 0,\n            \"mesco_totalotherchargesduecarrier\": null,\n            \"mesco_form13\": null,\n            \"_createdonbehalfby_value\": null,\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"25/04/2026 15:15\",\n            \"modifiedon\": \"2026-04-25T15:15:17Z\",\n            \"mesco_atadestination\": null,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Draft Operation\",\n            \"statuscode\": 1,\n            \"mesco_declaredvalueforcustoms\": null,\n            \"cr401_totalgrossweight@OData.Community.Display.V1.FormattedValue\": \"666.14\",\n            \"cr401_totalgrossweight\": 666.14,\n            \"mesco_masterbllinkno\": \"10225983\",\n            \"mesco_totalsalesmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsalesmaster_state\": 1,\n            \"mesco_consigneecontactnumber\": null,\n            \"mesco_atdorigin\": null,\n            \"_mesco_servicetype_value\": null,\n            \"mesco_containertype\": null,\n            \"mesco_shipperaddress\": null,\n            \"mesco_customerreference\": null,\n            \"mesco_totalcosts_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcosts_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_quoteid\": null,\n            \"mesco_nooforgbls\": \"0\",\n            \"_mesco_notify1_value\": null,\n            \"mesco_consigneeaddress\": null,\n            \"mesco_acidnumber\": \"2691343362025100047\",\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"122,416,848\",\n            \"versionnumber\": 122416848,\n            \"mesco_totalmargin@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmargin\": 0,\n            \"_mesco_operation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Operation\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_operation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"mesco_alternativeconsignee\": null,\n            \"mesco_customsyard\": null,\n            \"mesco_amountofinsurance\": null,\n            \"mesco_roadno\": null,\n            \"mesco_telexrelease@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_telexrelease\": false,\n            \"mesco_releasenumber\": null,\n            \"mesco_closedate\": null,\n            \"_mesco_shipper_value\": null,\n            \"mesco_form13date\": null,\n            \"_mesco_currency_value\": null,\n            \"mesco_deliveryaddress\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"cr401_totalteus@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"cr401_totalteus\": 1,\n            \"mesco_locationoverride\": null,\n            \"mesco_totalsales_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsales_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_bldraftconfirmed@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_bldraftconfirmed\": false,\n            \"mesco_quantity\": null,\n            \"mesco_oppositebl\": null,\n            \"mesco_blstatus@OData.Community.Display.V1.FormattedValue\": \"Telex\",\n            \"mesco_blstatus\": 886150001,\n            \"mesco_etadestination@OData.Community.Display.V1.FormattedValue\": \"21/12/2025\",\n            \"mesco_etadestination\": \"2025-12-21T00:00:00Z\",\n            \"mesco_cutoffdate\": null,\n            \"mesco_totalmarginmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmarginmaster\": 0,\n            \"exchangerate@OData.Community.Display.V1.FormattedValue\": \"1.000000000000\",\n            \"exchangerate\": 1,\n            \"mesco_totalcostsmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcostsmaster\": 0,\n            \"mesco_transporttype@OData.Community.Display.V1.FormattedValue\": \"Sea\",\n            \"mesco_transporttype\": 300000000,\n            \"mesco_code\": \"O-1626\",\n            \"mesco_totalcosts_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcosts_state\": 1,\n            \"mesco_quantity2\": null,\n            \"mesco_quantity3\": null,\n            \"mesco_drivername\": null,\n            \"mesco_dono\": null,\n            \"mesco_aciddetails\": null,\n            \"mesco_shippercontactnumber\": null,\n            \"mesco_typeofregistrationnumber@OData.Community.Display.V1.FormattedValue\": \"Tax Number\",\n            \"mesco_typeofregistrationnumber\": 886150001,\n            \"mesco_supplierreference\": null,\n            \"mesco_pcfreightterm@OData.Community.Display.V1.FormattedValue\": \"Collect\",\n            \"mesco_pcfreightterm\": 100000001,\n            \"mesco_pickupdate\": null,\n            \"mesco_flightdate\": null,\n            \"mesco_operationid\": \"7f004195-40db-f011-8544-6045bd8b6fe4\",\n            \"mesco_consigneenamecontactno\": null,\n            \"mesco_certificatenumber\": null,\n            \"mesco_containertype3\": null,\n            \"mesco_releasedate\": null,\n            \"_mesco_shippingline_value@OData.Community.Display.V1.FormattedValue\": \"TURKON\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ShippingLine\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_shippingline\",\n            \"_mesco_shippingline_value\": \"b2866fe0-9ba5-ee11-be37-6045bd8f91c7\",\n            \"mesco_totalsales_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsales_state\": 1,\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:04\",\n            \"createdon\": \"2025-12-17T12:04:54Z\",\n            \"_mesco_countryoforigin_value\": null,\n            \"mesco_shippertoagent@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_shippertoagent\": false,\n            \"mesco_pickupaddress\": null,\n            \"mesco_unnumber\": null,\n            \"_mesco_consignee2_value\": null,\n            \"cr401_totalpackages@OData.Community.Display.V1.FormattedValue\": \"2.00\",\n            \"cr401_totalpackages\": 2,\n            \"mesco_etaoriign\": null,\n            \"mesco_loadtype@OData.Community.Display.V1.FormattedValue\": \"LCL\",\n            \"mesco_loadtype\": 300000001,\n            \"_mesco_xollsp_tariffquote_value\": null,\n            \"mesco_containertype2\": null,\n            \"_mesco_commodity_value\": null,\n            \"mesco_receivedinwarehousedate\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"122416851\\\"\",\n            \"mesco_handlinginformation\": null,\n            \"_mesco_destination_value@OData.Community.Display.V1.FormattedValue\": \"Port Said West\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Destination\",\n            \"_mesco_destination_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_destination_value\": \"acd5c76b-938a-ed11-81ad-6045bd8f9d49\",\n            \"_mesco_freightforwarder_value\": null,\n            \"mesco_direction@OData.Community.Display.V1.FormattedValue\": \"Import\",\n            \"mesco_direction\": 300000000,\n            \"_mesco_branch_value\": null,\n            \"mesco_airothercharges\": null,\n            \"mesco_importerstaxno\": \"200555308\",\n            \"mesco_consigneecontactname\": null,\n            \"_mesco_vessel_value@OData.Community.Display.V1.FormattedValue\": \"MUSTAFA DAYI\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Vessel\",\n            \"_mesco_vessel_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_vesselsmis\",\n            \"_mesco_vessel_value\": \"5fa630bd-cd8d-ee11-8179-6045bd8c5aa8\",\n            \"cr401_totalvolume@OData.Community.Display.V1.FormattedValue\": \"3.51\",\n            \"cr401_totalvolume\": 3.51,\n            \"mesco_transitflightdate\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_mesco_salesman_value\": null,\n            \"importsequencenumber\": null,\n            \"mesco_totalsalesmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsalesmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"utcconversiontimezonecode\": null,\n            \"mesco_totalcostsmaster_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcostsmaster_date\": \"2026-05-17T08:44:12Z\",\n            \"overriddencreatedon\": null,\n            \"mesco_freetimedestination\": null,\n            \"mesco_freightpayableat\": null,\n            \"mesco_cargodescription\": null,\n            \"mesco_bltype@OData.Community.Display.V1.FormattedValue\": \"House\",\n            \"mesco_bltype\": 886150002,\n            \"_mesco_notify2_value\": null,\n            \"_transactioncurrencyid_value@OData.Community.Display.V1.FormattedValue\": \"Egyptian Pound\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"transactioncurrencyid\",\n            \"_transactioncurrencyid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"transactioncurrency\",\n            \"_transactioncurrencyid_value\": \"2976d792-d81c-ed11-b83b-0022487f2774\",\n            \"mesco_declaredvalueforcarriage\": null,\n            \"mesco_dodate\": null,\n            \"mesco_truckername\": null,\n            \"mesco_totalsales@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsales\": 0,\n            \"mesco_freetimeorigin\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_releasevalue\": null,\n            \"_mesco_airline_value\": null,\n            \"_mesco_incoterm_value\": null,\n            \"mesco_ponumber\": null,\n            \"_mesco_consignee_value@OData.Community.Display.V1.FormattedValue\": \"CONCRETE FOR READY MADE GARMENTS\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Consignee\",\n            \"_mesco_consignee_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"account\",\n            \"_mesco_consignee_value\": \"fcc3f9e0-1690-ed11-aad0-6045bd8f9de3\",\n            \"mesco_etdorigin@OData.Community.Display.V1.FormattedValue\": \"11/12/2025\",\n            \"mesco_etdorigin\": \"2025-12-11T00:00:00Z\",\n            \"mesco_invoicevalue\": null,\n            \"_mesco_bookingpartner_value\": null,\n            \"mesco_shippercontactname\": null,\n            \"mesco_originbl\": null,\n            \"mesco_transitflightno\": null,\n            \"_mesco_operationperson_value\": null,\n            \"mesco_expectedpickupdate\": null,\n            \"mesco_foreignsupplierregistrationnumber\": \"6120409860\",\n            \"mesco_totalcostsmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcostsmaster_state\": 1,\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_hideconsignee@OData.Community.Display.V1.FormattedValue\": \"Yes\",\n            \"mesco_hideconsignee\": true,\n            \"mesco_crossbooking@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_crossbooking\": false,\n            \"mesco_shippernamecontactno\": \"MARFIL TEKSTIL DIS TIC. VE SAN. LTD. STI.\",\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"# MGOperation\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"c1e813d8-e980-f011-b4cc-000d3a2034b0\",\n            \"_mesco_transhipmentport_value\": null,\n            \"_mesco_country_value@OData.Community.Display.V1.FormattedValue\": \"Turkey\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Country\",\n            \"_mesco_country_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_country\",\n            \"_mesco_country_value\": \"ce152c2a-7a8a-ed11-81ad-6045bd8f9d49\",\n            \"mesco_totalcosts@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcosts\": 0,\n            \"timezoneruleversionnumber@OData.Community.Display.V1.FormattedValue\": \"4\",\n            \"timezoneruleversionnumber\": 4,\n            \"_mesco_agent_value@OData.Community.Display.V1.FormattedValue\": \"UTT LOGISTICS AND FOREIGN TRADE LTD.\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Agent\",\n            \"_mesco_agent_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_agent\",\n            \"_mesco_agent_value\": \"55a8a506-a1a5-ee11-be37-6045bd8f91c7\",\n            \"mesco_masterblno\": \"ISTPSD-250570\",\n            \"mesco_routenotes\": null,\n            \"_owningteam_value\": null,\n            \"_mesco_supplier_value\": null,\n            \"mesco_bookingterm\": null,\n            \"mesco_voytruckno\": null,\n            \"mesco_notifyaddress\": null,\n            \"mesco_imoclass\": null,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_bookingnumber\": null,\n            \"mesco_form13delivered@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_form13delivered\": false,\n            \"mesco_notes\": null,\n            \"mesco_consolidation@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_consolidation\": false,\n            \"mesco_flightno\": null,\n            \"_mesco_origin_value@OData.Community.Display.V1.FormattedValue\": \"KUMPORT\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Origin\",\n            \"_mesco_origin_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_address\",\n            \"_mesco_origin_value\": \"ad9f3f9f-c239-ee11-bdf4-6045bdf49a78\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_totalsalesmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalsalesmaster\": 0,\n            \"mesco_totalotherchargesduecarrier\": null,\n            \"mesco_form13\": null,\n            \"_createdonbehalfby_value\": null,\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"25/04/2026 15:15\",\n            \"modifiedon\": \"2026-04-25T15:15:18Z\",\n            \"mesco_atadestination\": null,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Draft Operation\",\n            \"statuscode\": 1,\n            \"mesco_declaredvalueforcustoms\": null,\n            \"cr401_totalgrossweight@OData.Community.Display.V1.FormattedValue\": \"1,543.70\",\n            \"cr401_totalgrossweight\": 1543.7,\n            \"mesco_masterbllinkno\": \"10225983\",\n            \"mesco_totalsalesmaster_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsalesmaster_state\": 1,\n            \"mesco_consigneecontactnumber\": null,\n            \"mesco_atdorigin\": null,\n            \"_mesco_servicetype_value\": null,\n            \"mesco_containertype\": null,\n            \"mesco_shipperaddress\": null,\n            \"mesco_customerreference\": null,\n            \"mesco_totalcosts_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalcosts_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_quoteid\": null,\n            \"mesco_nooforgbls\": \"3\",\n            \"_mesco_notify1_value\": null,\n            \"mesco_consigneeaddress\": null,\n            \"mesco_acidnumber\": \"2005553082025120040\",\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"122,416,851\",\n            \"versionnumber\": 122416851,\n            \"mesco_totalmargin@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmargin\": 0,\n            \"_mesco_operation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Operation\",\n            \"_mesco_operation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_operation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"mesco_alternativeconsignee\": null,\n            \"mesco_customsyard\": null,\n            \"mesco_amountofinsurance\": null,\n            \"mesco_roadno\": null,\n            \"mesco_telexrelease@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_telexrelease\": false,\n            \"mesco_releasenumber\": null,\n            \"mesco_closedate\": null,\n            \"_mesco_shipper_value\": null,\n            \"mesco_form13date\": null,\n            \"_mesco_currency_value\": null,\n            \"mesco_deliveryaddress\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"cr401_totalteus@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"cr401_totalteus\": 1,\n            \"mesco_locationoverride\": null,\n            \"mesco_totalsales_date@OData.Community.Display.V1.FormattedValue\": \"17/05/2026 08:44\",\n            \"mesco_totalsales_date\": \"2026-05-17T08:44:12Z\",\n            \"mesco_bldraftconfirmed@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_bldraftconfirmed\": false,\n            \"mesco_quantity\": null,\n            \"mesco_oppositebl\": null,\n            \"mesco_blstatus@OData.Community.Display.V1.FormattedValue\": \"Original\",\n            \"mesco_blstatus\": 886150000,\n            \"mesco_etadestination@OData.Community.Display.V1.FormattedValue\": \"21/12/2025\",\n            \"mesco_etadestination\": \"2025-12-21T00:00:00Z\",\n            \"mesco_cutoffdate\": null,\n            \"mesco_totalmarginmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalmarginmaster\": 0,\n            \"exchangerate@OData.Community.Display.V1.FormattedValue\": \"1.000000000000\",\n            \"exchangerate\": 1,\n            \"mesco_totalcostsmaster@OData.Community.Display.V1.FormattedValue\": \"0.00\",\n            \"mesco_totalcostsmaster\": 0,\n            \"mesco_transporttype@OData.Community.Display.V1.FormattedValue\": \"Sea\",\n            \"mesco_transporttype\": 300000000,\n            \"mesco_code\": \"O-1629\",\n            \"mesco_totalcosts_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalcosts_state\": 1,\n            \"mesco_quantity2\": null,\n            \"mesco_quantity3\": null,\n            \"mesco_drivername\": null,\n            \"mesco_dono\": null,\n            \"mesco_aciddetails\": null,\n            \"mesco_shippercontactnumber\": null,\n            \"mesco_typeofregistrationnumber@OData.Community.Display.V1.FormattedValue\": \"Tax Number\",\n            \"mesco_typeofregistrationnumber\": 886150001,\n            \"mesco_supplierreference\": null,\n            \"mesco_pcfreightterm@OData.Community.Display.V1.FormattedValue\": \"Collect\",\n            \"mesco_pcfreightterm\": 100000001,\n            \"mesco_pickupdate\": null,\n            \"mesco_flightdate\": null,\n            \"mesco_operationid\": \"a82a0b1f-41db-f011-8544-6045bd8b6fe4\",\n            \"mesco_consigneenamecontactno\": null,\n            \"mesco_certificatenumber\": null,\n            \"mesco_containertype3\": null,\n            \"mesco_releasedate\": null,\n            \"_mesco_shippingline_value@OData.Community.Display.V1.FormattedValue\": \"TURKON\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ShippingLine\",\n            \"_mesco_shippingline_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_shippingline\",\n            \"_mesco_shippingline_value\": \"b2866fe0-9ba5-ee11-be37-6045bd8f91c7\",\n            \"mesco_totalsales_state@OData.Community.Display.V1.FormattedValue\": \"1\",\n            \"mesco_totalsales_state\": 1,\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:08\",\n            \"createdon\": \"2025-12-17T12:08:44Z\",\n            \"_mesco_countryoforigin_value\": null,\n            \"mesco_shippertoagent@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_shippertoagent\": false,\n            \"mesco_pickupaddress\": null,\n            \"mesco_unnumber\": null,\n            \"_mesco_consignee2_value\": null,\n            \"cr401_totalpackages@OData.Community.Display.V1.FormattedValue\": \"45.00\",\n            \"cr401_totalpackages\": 45,\n            \"mesco_etaoriign\": null,\n            \"mesco_loadtype@OData.Community.Display.V1.FormattedValue\": \"LCL\",\n            \"mesco_loadtype\": 300000001,\n            \"_mesco_xollsp_tariffquote_value\": null,\n            \"mesco_containertype2\": null,\n            \"_mesco_commodity_value\": null,\n            \"mesco_receivedinwarehousedate\": null\n        }\n    ],\n    \"mesco_Container_MasterOperation_mesco_Operation\": [\n        {\n            \"@odata.etag\": \"W/\\\"111026589\\\"\",\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statuscode\": 1,\n            \"_mesco_um_value@OData.Community.Display.V1.FormattedValue\": \"20 FT\",\n            \"_mesco_um_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_UM\",\n            \"_mesco_um_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_unitsofmeasure\",\n            \"_mesco_um_value\": \"d21487d6-888a-ed11-81ad-6045bd8f9839\",\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_volcbm\": null,\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_product\": null,\n            \"mesco_carrierseal\": \"915317\",\n            \"mesco_netwtkg\": null,\n            \"mesco_noofpackages\": null,\n            \"mesco_warehouseroadno\": null,\n            \"_modifiedonbehalfby_value\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_quantity\": null,\n            \"_mesco_warehouse_value@OData.Community.Display.V1.FormattedValue\": \"PORT SAID\",\n            \"_mesco_warehouse_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Warehouse\",\n            \"_mesco_warehouse_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_warehouse\",\n            \"_mesco_warehouse_value\": \"b6b5e32f-f9ff-ef11-bae3-6045bd99391b\",\n            \"mesco_unno\": null,\n            \"importsequencenumber\": null,\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:41\",\n            \"modifiedon\": \"2025-12-17T11:41:52Z\",\n            \"mesco_humidity\": null,\n            \"utcconversiontimezonecode\": null,\n            \"_createdonbehalfby_value\": null,\n            \"mesco_maxtempc\": null,\n            \"_owningteam_value\": null,\n            \"mesco_imoclass\": null,\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_containernumber\": null,\n            \"_mesco_umpackages_value\": null,\n            \"mesco_containerid\": \"ffafff5e-3ddb-f011-8543-000d3abc7744\",\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"mesco_containertype@OData.Community.Display.V1.FormattedValue\": \"Standard / DC\",\n            \"mesco_containertype\": 100000000,\n            \"mesco_grosskg\": null,\n            \"mesco_sendtowarehouse@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_sendtowarehouse\": false,\n            \"_mesco_containerno_value@OData.Community.Display.V1.FormattedValue\": \"WFHU1375736\",\n            \"_mesco_containerno_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_ContainerNo\",\n            \"_mesco_containerno_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_containerno\",\n            \"_mesco_containerno_value\": \"3bdfc788-97c4-f011-bbd3-000d3a27c382\",\n            \"mesco_descriptionofgoods\": null,\n            \"_mesco_masteroperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_MasterOperation\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_masteroperation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"mesco_reefer@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_reefer\": false,\n            \"timezoneruleversionnumber\": null,\n            \"overriddencreatedon\": null,\n            \"mesco_imo@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_imo\": false,\n            \"mesco_flashptc\": null,\n            \"mesco_nor@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nor\": false,\n            \"mesco_tarewtkg\": null,\n            \"mesco_name\": \"C-1531\",\n            \"mesco_mintempc\": null,\n            \"mesco_receivedinwarehousestoragedate\": null,\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:41\",\n            \"createdon\": \"2025-12-17T11:41:52Z\",\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"111,026,589\",\n            \"versionnumber\": 111026589,\n            \"mesco_ventilation\": null\n        }\n    ],\n    \"mesco_Cargo_MasterOperation_mesco_Operation\": [\n        {\n            \"@odata.etag\": \"W/\\\"111027286\\\"\",\n            \"_mesco_masteroperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_MasterOperation\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_masteroperation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"_mesco_umpackages_value@OData.Community.Display.V1.FormattedValue\": \"Pallets\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_UMPackages\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_unitsofmeasure\",\n            \"_mesco_umpackages_value\": \"7b4c84f0-e495-ed11-aad1-6045bd8c5aa8\",\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:45\",\n            \"modifiedon\": \"2025-12-17T11:45:31Z\",\n            \"mesco_height\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_chargeableweight@OData.Community.Display.V1.FormattedValue\": \"478.000\",\n            \"mesco_chargeableweight\": 478,\n            \"mesco_volumetricweight@OData.Community.Display.V1.FormattedValue\": \"0.000\",\n            \"mesco_volumetricweight\": 0,\n            \"mesco_maxtempc\": null,\n            \"mesco_flashptc\": null,\n            \"mesco_lenght\": null,\n            \"mesco_product\": null,\n            \"overriddencreatedon\": null,\n            \"mesco_imo@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_imo\": false,\n            \"_mesco_conainter_value@OData.Community.Display.V1.FormattedValue\": \"C-1531\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Conainter\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_container\",\n            \"_mesco_conainter_value\": \"ffafff5e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_nonstackable@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nonstackable\": false,\n            \"mesco_tarewtkg\": null,\n            \"_mesco_houseoperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1618\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_HouseOperation\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_houseoperation_value\": \"ebc2427e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_chemical@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_chemical\": false,\n            \"mesco_unno\": null,\n            \"importsequencenumber\": null,\n            \"mesco_reefer@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_reefer\": false,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_width\": null,\n            \"mesco_netwtkg\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"mesco_humidity\": null,\n            \"mesco_imoclass\": null,\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"111,027,286\",\n            \"versionnumber\": 111027286,\n            \"mesco_loadtype\": null,\n            \"mesco_ratecharge\": null,\n            \"utcconversiontimezonecode\": null,\n            \"mesco_nor@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nor\": false,\n            \"mesco_mintempc\": null,\n            \"mesco_volcbm@OData.Community.Display.V1.FormattedValue\": \"2.910\",\n            \"mesco_volcbm\": 2.91,\n            \"_createdonbehalfby_value\": null,\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:45\",\n            \"createdon\": \"2025-12-17T11:45:28Z\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_ventilation\": null,\n            \"mesco_id\": \"Cargo-297\",\n            \"mesco_noofpackages@OData.Community.Display.V1.FormattedValue\": \"1.00\",\n            \"mesco_noofpackages\": 1,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statuscode\": 1,\n            \"mesco_cargoid\": \"004e69e0-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_descriptionofgoods\": \"STC\\nASSORTED COLOR UNPRINTED AND PRINTED LATEX BALLONS\\nPORT SAID FREE ZONE\\nHS CODE: 950300990000\",\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_owningteam_value\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_grosskg@OData.Community.Display.V1.FormattedValue\": \"478.000\",\n            \"mesco_grosskg\": 478,\n            \"timezoneruleversionnumber\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"111028335\\\"\",\n            \"_mesco_masteroperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_MasterOperation\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_masteroperation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"_mesco_umpackages_value@OData.Community.Display.V1.FormattedValue\": \"Pallets\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_UMPackages\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_unitsofmeasure\",\n            \"_mesco_umpackages_value\": \"7b4c84f0-e495-ed11-aad1-6045bd8c5aa8\",\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:00\",\n            \"modifiedon\": \"2025-12-17T12:00:34Z\",\n            \"mesco_height\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_chargeableweight@OData.Community.Display.V1.FormattedValue\": \"768.000\",\n            \"mesco_chargeableweight\": 768,\n            \"mesco_volumetricweight@OData.Community.Display.V1.FormattedValue\": \"0.001\",\n            \"mesco_volumetricweight\": 0.001,\n            \"mesco_maxtempc\": null,\n            \"mesco_flashptc\": null,\n            \"mesco_lenght\": null,\n            \"mesco_product\": null,\n            \"overriddencreatedon\": null,\n            \"mesco_imo@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_imo\": false,\n            \"_mesco_conainter_value@OData.Community.Display.V1.FormattedValue\": \"C-1531\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Conainter\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_container\",\n            \"_mesco_conainter_value\": \"ffafff5e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_nonstackable@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nonstackable\": false,\n            \"mesco_tarewtkg\": null,\n            \"_mesco_houseoperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1619\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_HouseOperation\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_houseoperation_value\": \"345c9b0e-3edb-f011-8543-000d3abc7744\",\n            \"mesco_chemical@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_chemical\": false,\n            \"mesco_unno\": null,\n            \"importsequencenumber\": null,\n            \"mesco_reefer@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_reefer\": false,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_width\": null,\n            \"mesco_netwtkg\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"mesco_humidity\": null,\n            \"mesco_imoclass\": null,\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"111,028,335\",\n            \"versionnumber\": 111028335,\n            \"mesco_loadtype\": null,\n            \"mesco_ratecharge\": null,\n            \"utcconversiontimezonecode\": null,\n            \"mesco_nor@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nor\": false,\n            \"mesco_mintempc\": null,\n            \"mesco_volcbm@OData.Community.Display.V1.FormattedValue\": \"4.040\",\n            \"mesco_volcbm\": 4.04,\n            \"_createdonbehalfby_value\": null,\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 11:48\",\n            \"createdon\": \"2025-12-17T11:48:55Z\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_ventilation\": null,\n            \"mesco_id\": \"Cargo-298\",\n            \"mesco_noofpackages@OData.Community.Display.V1.FormattedValue\": \"3.00\",\n            \"mesco_noofpackages\": 3,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statuscode\": 1,\n            \"mesco_cargoid\": \"4d363a59-3edb-f011-8543-6045bd8b650d\",\n            \"mesco_descriptionofgoods\": \"STC\\nSPARE PARTS\\nHS CODE : 73211190\\nCARGO IN TRANSIT TO (BANHA-SOSDI-OCTOBER DRY PORT-RAYA LOGISTICS-TEDA ROYAL -ROYAL LOGISTICS- PORTSAID WEST WAREHOUSE  )CUSTOMS WAREHOUSE ON RECEIVER RISK AND ACCOUNT\",\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_owningteam_value\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_grosskg@OData.Community.Display.V1.FormattedValue\": \"768.000\",\n            \"mesco_grosskg\": 768,\n            \"timezoneruleversionnumber\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"111029249\\\"\",\n            \"_mesco_masteroperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_MasterOperation\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_masteroperation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"_mesco_umpackages_value@OData.Community.Display.V1.FormattedValue\": \"Pallets\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_UMPackages\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_unitsofmeasure\",\n            \"_mesco_umpackages_value\": \"7b4c84f0-e495-ed11-aad1-6045bd8c5aa8\",\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:07\",\n            \"modifiedon\": \"2025-12-17T12:07:22Z\",\n            \"mesco_height\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_chargeableweight@OData.Community.Display.V1.FormattedValue\": \"666.140\",\n            \"mesco_chargeableweight\": 666.14,\n            \"mesco_volumetricweight@OData.Community.Display.V1.FormattedValue\": \"0.001\",\n            \"mesco_volumetricweight\": 0.001,\n            \"mesco_maxtempc\": null,\n            \"mesco_flashptc\": null,\n            \"mesco_lenght\": null,\n            \"mesco_product\": null,\n            \"overriddencreatedon\": null,\n            \"mesco_imo@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_imo\": false,\n            \"_mesco_conainter_value@OData.Community.Display.V1.FormattedValue\": \"C-1531\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Conainter\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_container\",\n            \"_mesco_conainter_value\": \"ffafff5e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_nonstackable@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nonstackable\": false,\n            \"mesco_tarewtkg\": null,\n            \"_mesco_houseoperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1626\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_HouseOperation\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_houseoperation_value\": \"7f004195-40db-f011-8544-6045bd8b6fe4\",\n            \"mesco_chemical@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_chemical\": false,\n            \"mesco_unno\": null,\n            \"importsequencenumber\": null,\n            \"mesco_reefer@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_reefer\": false,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_width\": null,\n            \"mesco_netwtkg\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"mesco_humidity\": null,\n            \"mesco_imoclass\": null,\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"111,029,249\",\n            \"versionnumber\": 111029249,\n            \"mesco_loadtype\": null,\n            \"mesco_ratecharge\": null,\n            \"utcconversiontimezonecode\": null,\n            \"mesco_nor@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nor\": false,\n            \"mesco_mintempc\": null,\n            \"mesco_volcbm@OData.Community.Display.V1.FormattedValue\": \"5.080\",\n            \"mesco_volcbm\": 5.08,\n            \"_createdonbehalfby_value\": null,\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:06\",\n            \"createdon\": \"2025-12-17T12:06:58Z\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_ventilation\": null,\n            \"mesco_id\": \"Cargo-299\",\n            \"mesco_noofpackages@OData.Community.Display.V1.FormattedValue\": \"2.00\",\n            \"mesco_noofpackages\": 2,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statuscode\": 1,\n            \"mesco_cargoid\": \"7b21bedd-40db-f011-8544-6045bd8b6fe4\",\n            \"mesco_descriptionofgoods\": \"STC\\nHOTEL WARE\\nHS CODE: 732690, 820551, 821192, 821490, 821599\\nUNSTACKABLE\",\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_owningteam_value\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_grosskg@OData.Community.Display.V1.FormattedValue\": \"666.140\",\n            \"mesco_grosskg\": 666.14,\n            \"timezoneruleversionnumber\": null\n        },\n        {\n            \"@odata.etag\": \"W/\\\"111029610\\\"\",\n            \"_mesco_masteroperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1617\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_MasterOperation\",\n            \"_mesco_masteroperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_masteroperation_value\": \"2920ffd1-3cdb-f011-8543-000d3abc7744\",\n            \"_mesco_umpackages_value@OData.Community.Display.V1.FormattedValue\": \"Packages\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_UMPackages\",\n            \"_mesco_umpackages_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"xollsp_unitsofmeasure\",\n            \"_mesco_umpackages_value\": \"7ecbd5fd-e495-ed11-aad1-6045bd8c5aa8\",\n            \"modifiedon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:10\",\n            \"modifiedon\": \"2025-12-17T12:10:17Z\",\n            \"mesco_height\": null,\n            \"_owninguser_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_owninguser_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_chargeableweight@OData.Community.Display.V1.FormattedValue\": \"1,543.700\",\n            \"mesco_chargeableweight\": 1543.7,\n            \"mesco_volumetricweight@OData.Community.Display.V1.FormattedValue\": \"0.001\",\n            \"mesco_volumetricweight\": 0.001,\n            \"mesco_maxtempc\": null,\n            \"mesco_flashptc\": null,\n            \"mesco_lenght\": null,\n            \"mesco_product\": null,\n            \"overriddencreatedon\": null,\n            \"mesco_imo@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_imo\": false,\n            \"_mesco_conainter_value@OData.Community.Display.V1.FormattedValue\": \"C-1531\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_Conainter\",\n            \"_mesco_conainter_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_container\",\n            \"_mesco_conainter_value\": \"ffafff5e-3ddb-f011-8543-000d3abc7744\",\n            \"mesco_nonstackable@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nonstackable\": false,\n            \"mesco_tarewtkg\": null,\n            \"_mesco_houseoperation_value@OData.Community.Display.V1.FormattedValue\": \"O-1629\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"mesco_HouseOperation\",\n            \"_mesco_houseoperation_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"mesco_operation\",\n            \"_mesco_houseoperation_value\": \"a82a0b1f-41db-f011-8544-6045bd8b6fe4\",\n            \"mesco_chemical@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_chemical\": false,\n            \"mesco_unno\": null,\n            \"importsequencenumber\": null,\n            \"mesco_reefer@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_reefer\": false,\n            \"_modifiedonbehalfby_value\": null,\n            \"mesco_width\": null,\n            \"mesco_netwtkg\": null,\n            \"statecode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statecode\": 0,\n            \"mesco_humidity\": null,\n            \"mesco_imoclass\": null,\n            \"versionnumber@OData.Community.Display.V1.FormattedValue\": \"111,029,610\",\n            \"versionnumber\": 111029610,\n            \"mesco_loadtype\": null,\n            \"mesco_ratecharge\": null,\n            \"utcconversiontimezonecode\": null,\n            \"mesco_nor@OData.Community.Display.V1.FormattedValue\": \"No\",\n            \"mesco_nor\": false,\n            \"mesco_mintempc\": null,\n            \"mesco_volcbm@OData.Community.Display.V1.FormattedValue\": \"3.510\",\n            \"mesco_volcbm\": 3.51,\n            \"_createdonbehalfby_value\": null,\n            \"_modifiedby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_modifiedby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_modifiedby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"createdon@OData.Community.Display.V1.FormattedValue\": \"17/12/2025 12:10\",\n            \"createdon\": \"2025-12-17T12:10:15Z\",\n            \"_owningbusinessunit_value@OData.Community.Display.V1.FormattedValue\": \"MESCO\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"owningbusinessunit\",\n            \"_owningbusinessunit_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"businessunit\",\n            \"_owningbusinessunit_value\": \"a30cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\n            \"mesco_ventilation\": null,\n            \"mesco_id\": \"Cargo-300\",\n            \"mesco_noofpackages@OData.Community.Display.V1.FormattedValue\": \"45.00\",\n            \"mesco_noofpackages\": 45,\n            \"statuscode@OData.Community.Display.V1.FormattedValue\": \"Active\",\n            \"statuscode\": 1,\n            \"mesco_cargoid\": \"f97e0257-41db-f011-8544-6045bd8b6fe4\",\n            \"mesco_descriptionofgoods\": \"STC\\n(88 ROLLS IN 45 PACKAGES)\\nFABRIC\\nHS CODE: 54075200, 54074200\",\n            \"_createdby_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_createdby_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_createdby_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"_owningteam_value\": null,\n            \"_ownerid_value@OData.Community.Display.V1.FormattedValue\": \"Ahmed Saad\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.associatednavigationproperty\": \"ownerid\",\n            \"_ownerid_value@Microsoft.Dynamics.CRM.lookuplogicalname\": \"systemuser\",\n            \"_ownerid_value\": \"50d7349a-01d7-ef11-a72f-7c1e52756535\",\n            \"mesco_grosskg@OData.Community.Display.V1.FormattedValue\": \"1,543.700\",\n            \"mesco_grosskg\": 1543.7,\n            \"timezoneruleversionnumber\": null\n        }\n    ]\n}"
+        }
+      ]
+    },
+    {
+      "name": "Related",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "odata.include-annotations=\"*\"",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "url": {
+          "raw": "{{apiUrl}}/teams(5B102986-1ED4-EF11-8EE9-7C1E525F9351)/teammembership_association?$select=systemuserid",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "teams(5B102986-1ED4-EF11-8EE9-7C1E525F9351)",
+            "teammembership_association"
+          ],
+          "query": [
+            {
+              "key": "$select",
+              "value": "systemuserid",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"mesco_code\": \"12301\",\r\n  \"mesco_currentquantity\": 0,\r\n  \"mesco_ItemVariation@odata.bind\": \"/mesco_itemvariations(52c0cc44-48e6-f011-8543-000d3ab00f13)\",\r\n  \"mesco_qcholdquantity\": 0,\r\n  \"mesco_reservedquantity\": 0,\r\n  \"mesco_Warehouse@odata.bind\": \"/mesco_warehouses(4b78d3b7-42e6-f011-8543-7ced8d2cdbb3)\",\r\n  \"ownerid@odata.bind\": \"/systemusers(566d1061-cb0f-f111-8407-7c1e52fccdea)\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrlMGS}}/mesco_warehousestocks",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "mesco_warehousestocks"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Add Privileges",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"Privileges\": [\r\n    {\r\n      \"BusinessUnitId\": \"a90cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\r\n      \"Depth\": \"Global\",\r\n      \"PrivilegeId\": \"b68b6341-e536-4218-b846-67aa504bcdae\",\r\n      \"PrivilegeName\": \"prvCreatemesco_APITicket\"\r\n    },\r\n    {\r\n      \"BusinessUnitId\": \"a90cd0c2-548c-ed11-81ad-6045bd8c5aa8\",\r\n      \"Depth\": \"Global\",\r\n      \"PrivilegeId\": \"76da6cc2-4897-499f-9704-a96533fed9ab\",\r\n      \"PrivilegeName\": \"prvReadmesco_APITicket\"\r\n    }\r\n  ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrlProd}}/roles(92604e74-2293-f011-b4cc-000d3a25d304)/Microsoft.Dynamics.CRM.AddPrivilegesRole",
+          "host": [
+            "{{apiUrlProd}}"
+          ],
+          "path": [
+            "roles(92604e74-2293-f011-b4cc-000d3a25d304)",
+            "Microsoft.Dynamics.CRM.AddPrivilegesRole"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Send Notification",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"title\": \"تحديث حالة الطلب\",\r\n    \"body\": \"تمت الموافقة على الطلب وهو الآن في المرحلة التالية.\",\r\n    \"ownerid@odata.bind\": \"/systemusers(7820C5E1-C128-F011-8C4E-000D3A4C5A9A)\",\r\n    \"icontype\": 100000001,\r\n    \"toasttype\": 200000000,\r\n    \"data\": \"{\\\"actions\\\":[{\\\"title\\\":\\\"عرض الطلب\\\",\\\"data\\\":{\\\"url\\\":\\\"?pagetype=entityrecord&etn=entity_logical_name&id=00000000-0000-0000-0000-000000000000\\\"}}]}\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrl}}/appnotifications",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "appnotifications"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Email",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"subject\": \"Update Request\",\r\n  \"description\": \"<div class=\\\"ck-content\\\" data-wrapper=\\\"true\\\" dir=\\\"ltr\\\" style=\\\"font-family: Segoe UI; font-size: 9pt;\\\"><p style=\\\"margin:0\\\"><span style=\\\"font-size:18pt\\\"><strong>Hello please update the request</strong></span></p></div>\",\r\n  \"directioncode\": true,\r\n  \"prioritycode\": 1,\r\n  \"actualdurationminutes\": 30,\r\n  \"regardingobjectid_mesco_purchaserequest_email@odata.bind\":\r\n    \"/mesco_purchaserequests(ba03ee52-fce6-f011-8543-7ced8d49139e)\",\r\n\r\n  \"email_activity_parties\": [\r\n    {\r\n      \"participationtypemask\": 1,\r\n      \"partyid_systemuser@odata.bind\":\r\n        \"/systemusers(0bb5c4b1-8ce5-f011-8543-7ced8d49139e)\"\r\n    },\r\n    {\r\n      \"participationtypemask\": 2,\r\n      \"partyid_systemuser@odata.bind\":\r\n        \"/systemusers(9c6909ae-20dd-f011-8406-002248a0018d)\"\r\n    }\r\n  ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrlMGS}}/emails",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "emails"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Send Email",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"entity\": { \"activityid\": \"1cfbbad4-7ff7-f011-8406-7ced8d484466\" },\r\n  \"IssueSend\": true,\r\n  \"TrackingToken\": \"\"\r\n}\r\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrlMGS}}/emails(1cfbbad4-7ff7-f011-8406-7ced8d484466)/Microsoft.Dynamics.CRM.SendEmail",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "emails(1cfbbad4-7ff7-f011-8406-7ced8d484466)",
+            "Microsoft.Dynamics.CRM.SendEmail"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Update",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text"
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation, odata.include-annotations=\"*\"",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n  \"owningbusinessunit@odata.bind\": \"/businessunits(44838d1f-3ae6-f011-8543-7ced8d49139e)\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrlMGS}}/mesco_warehouses(4b78d3b7-42e6-f011-8543-7ced8d2cdbb3)",
+          "host": [
+            "{{apiUrlMGS}}"
+          ],
+          "path": [
+            "mesco_warehouses(4b78d3b7-42e6-f011-8543-7ced8d2cdbb3)"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Delete",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{accessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "OData-MaxVersion",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "OData-Version",
+            "value": "4.0",
+            "type": "text"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json; charset=utf-8",
+            "type": "text",
+            "disabled": true
+          },
+          {
+            "key": "Prefer",
+            "value": "return=representation",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"yp_totalvalue\": 350\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{apiUrl}}/slas(5d92da23-d7a8-f011-bbd2-7ced8d12ea06)",
+          "host": [
+            "{{apiUrl}}"
+          ],
+          "path": [
+            "slas(5d92da23-d7a8-f011-bbd2-7ced8d12ea06)"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Parse the response\r",
+              "const response = pm.response.json();\r",
+              "\r",
+              "// Save the access_token to an environment variable\r",
+              "if (response.access_token) {\r",
+              "  pm.collectionVariables.set(\"accessToken\", response.access_token);\r",
+              "  console.log(\"✅ Token saved to environment variable\");\r",
+              "} else {\r",
+              "  console.error(\"❌ No access_token found in response\");\r",
+              "}\r",
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        },
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "text",
+              "uuid": "2829202d-f75e-4a56-97ee-5359c08a4083"
+            },
+            {
+              "key": "client_id",
+              "value": "{{clientId}}",
+              "type": "text",
+              "uuid": "af29105f-9cff-440e-95f7-df46ca9f4a12"
+            },
+            {
+              "key": "client_secret",
+              "value": "{{clientSecret}}",
+              "type": "text",
+              "uuid": "1f62bd6c-3d75-4923-aaeb-aedcaa658e28"
+            },
+            {
+              "key": "scope",
+              "value": "{{baseUrl}}/.default",
+              "type": "text",
+              "uuid": "7be82ea5-346b-43d4-a3d9-4521ce1a9354"
+            }
+          ]
+        },
+        "url": {
+          "raw": "https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token",
+          "protocol": "https",
+          "host": [
+            "login",
+            "microsoftonline",
+            "com"
+          ],
+          "path": [
+            "{{tenantId}}",
+            "oauth2",
+            "v2.0",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Token MGS",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Parse the response\r",
+              "const response = pm.response.json();\r",
+              "\r",
+              "// Save the access_token to an environment variable\r",
+              "if (response.access_token) {\r",
+              "  pm.collectionVariables.set(\"accessToken\", response.access_token);\r",
+              "  console.log(\"✅ Token saved to environment variable\");\r",
+              "} else {\r",
+              "  console.error(\"❌ No access_token found in response\");\r",
+              "}\r",
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        },
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "text",
+              "uuid": "2829202d-f75e-4a56-97ee-5359c08a4083"
+            },
+            {
+              "key": "client_id",
+              "value": "{{clientIdMGS}}",
+              "type": "text",
+              "uuid": "af29105f-9cff-440e-95f7-df46ca9f4a12"
+            },
+            {
+              "key": "client_secret",
+              "value": "{{clientSecretMGS}}",
+              "type": "text",
+              "uuid": "1f62bd6c-3d75-4923-aaeb-aedcaa658e28"
+            },
+            {
+              "key": "scope",
+              "value": "{{baseUrlMGS}}/.default",
+              "type": "text",
+              "uuid": "7be82ea5-346b-43d4-a3d9-4521ce1a9354"
+            }
+          ]
+        },
+        "url": {
+          "raw": "https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token",
+          "protocol": "https",
+          "host": [
+            "login",
+            "microsoftonline",
+            "com"
+          ],
+          "path": [
+            "{{tenantId}}",
+            "oauth2",
+            "v2.0",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Token PROD",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Parse the response\r",
+              "const response = pm.response.json();\r",
+              "\r",
+              "// Save the access_token to an environment variable\r",
+              "if (response.access_token) {\r",
+              "  pm.collectionVariables.set(\"accessToken\", response.access_token);\r",
+              "  console.log(\"✅ Token saved to environment variable\");\r",
+              "} else {\r",
+              "  console.error(\"❌ No access_token found in response\");\r",
+              "}\r",
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        },
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              ""
+            ],
+            "type": "text/javascript",
+            "packages": {},
+            "requests": {}
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "text",
+              "uuid": "2829202d-f75e-4a56-97ee-5359c08a4083"
+            },
+            {
+              "key": "client_id",
+              "value": "{{clientIdProd}}",
+              "type": "text",
+              "uuid": "af29105f-9cff-440e-95f7-df46ca9f4a12"
+            },
+            {
+              "key": "client_secret",
+              "value": "{{clientSecretProd}}",
+              "type": "text",
+              "uuid": "1f62bd6c-3d75-4923-aaeb-aedcaa658e28"
+            },
+            {
+              "key": "scope",
+              "value": "{{baseUrlProd}}/.default",
+              "type": "text",
+              "uuid": "7be82ea5-346b-43d4-a3d9-4521ce1a9354"
+            }
+          ]
+        },
+        "url": {
+          "raw": "https://login.microsoftonline.com/{{tenantIdProd}}/oauth2/v2.0/token",
+          "protocol": "https",
+          "host": [
+            "login",
+            "microsoftonline",
+            "com"
+          ],
+          "path": [
+            "{{tenantIdProd}}",
+            "oauth2",
+            "v2.0",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://mgcrm.crm4.dynamics.com/api/data/v9.2"
+    },
+    {
+      "key": "clientSecret",
+      "value": "REDACTED_BY_GIT_HISTORY_CLEANUP"
+    },
+    {
+      "key": "clientId",
+      "value": "f292a6ba-4c1d-4459-afa9-1fa37488708f"
+    },
+    {
+      "key": "tenantId",
+      "value": "18628f3c-d584-4e0f-91cd-5a2f04a0d8cb"
+    },
+    {
+      "key": "apiUrl",
+      "value": "https://mgcrm.crm4.dynamics.com/api/data/v9.2"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "clientSecretProd",
+      "value": ""
+    },
+    {
+      "key": "clientIdProd",
+      "value": ""
+    },
+    {
+      "key": "tenantIdProd",
+      "value": ""
+    },
+    {
+      "key": "apiUrlProd",
+      "value": ""
+    },
+    {
+      "key": "baseUrlProd",
+      "value": ""
+    },
+    {
+      "key": "baseUrlMGS",
+      "value": ""
+    },
+    {
+      "key": "apiUrlMGS",
+      "value": ""
+    },
+    {
+      "key": "clientIdMGS",
+      "value": ""
+    },
+    {
+      "key": "clientSecretMGS",
+      "value": ""
+    }
+  ]
+}
