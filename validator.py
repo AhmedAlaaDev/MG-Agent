@@ -144,6 +144,7 @@ def is_likely_bl_number(candidate: str, current_acid: Optional[str] = None) -> b
 
 def extract_bl_number_regex(text: str, current_acid: Optional[str] = None) -> Optional[str]:
     from bl_number_rules import (
+        _digits,
         extract_shipper_glued_bl_number,
         fmc_organization_numbers,
         is_fmc_organization_number,
