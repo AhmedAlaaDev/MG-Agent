@@ -1,0 +1,117 @@
+{
+  "mesco_container": {
+    "mesco_containertype": {
+      "Standard / DC": 100000000,
+      "High Cube": 100000001,
+      "Reefer": 100000002,
+      "Reefer High Cube": 886150002,
+      "Flat Rack": 100000003,
+      "Platform": 100000004,
+      "Open Top": 100000005,
+      "Tank": 886150001,
+      "Mafi": 886150003,
+      "Pallet Wide": 886150005
+    },
+    "mesco_product": {
+      "Flexi": 886150000,
+      "Heater Pad": 886150001,
+      "Iron": 886150002
+    }
+  },
+  "mesco_operation": {
+    "mesco_alternativeconsignee": {
+      "MARINE & ENGINEERING SERVICES CO. (MESCO)": 886150000,
+      "EURO Shipping Egypt": 886150001
+    },
+    "mesco_blstatus": {
+      "Original": 886150000,
+      "Telex": 886150001
+    },
+    "mesco_bltype": {
+      "Direct": 886150000,
+      "House": 886150002,
+      "Master": 886150001
+    },
+    "mesco_bookingterm": {
+      "Freehand": 886150000,
+      "Nomination": 886150001
+    },
+    "mesco_containertype": {
+      "Standard / DC": 100000000,
+      "High Cube": 100000001,
+      "Reefer": 100000002,
+      "Reefer High Cube": 886150002,
+      "Flat Rack": 100000003,
+      "Platform": 100000004,
+      "Open Top": 100000005,
+      "Tank": 886150001,
+      "Mafi": 886150003,
+      "Pallet Wide": 886150005
+    },
+    "mesco_containertype2": {
+      "Standard / DC": 100000000,
+      "High Cube": 100000001,
+      "Reefer": 100000002,
+      "Reefer High Cube": 886150002,
+      "Flat Rack": 100000003,
+      "Platform": 100000004,
+      "Open Top": 100000005,
+      "Tank": 886150001,
+      "Mafi": 886150003,
+      "Pallet Wide": 886150005
+    },
+    "mesco_containertype3": {
+      "Standard / DC": 100000000,
+      "High Cube": 100000001,
+      "Reefer": 100000002,
+      "Reefer High Cube": 886150002,
+      "Flat Rack": 100000003,
+      "Platform": 100000004,
+      "Open Top": 100000005,
+      "Tank": 886150001,
+      "Mafi": 886150003,
+      "Pallet Wide": 886150005
+    },
+    "mesco_customsyard": {
+      "CACC": 886150000,
+      "Cargo Village": 886150001,
+      "Air France": 886150002
+    },
+    "mesco_direction": {
+      "Import": 300000000,
+      "Export": 300000001,
+      "Domestic": 300000002
+    },
+    "mesco_loadtype": {
+      "FCL": 300000000,
+      "LCL": 300000001,
+      "RORO": 886150001,
+      "General Cargo": 886150002,
+      "Bulk Cargo": 886150003,
+      "Flexi": 886150004,
+      "Tank": 886150005,
+      "LCL logistics": 886150006,
+      "FCL logistics": 886150007
+    },
+    "mesco_pcfreightterm": {
+      "Prepaid": 100000000,
+      "Collect": 100000001
+    },
+    "mesco_transporttype": {
+      "Sea": 300000000,
+      "Truck": 300000001,
+      "Air": 300000002,
+      "Gensets": 886150006,
+      "Warehousing": 886150005,
+      "Custom Clearance": 886150007,
+      "Trading": 886150004,
+      "Container Sale": 886150002,
+      "Projects, Chartering & Agency": 886150008,
+      "Multimodal": 300000003
+    },
+    "mesco_typeofregistrationnumber": {
+      "Registration number": 886150000,
+      "Tax Number": 886150001
+    }
+  }
+}

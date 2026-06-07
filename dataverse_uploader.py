@@ -68,6 +68,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_field_limits import limit_for as _registry_limit_for
+from dataverse_metadata import is_option_set_field, resolve_option_value
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,10 @@ _ENTITY_SET_MAP: Dict[str, str] = {
     "xollsp_commoditygroup":     "xollsp_commoditygroups",
     "xollsp_servicedefinition":  "xollsp_servicedefinitions",
     "xollsp_tariffquote":        "xollsp_tariffquotes",
+    "xollsp_unitsofmeasure":     "xollsp_unitsofmeasures",
     "mesco_operation":           "mesco_operations",
+    "mesco_container":           "mesco_containers",
+    "mesco_warehouse":           "mesco_warehouses",
 }
 
 _ID_FIELD_MAP: Dict[str, str] = {
@@ -168,6 +172,10 @@ _ID_FIELD_MAP: Dict[str, str] = {
     "xollsp_commoditygroup":     "xollsp_commoditygroupid",
     "xollsp_servicedefinition":  "xollsp_servicedefinitionid",
     "xollsp_tariffquote":        "xollsp_tariffquoteid",
+    "xollsp_unitsofmeasure":     "xollsp_unitsofmeasureid",
+    "mesco_operation":           "mesco_operationid",
+    "mesco_container":           "mesco_containerid",
+    "mesco_warehouse":           "mesco_warehouseid",
 }
 
 # Navigation property name map: logical_name → PascalCase schema_name  [FIX-9]
@@ -328,40 +336,39 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
             "mesco_Operation",
             "mesco_Container_mesco_houses",
             "mesco_Cargo_HouseOperation_mesco_Operation",
-            # Container-type picklist fields — the OCR/Excel extract returns
-            # ISO codes (e.g. "1X40HC") but Dataverse expects a picklist
-            # integer.  The string values cannot be mapped to the existing
-            # option-set, so they are dropped to avoid 400 errors.
-            "mesco_containertype",
-            "mesco_containertype2",
-            "mesco_containertype3",
         },
 
+        # Offline fallback only — the live option-set metadata
+        # (dataverse_metadata.py) is the primary source.  Values corrected to
+        # match the real Dataverse option sets.
         "picklist_strings": {
             "mesco_pcfreightterm": {
                 "PREPAID": 100000000,
                 "COLLECT": 100000001,
             },
             "mesco_transporttype": {
-                "SEA":  300000000,
-                "AIR":  300000001,
-                "ROAD": 300000002,
-                "RAIL": 300000003,
+                "SEA":   300000000,
+                "TRUCK": 300000001,
+                "ROAD":  300000001,
+                "AIR":   300000002,
+                "MULTIMODAL": 300000003,
             },
             "mesco_direction": {
-                "EXPORT": 300000000,
-                "IMPORT": 300000001,
-                "CROSS":  300000002,
+                "IMPORT":   300000000,
+                "EXPORT":   300000001,
+                "DOMESTIC": 300000002,
+                "CROSS":    300000002,
             },
             "mesco_loadtype": {
                 "FCL":  300000000,
                 "LCL":  300000001,
-                "BULK": 300000002,
+                "BULK": 886150003,
+                "RORO": 886150001,
             },
             "mesco_bltype": {
+                "DIRECT": 886150000,
                 "MASTER": 886150001,
                 "HOUSE":  886150002,
-                "DIRECT": 886150003,
             },
         },
 
@@ -400,13 +407,12 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
     "mesco_containers": {
         "lookups": {
             "mesco_masteroperation": "mesco_operation",
-            "mesco_um":              "mesco_um",
-            "mesco_umpackages":      "mesco_um",
+            "mesco_um":              "xollsp_unitsofmeasure",
+            "mesco_umpackages":      "xollsp_unitsofmeasure",
             "mesco_warehouse":       "mesco_warehouse",
         },
         "invalid": {
             "mesco_containerno",
-            "mesco_containertype",
         },
         "field_map": {
             "mesco_containerno": "mesco_containernumber",
@@ -436,7 +442,7 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
             "mesco_conainter":       "mesco_container",
             "mesco_houseoperation":  "mesco_operation",
             "mesco_masteroperation": "mesco_operation",
-            "mesco_umpackages":      "mesco_um",
+            "mesco_umpackages":      "xollsp_unitsofmeasure",
         },
         "invalid": set(),
         "field_map": {},
@@ -479,11 +485,15 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "account":               ["name", "accountnumber"],
     "systemuser":            ["fullname", "name"],
     "transactioncurrency":   ["isocurrencycode", "currencyname", "name"],
-    "xollsp_country":        ["xollsp_name", "name"],
+    # xollsp_country primary name is xollsp_code (full English name, e.g.
+    # "Turkey", "United Arab Emirates"); xollsp_name holds the 2-letter ISO
+    # code (e.g. "TR", "AE").  Try the full name first, then the ISO code.
+    "xollsp_country":        ["xollsp_code", "xollsp_name"],
     "xollsp_incoterm":       ["xollsp_name", "name"],
     "xollsp_commoditygroup": ["xollsp_name", "name"],
     "xollsp_servicedefinition": ["xollsp_name", "name"],
     "xollsp_tariffquote":    ["xollsp_name", "name"],
+    "xollsp_unitsofmeasure": ["xollsp_name", "name"],
     "mesco_operation":       ["mesco_code", "mesco_name", "name"],
 }
 
@@ -506,6 +516,10 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "MESCO",
             "MARINE AND ENGINEERING SERVICES COMPANY",
             "MARINE AND ENGINEERING SERVICES CO",
+        ],
+        "AL KAYAN FOR IMPORT AND EXPORT": [
+            "AL KAYAN",
+            "AL KAYAN FOR IMPORT",
         ],
     },
     "mesco_shippingline": {
@@ -572,6 +586,12 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
         add("MESCO")
         add("MARINE AND ENGINEERING SERVICES COMPANY")
 
+    if logical_name == "account":
+        tokens = [t for t in re.split(r"\W+", base) if len(t) >= 3]
+        if len(tokens) >= 2:
+            add(" ".join(tokens[:3]))
+            add(" ".join(tokens[:2]))
+
     if logical_name == "xollsp_address":
         port = upper.split(",")[0].strip()
         if port and port != upper:
@@ -635,7 +655,12 @@ def _query_lookup_rows(
     select_fields: List[str],
     top: int = 5,
 ) -> List[Dict[str, Any]]:
-    select = ",".join(dict.fromkeys([*select_fields, id_field, name_field]))
+    # Only select the id + the single field being filtered.  Selecting every
+    # candidate name field (e.g. a generic "name") breaks the request with a
+    # 400 when that column does not exist on the target entity (xollsp_*
+    # entities have no "name" attribute), which previously caused valid
+    # lookups like incoterm "CIF" to silently fail and be dropped.
+    select = ",".join(dict.fromkeys([id_field, name_field]))
     query = (
         f"{entity_set}?$filter={filter_expr}"
         f"&$select={select}&$top={top}"
@@ -874,20 +899,23 @@ def _preprocess_payload(
             cleaned[key] = value
             continue
 
-        # --- Picklist string → int ---
-        if key in picklists:
-            if isinstance(value, str):
+        # --- Picklist / choice (option set) → int ---
+        # Prefer the live option-set metadata fetched from Dataverse so the
+        # value maps to the integer that actually exists in the database
+        # (fixes direction/loadtype/transporttype/bltype, and enables
+        # container-type mapping that was previously dropped).  Fall back to
+        # the local hardcoded map only when metadata yields nothing.
+        if key in picklists or is_option_set_field(entity_set, key, client):
+            mapped = resolve_option_value(entity_set, key, value, client)
+            if mapped is None and key in picklists and isinstance(value, str):
                 mapped = picklists[key].get(value.upper())
-                if mapped is not None:
-                    cleaned[key] = mapped
-                else:
-                    logger.warning(
-                        "Unknown picklist value '%s' for field '%s' — field dropped",
-                        value, key,
-                    )
-                continue
-            # Already an integer — pass through unchanged
-            cleaned[key] = value
+            if mapped is not None:
+                cleaned[key] = mapped
+            else:
+                logger.warning(
+                    "Unknown picklist value '%s' for field '%s' — field dropped",
+                    value, key,
+                )
             continue
 
         # --- Truncate string values that exceed Dataverse max length ---

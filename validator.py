@@ -381,15 +381,38 @@ def extract_issue_regex(text: str) -> Tuple[Optional[str], Optional[str]]:
     return clean_value(m.group(1)), m.group(2)
 
 
+def _egypt_context(*parts: Any) -> str:
+    return " ".join(str(p) for p in parts if p).upper()
+
+
 def infer_direction(data: Dict[str, Any]) -> None:
-    if data.get("mesco_direction") is not None:
-        return
-    dest = (data.get("mesco_destination") or "").upper()
-    origin = (data.get("mesco_origin") or "").upper()
-    if any(p in dest for p in EGYPT_PORTS):
+    """Set or correct Import/Export from routing and party addresses.
+
+    Mesco Dataverse: Import = 300000000, Export = 300000001.  The model
+    sometimes swaps these; we always re-derive when Egypt appears in the
+    destination/consignee side vs origin/shipper side.
+    """
+    dest_ctx = _egypt_context(
+        data.get("mesco_destination"),
+        data.get("mesco_consigneeaddress"),
+        data.get("mesco_consigneenamecontactno"),
+        data.get("mesco_country"),
+    )
+    origin_ctx = _egypt_context(
+        data.get("mesco_origin"),
+        data.get("mesco_shipperaddress"),
+        data.get("mesco_shippernamecontactno"),
+        data.get("mesco_countryoforigin"),
+    )
+    dest_egypt = "EGYPT" in dest_ctx or any(p in dest_ctx for p in EGYPT_PORTS)
+    origin_egypt = "EGYPT" in origin_ctx or any(p in origin_ctx for p in EGYPT_PORTS)
+
+    if dest_egypt and not origin_egypt:
+        data["mesco_direction"] = 300000000  # Import
+    elif origin_egypt and not dest_egypt:
+        data["mesco_direction"] = 300000001  # Export
+    elif dest_egypt and data.get("mesco_direction") is None:
         data["mesco_direction"] = 300000000
-    elif any(p in origin for p in EGYPT_PORTS):
-        data["mesco_direction"] = 300000001
 
 
 def validate_and_correct(
