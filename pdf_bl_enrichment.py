@@ -29,13 +29,28 @@ def _visual_page_text(raw_text: str, page_index: int = 1) -> str:
     return m.group(1) if m else body
 
 
+def _is_mtd_document(text: str) -> bool:
+    """Multi-Modal Transport Document (MTD) layout — not a standard ocean B/L."""
+    sample = (text or "")[:12000]
+    return bool(
+        re.search(
+            r"MULTI-?MODAL\s+TRANSPORT\s+DOCUMENT|\bMTD\s+NO\b",
+            sample,
+            re.I,
+        )
+    )
+
+
 def _cargo_pages_text(raw_text: str) -> str:
     """All pages that contain the goods / HS description table."""
     pages = re.split(r"---\s*PAGE\s*\d+\s*---", raw_text or "", flags=re.I)
     parts: List[str] = []
     for body in pages[1:]:
         if re.search(
-            r"DESCRIPTION OF PACKAGES|SAID TO CONTAIN|HS\s*CODE|Continued on Next Sheet|Continued From Previous",
+            r"DESCRIPTION OF PACKAGES|SAID TO CONTAIN|HS\s*CODE|"
+            r"Continued on Next Sheet|Continued From Previous|"
+            r"MULTI-?MODAL\s+TRANSPORT|MTD\s+NO|Particulars above furnished|"
+            r"Kind of Packages and Goods",
             body,
             re.I,
         ):
@@ -206,8 +221,117 @@ def _is_goods_noise(line: str) -> bool:
     return False
 
 
-def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
-    """Goods lines from all cargo pages (continuation sheets included), deduped and capped."""
+_MTD_CARGO_STOP_RE = re.compile(
+    r"^(Particulars above furnished|Shipped on Board|Weight in Kgs Total|"
+    r"SIGNED FOR THE CARRIER|FREIGHT\s+AND\s+CHARGES|Place and Date of Issue|"
+    r"All above particulars|LADEN ON BOARD|CARRIAGE FORWARD)",
+    re.I,
+)
+_MTD_CARGO_SKIP_RE = re.compile(
+    r"^(Container No:?\s*$|A/Seal|C/Seal|M/Seal|Marks and Numbers|"
+    r"Packages and Packaging|Gross Weight|Measurement|Type of Movement|"
+    r"Kind of Packages|QUANTITY\s+GROSS|MODE OF TRANSPORT|"
+    r"MULTI-?MODAL\s+TRANSPORT|MTD\s+No|B/L\s+No|Shipper|Consignee|Notify|"
+    r"Port of Loading|Port of Discharge|Place of Delivery|"
+    r"Pre-carriage|On-carriage|Vessel|Voyage|"
+    r"(?:TLLU|TRKU|MSCU|CSLU|CMAU|SEGU|OOLU|TCNU|HLBU|MSKU|MAEU)[A-Z0-9]{4,7}\s*$|"
+    r"^\d+\s+PALLETS?\s*$|^\d+[,.]\d+\s*KGS|^\d+[,.]?\d*\s*CBM)",
+    re.I,
+)
+_MTD_INLINE_GOODS_RE = re.compile(
+    r"(\d+\s+PALLETS?\s+STC.+?)(?=\s*\d+[,.]\d+\s*KGS|\s*\d+[,.]?\d*\s*CBM|\s*Particulars above)",
+    re.I | re.S,
+)
+
+
+def _cap_cargo_description(description: str) -> str:
+    if len(description) > _CARGO_DESCRIPTION_MAX:
+        return description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
+    return description
+
+
+def extract_mtd_cargo_description_from_pdf(text: str) -> Optional[str]:
+    """
+    Goods narrative from Multi-Modal Transport Documents (MTD).
+
+    MTD layouts place the full cargo text between the container/seal block and
+    the "Particulars above furnished" / "Shipped on Board" footer — not after
+    the standard "SAID TO CONTAIN CARGO" / N/M markers used on ocean B/Ls.
+    """
+    lines_out: List[str] = []
+    seen: set[str] = set()
+
+    def add_line(raw: str) -> None:
+        s = re.sub(r"\s+", " ", (raw or "")).strip()
+        if not s or len(s) < 4:
+            return
+        if _MTD_CARGO_SKIP_RE.match(s):
+            return
+        if _CARGO_NUMERIC_NOISE_RE.match(s):
+            return
+        if re.search(r"\d+[,.]\d+\s*KGS|\d+[,.]?\d*\s*CBM", s, re.I):
+            s = re.sub(r"\s+\d+[,.]\d+\s*KGS.*$", "", s, flags=re.I).strip()
+            if not s or len(s) < 4:
+                return
+        key = re.sub(r"[^A-Z0-9]+", "", s.upper())[:80]
+        if not key or key in seen:
+            return
+        seen.add(key)
+        lines_out.append(s)
+
+    pages = re.split(r"---\s*PAGE\s*\d+\s*---", text or "", flags=re.I)
+    for idx in range(1, len(pages)):
+        bodies = (_visual_page_text(text, idx), pages[idx])
+        for body in bodies:
+            inline = _MTD_INLINE_GOODS_RE.search(body)
+            if inline:
+                chunk = re.sub(r"\s+", " ", inline.group(1)).strip()
+                for part in re.split(
+                    r"(?<=[.)])\s+(?=(?:\(\s*(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|\d+)\s+PALLETS?\s+SAID|[A-Z0-9]))",
+                    chunk,
+                ):
+                    add_line(part)
+
+            start = 0
+            m_stc = re.search(r"\d+\s+PALLETS?\s+STC", body, re.I)
+            m_paren = re.search(
+                r"\(\s*(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|\d+)\s+PALLETS?\s+SAID TO CONTAIN",
+                body,
+                re.I,
+            )
+            if m_stc:
+                start = m_stc.start()
+            elif m_paren:
+                start = m_paren.start()
+            elif inline:
+                continue
+            else:
+                continue
+
+            for ln in body[start:].splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                if _MTD_CARGO_STOP_RE.match(s):
+                    break
+                if _MTD_CARGO_SKIP_RE.match(s):
+                    continue
+                if _is_goods_noise(s):
+                    continue
+                add_line(s)
+
+            if lines_out:
+                break
+        if lines_out:
+            break
+
+    if not lines_out:
+        return None
+    return _cap_cargo_description("\n".join(lines_out))
+
+
+def _extract_standard_cargo_description(text: str) -> Optional[str]:
+    """Goods lines from standard ocean B/L cargo pages."""
     lines_out: List[str] = []
     seen: set[str] = set()
 
@@ -246,10 +370,16 @@ def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
 
     if not lines_out:
         return None
-    description = "\n".join(lines_out)
-    if len(description) > _CARGO_DESCRIPTION_MAX:
-        description = description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
-    return description
+    return _cap_cargo_description("\n".join(lines_out))
+
+
+def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
+    """Goods lines from PDF text — standard B/L and MTD layouts."""
+    mtd_desc = extract_mtd_cargo_description_from_pdf(text) if _is_mtd_document(text) else None
+    std_desc = _extract_standard_cargo_description(text)
+    if mtd_desc and std_desc:
+        return _merge_cargo_description(std_desc, mtd_desc)
+    return mtd_desc or std_desc
 
 
 def _merge_hs_codes(existing: Optional[str], pdf_hs: Optional[str]) -> Optional[str]:

@@ -48,9 +48,9 @@ Fix log (vs previous version):
            master and house payloads — picklist_strings map handles this.
            No change needed, confirmed correct.
 
-  [FIX-6]  Container field_map: mesco_containerno → mesco_containernumber.
-           The real payload already uses mesco_containernumber so no rename
-           fires, but the map is kept for safety.
+  [FIX-6]  Container No: mesco_containerno is a lookup to mesco_containerno entity
+           (primary name = container number).  Resolve to mesco_ContainerNo@odata.bind;
+           do not rename to mesco_containernumber (that text field is optional).
 
   [FIX-7]  _normalize_upload_payload: the real API response wraps everything
            under {"success": true, "data": {...}, "house_data": {...}}.
@@ -69,6 +69,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_field_limits import limit_for as _registry_limit_for
 from dataverse_metadata import is_option_set_field, resolve_option_value
+from crm_output_formatter import is_house_bl_type, prepare_standalone_house_upload
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ _ENTITY_SET_MAP: Dict[str, str] = {
     "xollsp_unitsofmeasure":     "xollsp_unitsofmeasures",
     "mesco_operation":           "mesco_operations",
     "mesco_container":           "mesco_containers",
+    "mesco_containerno":         "mesco_containernos",
     "mesco_warehouse":           "mesco_warehouses",
 }
 
@@ -175,6 +177,7 @@ _ID_FIELD_MAP: Dict[str, str] = {
     "xollsp_unitsofmeasure":     "xollsp_unitsofmeasureid",
     "mesco_operation":           "mesco_operationid",
     "mesco_container":           "mesco_containerid",
+    "mesco_containerno":         "mesco_containernoid",
     "mesco_warehouse":           "mesco_warehouseid",
 }
 
@@ -374,6 +377,25 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
 
         "field_map": {},
 
+        # Date / DateTime fields — OCR/LLM emit assorted formats
+        # ("17/12/2025", "17-DEC-2025", "2025-12-17").  Normalize to ISO
+        # (YYYY-MM-DD) so Dataverse never mis-parses day/month or shifts the
+        # day across time zones.
+        "dates": {
+            "mesco_etdorigin",
+            "mesco_etadestination",
+            "mesco_etaoriign",
+            "mesco_atadestination",
+            "mesco_atdorigin",
+            "mesco_cutoffdate",
+            "mesco_closedate",
+            "mesco_releasedate",
+            "mesco_pickupdate",
+            "mesco_expectedpickupdate",
+            "mesco_flightdate",
+            "mesco_dodate",
+        },
+
         # Decimal fields — the Excel/OCR extract often returns these as
         # strings (e.g. "67.228", "3.0"), which must be coerced to numbers
         # before sending to Dataverse (Edm.Decimal).
@@ -407,16 +429,22 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
     "mesco_containers": {
         "lookups": {
             "mesco_masteroperation": "mesco_operation",
+            "mesco_containerno":     "mesco_containerno",
             "mesco_um":              "xollsp_unitsofmeasure",
             "mesco_umpackages":      "xollsp_unitsofmeasure",
             "mesco_warehouse":       "mesco_warehouse",
         },
         "invalid": {
-            "mesco_containerno",
+            # Nested expand objects from sample JSON — not valid on POST.
+            "mesco_ContainerNo",
+            # mesco_containertype on the container entity is an OPTION SET, but
+            # the extractor produces an ISO string ("40HC", "20GP").  The ISO
+            # value is preserved as text on the operation record's
+            # mesco_containertype, so strip it here to avoid a 400 on the
+            # container POST.
+            "mesco_containertype",
         },
-        "field_map": {
-            "mesco_containerno": "mesco_containernumber",
-        },
+        "field_map": {},
         "decimals": {
             "mesco_noofpackages",
             "mesco_grosskg",
@@ -495,6 +523,7 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "xollsp_tariffquote":    ["xollsp_name", "name"],
     "xollsp_unitsofmeasure": ["xollsp_name", "name"],
     "mesco_operation":       ["mesco_code", "mesco_name", "name"],
+    "mesco_containerno":     ["mesco_containerno"],
 }
 
 # Per-upload cache: (entity logical name, normalized label) → GUID or None
@@ -536,6 +565,106 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
         ],
     },
 }
+
+
+def _parse_decimal(value: Any) -> Optional[float]:
+    """Coerce numbers or strings like '7 PALLETS' / '51.0 kg' to a float."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _normalize_container_number(value: str) -> str:
+    return re.sub(r"\s+", "", (value or "").strip()).upper()
+
+
+_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _normalize_date(value: Any) -> Optional[str]:
+    """Normalize assorted date strings to ISO date-only (YYYY-MM-DD).
+
+    Shipping documents use day-first formats (DD/MM/YYYY); ambiguous numeric
+    dates are interpreted day-first.  Returns None when no date is found.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    # Already ISO (optionally with time) — keep the date portion.
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+
+    # DD MON YYYY  /  MON DD YYYY  (e.g. 17-DEC-2025, DEC 17 2025)
+    m = re.search(r"(\d{1,2})[ \-/]([A-Za-z]{3,})[ \-/](\d{2,4})", text)
+    if m and m.group(2)[:3].upper() in _MONTHS:
+        d, mo, y = int(m.group(1)), _MONTHS[m.group(2)[:3].upper()], int(m.group(3))
+        y = y + 2000 if y < 100 else y
+        if 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    m = re.search(r"([A-Za-z]{3,})[ \-/](\d{1,2})[, \-/]+(\d{2,4})", text)
+    if m and m.group(1)[:3].upper() in _MONTHS:
+        mo, d, y = _MONTHS[m.group(1)[:3].upper()], int(m.group(2)), int(m.group(3))
+        y = y + 2000 if y < 100 else y
+        if 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+
+    # Numeric DD/MM/YYYY or DD-MM-YYYY (day-first) — also handle YYYY/MM/DD.
+    m = re.search(r"(\d{1,4})[/.\-](\d{1,2})[/.\-](\d{1,4})", text)
+    if m:
+        a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if a > 31:  # YYYY-MM-DD style
+            y, mo, d = a, b, c
+        else:       # DD/MM/YYYY (day-first)
+            d, mo, y = a, b, c
+            y = y + 2000 if y < 100 else y
+            if mo > 12 and d <= 12:  # value was actually MM/DD — swap
+                d, mo = mo, d
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+
+    return None
+
+
+def _containertype_option_from_iso(iso: Optional[str]) -> int:
+    """Map ISO container codes (40HC, 20GP, …) to mesco_containerno picklist values."""
+    text = (iso or "").upper()
+    if "RF" in text or "REEFER" in text:
+        return 100000002
+    if "HC" in text or "HQ" in text:
+        return 100000001
+    return 100000000
+
+
+def _um_hint_from_container_type(container_type: Optional[str]) -> Optional[str]:
+    if not container_type:
+        return None
+    text = str(container_type).upper()
+    if "40" in text:
+        return "40 FT"
+    if "20" in text:
+        return "20 FT"
+    return None
 
 
 def _odata_escape(value: str) -> str:
@@ -779,6 +908,79 @@ def _resolve_lookup(
     return None
 
 
+def _um_label_variants(container_type_hint: Optional[str]) -> List[str]:
+    """Ordered U/M name candidates for a container type (xollsp_unitsofmeasure)."""
+    text = (container_type_hint or "").upper()
+    is_40 = "40" in text
+    is_hc = "HC" in text or "HQ" in text or "HIGH CUBE" in text
+    if is_40:
+        return [
+            "40 HC" if is_hc else "40 FT",
+            "40 FT", "40HC", "40 HC", "40HQ", "40 HQ",
+            "40'", "40FT", "40", "40 DV", "40DC",
+        ]
+    return ["20 FT", "20FT", "20'", "20", "20 DV", "20DC", "20 GP"]
+
+
+def _resolve_container_um(
+    client: DataverseClientService,
+    container_type_hint: Optional[str],
+) -> Optional[str]:
+    for label in _um_label_variants(container_type_hint):
+        guid = _resolve_lookup(client, "xollsp_unitsofmeasure", label)
+        if guid:
+            return guid
+    return None
+
+
+def _resolve_containerno_lookup(
+    client: DataverseClientService,
+    name_value: str,
+    container_type_hint: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve or create a mesco_containerno record for a container number."""
+    normalized = _normalize_container_number(name_value)
+    if not normalized:
+        return None
+
+    for candidate in (normalized, name_value.strip()):
+        guid = _resolve_lookup(client, "mesco_containerno", candidate)
+        if guid:
+            return guid
+
+    payload: Dict[str, Any] = {
+        "mesco_containerno": normalized,
+        "mesco_containertype": _containertype_option_from_iso(container_type_hint),
+    }
+    # U/M is application-required (form level) but optional at the Web API level.
+    # Bind it when we can resolve it; otherwise create the record without it so
+    # the container number lookup is never dropped just because the U/M is unknown.
+    um_guid = _resolve_container_um(client, container_type_hint)
+    if um_guid:
+        payload[f"{_NAV_PROPERTY_MAP['mesco_umcontainer']}@odata.bind"] = (
+            f"/{_entity_set_name('xollsp_unitsofmeasure')}({um_guid})"
+        )
+    else:
+        logger.info(
+            "No U/M resolved for new container no '%s' (type=%s) — creating without U/M",
+            normalized,
+            container_type_hint,
+        )
+    try:
+        guid = _create_entity(client, "mesco_containernos", payload)
+        cache_key = ("mesco_containerno", _normalize_lookup_label(normalized))
+        _LOOKUP_CACHE[cache_key] = guid
+        logger.info("Created container no '%s' → %s", normalized, guid)
+        return guid
+    except Exception as exc:
+        logger.warning(
+            "Failed to create container no '%s': %s",
+            normalized,
+            exc,
+        )
+        return None
+
+
 def clear_lookup_cache() -> None:
     """Reset lookup cache (useful between tests or batch uploads)."""
     _LOOKUP_CACHE.clear()
@@ -822,6 +1024,7 @@ def _preprocess_payload(
     invalid: Set    = schema.get("invalid", set())
     field_map: Dict = schema.get("field_map", {})
     decimals: Set   = schema.get("decimals", set())
+    dates: Set      = schema.get("dates", set())
     picklists: Dict = schema.get("picklist_strings", {})
     max_length: Dict = schema.get("max_length", {})
 
@@ -864,7 +1067,14 @@ def _preprocess_payload(
         if key in lookups and isinstance(value, str):
             target_logical = lookups[key]
             if client:
-                guid = _resolve_lookup(client, target_logical, value)
+                if target_logical == "mesco_containerno":
+                    guid = _resolve_containerno_lookup(
+                        client,
+                        value,
+                        payload.get("mesco_containertype"),
+                    )
+                else:
+                    guid = _resolve_lookup(client, target_logical, value)
                 if guid:
                     target_set = _entity_set_name(target_logical)
                     nav_key    = _NAV_PROPERTY_MAP.get(key, key)  # [FIX-9] PascalCase
@@ -884,19 +1094,32 @@ def _preprocess_payload(
         # not be re-processed here; they fall through to the picklist or
         # pass-through blocks below.
 
+        # --- Date / DateTime normalization → ISO date-only ---
+        if key in dates:
+            iso = _normalize_date(value)
+            if iso:
+                cleaned[key] = iso
+            elif isinstance(value, str):
+                logger.warning(
+                    "Could not parse date field %s='%s' — field dropped",
+                    key, value,
+                )
+            else:
+                cleaned[key] = value
+            continue
+
         # --- Decimal coercion ---
         if key in decimals:
-            if isinstance(value, str):
-                try:
-                    cleaned[key] = float(value) if "." in value else int(value)
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Could not coerce decimal field %s='%s' — field dropped",
-                        key, value,
-                    )
-                continue
-            # Already numeric — pass through
-            cleaned[key] = value
+            parsed = _parse_decimal(value)
+            if parsed is not None:
+                cleaned[key] = int(parsed) if parsed.is_integer() else parsed
+            elif isinstance(value, str):
+                logger.warning(
+                    "Could not coerce decimal field %s='%s' — field dropped",
+                    key, value,
+                )
+            else:
+                cleaned[key] = value
             continue
 
         # --- Picklist / choice (option set) → int ---
@@ -1095,6 +1318,9 @@ def upload_crm_json(
     payload = _clean_odata_meta(crm_data)
     payload = _strip_null(payload)
 
+    if is_house_bl_type(payload.get("mesco_bltype")):
+        prepare_standalone_house_upload(payload)
+
     result: UploadResult = {
         "master_id":  None,
         "houses":     [],
@@ -1104,17 +1330,32 @@ def upload_crm_json(
 
     # Extract nested arrays BEFORE building the master payload so they are not
     # passed as unknown fields to the master operation POST.
-    houses: List[Dict]     = payload.pop("mesco_Operation_mesco_Operation_mesco_Operation", [])
-    containers: List[Dict] = payload.pop("mesco_Container_MasterOperation_mesco_Operation", [])
-    cargo_list: List[Dict] = payload.pop("mesco_Cargo_MasterOperation_mesco_Operation", [])
+    houses: List[Dict]     = payload.pop("mesco_Operation_mesco_Operation_mesco_Operation", []) or []
+    containers: List[Dict] = payload.pop("mesco_Container_MasterOperation_mesco_Operation", []) or []
+    cargo_list: List[Dict] = payload.pop("mesco_Cargo_MasterOperation_mesco_Operation", []) or []
+    house_cargo: List[Dict] = payload.pop("mesco_Cargo_HouseOperation_mesco_Operation", []) or []
+    if house_cargo:
+        cargo_list = house_cargo if not cargo_list else cargo_list + house_cargo
+
+    is_standalone_house = is_house_bl_type(payload.get("mesco_bltype")) and not houses
+    parent_master_bind = payload.get(_lookup_bind_key("mesco_Operation"))
+    parent_master_id: Optional[str] = None
+    if isinstance(parent_master_bind, str):
+        parent_match = re.search(r"\(([^)]+)\)", parent_master_bind)
+        if parent_match:
+            parent_master_id = parent_match.group(1)
 
     # ------------------------------------------------------------------
-    # 1. Master operation
+    # 1. Root operation (master or standalone house)
     # ------------------------------------------------------------------
     master_fields = _preprocess_payload(payload, _ENTITY, client)
     master_id     = _create_entity(client, _ENTITY, master_fields)
     result["master_id"] = master_id
-    logger.info("Created master operation: %s", master_id)
+    logger.info(
+        "Created %s operation: %s",
+        "house" if is_standalone_house else "master",
+        master_id,
+    )
 
     # ------------------------------------------------------------------
     # 2. House operations  (linked to master via mesco_Operation lookup)
@@ -1156,6 +1397,16 @@ def upload_crm_json(
         container_clean = _clean_odata_meta(container)
         container_clean = _strip_null(container_clean)
 
+        # Ensure the Container No lookup (mesco_containerno) is populated from the
+        # container number, even when the extractor only produced the text field.
+        if not container_clean.get("mesco_containerno"):
+            ctn_no = (
+                container_clean.get("mesco_containernumber")
+                or container_clean.get("mesco_name")
+            )
+            if ctn_no:
+                container_clean["mesco_containerno"] = ctn_no
+
         container_clean[_lookup_bind_key("mesco_MasterOperation")] = (
             f"/{_ENTITY}({master_id})"
         )
@@ -1175,8 +1426,20 @@ def upload_crm_json(
         })
         logger.info("  Container [%d] %s → %s", idx, container_no, ctn_id)
 
-    # Link each container to every house on the operation (shared equipment).
-    if result["houses"] and result["containers"]:
+    # Standalone house: associate containers on the house operation (N:N).
+    if is_standalone_house and result["containers"]:
+        for ctn_info in result["containers"]:
+            try:
+                _link_container_to_house(client, master_id, ctn_info["id"])
+            except Exception as exc:
+                logger.warning(
+                    "Container %s ↔ standalone house association failed: %s",
+                    ctn_info.get("container_no"),
+                    exc,
+                )
+
+    # Link each container to every house on a master operation (shared equipment).
+    elif result["houses"] and result["containers"]:
         for house_info in result["houses"]:
             for ctn_info in result["containers"]:
                 try:
@@ -1197,16 +1460,26 @@ def upload_crm_json(
         cargo_clean = _clean_odata_meta(cargo)
         cargo_clean = _strip_null(cargo_clean)
 
-        # Always link to master
-        cargo_clean[_lookup_bind_key("mesco_MasterOperation")] = (
-            f"/{_ENTITY}({master_id})"
-        )
-        # Single-house shipments link cargo to the house; consolidated masters keep cargo on master only.
-        if not multi_house and idx < len(result["houses"]):
-            house_id = result["houses"][idx]["id"]
+        if is_standalone_house:
+            # House B/L uploads must link cargo to the house operation so the
+            # Houses & Cargos grid can resolve DescriptionOfGoods.
             cargo_clean[_lookup_bind_key("mesco_HouseOperation")] = (
-                f"/{_ENTITY}({house_id})"
+                f"/{_ENTITY}({master_id})"
             )
+            if parent_master_id:
+                cargo_clean[_lookup_bind_key("mesco_MasterOperation")] = (
+                    f"/{_ENTITY}({parent_master_id})"
+                )
+        else:
+            cargo_clean[_lookup_bind_key("mesco_MasterOperation")] = (
+                f"/{_ENTITY}({master_id})"
+            )
+            # Single-house shipments link cargo to the house; consolidated masters keep cargo on master only.
+            if not multi_house and idx < len(result["houses"]):
+                house_id = result["houses"][idx]["id"]
+                cargo_clean[_lookup_bind_key("mesco_HouseOperation")] = (
+                    f"/{_ENTITY}({house_id})"
+                )
         # Link to the matching container
         if idx < len(result["containers"]):
             ctn_id = result["containers"][idx]["id"]

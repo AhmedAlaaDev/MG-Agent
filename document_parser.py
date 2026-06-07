@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
+from config import settings
 from pdf_isaly_draft_bl import (
     detect_isaly_draft_multi_bl,
     extract_isaly_draft_records,
@@ -176,9 +177,13 @@ def parse_document_intelligently(
     """
     quality: Dict[str, Any] = {
         "parser": "intelligent",
+        **settings.llm_meta(),
+        "llm_attempted": False,
+        "per_page_llm_calls": 0,
+        "fallback_used": False,
+        # Legacy keys kept for downstream consumers
         "azure_attempted": False,
         "per_page_azure_calls": 0,
-        "fallback_used": False,
     }
     azure_warnings: List[str] = []
     document_layout = "unknown"
@@ -203,7 +208,9 @@ def parse_document_intelligently(
 
         try:
             azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
+            quality["llm_attempted"] = True
             quality["azure_attempted"] = True
+            quality["per_page_llm_calls"] = len(canonical)
             quality["per_page_azure_calls"] = len(canonical)
         except Exception as exc:
             logger.warning("Per-page Azure enrichment skipped: %s", exc)
@@ -215,6 +222,7 @@ def parse_document_intelligently(
         azure_records: List[Dict[str, Any]] = []
         try:
             payload = extract_records_with_azure_openai(raw_text)
+            quality["llm_attempted"] = True
             quality["azure_attempted"] = True
             document_layout = payload.get("document_layout") or "unknown"
             azure_records = [dict(r) for r in (payload.get("records") or [])]
@@ -239,9 +247,10 @@ def parse_document_intelligently(
 
         azure_records = dedupe_records_by_bl(azure_records)
         azure_records = finalize_multi_bl_records(azure_records, raw_text)
-        method = "azure_intelligent"
+        prefix = settings.llm_extraction_prefix
+        method = f"{prefix}_intelligent"
         if quality.get("fallback_used"):
-            method = "azure_intelligent_with_fallback"
+            method = f"{prefix}_intelligent_with_fallback"
 
     if not azure_records:
         quality["parser"] = "failed"

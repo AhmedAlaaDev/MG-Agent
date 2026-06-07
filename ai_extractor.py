@@ -255,6 +255,10 @@ suffix noise. Use null when not confidently present.
   Strip leading "1 x ", "2x", "N X " etc. — that count belongs in cr401_totalteus.
 - Packages: count + unit verbatim from the goods row ("7 PALLETS", "101 ROLLS",
   "9 PACKAGES", "243 CARTONS"). OCR may show "ALLETS" for "PALLETS" — infer.
+- MULTI-MODAL TRANSPORT DOCUMENT (MTD): capture the FULL goods narrative between
+  the container/seal block and "Particulars above furnished" / "Shipped on Board".
+  Include pallet/drum counts, product name, PO/invoice refs, material number, batch,
+  origin — as one coherent mesco_cargodescription (dedupe repeated lines).
 - Weights/CBM: from the goods table on the same page (or continuation pages for one B/L).
 - Vessel/voyage: split correctly. Port of loading -> mesco_origin; discharge -> mesco_destination.
 - Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
@@ -314,6 +318,38 @@ class AzureClient:
         return cls._client
 
 
+class GeminiClient:
+    _client = None
+
+    @classmethod
+    def get_client(cls):
+        if cls._client is not None:
+            return cls._client
+
+        try:
+            from google import genai
+        except Exception as exc:
+            raise ImportError(
+                "Google Gen AI SDK is not available. Install: pip install google-genai"
+            ) from exc
+
+        api_key = (settings.gemini_api_key or "").strip()
+        if not api_key:
+            raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
+
+        cls._client = genai.Client(api_key=api_key)
+        return cls._client
+
+
+def _parse_json_response(content: str, provider: str) -> Dict[str, Any]:
+    if not content:
+        raise ValueError(f"{provider} returned empty content.")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{provider} returned invalid JSON: {exc}") from exc
+
+
 def _call_azure_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     client = AzureClient.get_client()
     response = client.chat.completions.create(
@@ -325,13 +361,44 @@ def _call_azure_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str
         ],
         response_format={"type": "json_schema", "json_schema": schema},
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("Azure OpenAI returned empty content.")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Azure OpenAI returned invalid JSON: {exc}") from exc
+    content = response.choices[0].message.content or ""
+    return _parse_json_response(content, "Azure OpenAI")
+
+
+def _call_gemini_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    from google.genai import types
+
+    client = GeminiClient.get_client()
+    inner_schema = schema.get("schema") or schema
+    # Gemini Developer API cannot use our OpenAI-style schema (nullable unions,
+    # additionalProperties). JSON mode + schema in the prompt matches Azure output.
+    schema_hint = json.dumps(inner_schema, indent=2)
+    combined_system = (
+        f"{system}\n\n"
+        "Return ONLY valid JSON matching this schema (use null for missing fields):\n"
+        f"{schema_hint}"
+    )
+    response = client.models.generate_content(
+        model=settings.gemini_model,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=combined_system,
+            temperature=0,
+            response_mime_type="application/json",
+        ),
+    )
+    content = (response.text or "").strip()
+    return _parse_json_response(content, "Gemini")
+
+
+def _call_llm_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    if settings.uses_gemini:
+        return _call_gemini_json(system, user, schema)
+    return _call_azure_json(system, user, schema)
+
+
+def _llm_label() -> str:
+    return "Gemini" if settings.uses_gemini else "Azure OpenAI"
 
 
 def extract_records_with_azure_openai(
@@ -352,7 +419,16 @@ def extract_records_with_azure_openai(
     if page_scope:
         user_prefix = "Extract the Bill of Lading on this page only:\n\n"
 
-    return _call_azure_json(system, user_prefix + safe_text, MULTI_BL_JSON_SCHEMA)
+    return _call_llm_json(system, user_prefix + safe_text, MULTI_BL_JSON_SCHEMA)
+
+
+def extract_records_with_llm(
+    extracted_text: str,
+    *,
+    page_scope: bool = False,
+) -> Dict[str, Any]:
+    """Provider-agnostic alias (routes via LLM_PROVIDER in .env)."""
+    return extract_records_with_azure_openai(extracted_text, page_scope=page_scope)
 
 
 def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
@@ -360,7 +436,7 @@ def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
     payload = extract_records_with_azure_openai(extracted_text)
     records = payload.get("records") or []
     if not records:
-        raise ValueError("Azure OpenAI returned no B/L records.")
+        raise ValueError(f"{_llm_label()} returned no B/L records.")
     first = dict(records[0])
     if payload.get("warnings"):
         first.setdefault("warnings", [])

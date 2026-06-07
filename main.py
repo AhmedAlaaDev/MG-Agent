@@ -11,11 +11,12 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, File, Query, UploadFile, Body
+from fastapi import FastAPI, File, Form, Query, UploadFile, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
@@ -31,7 +32,11 @@ from pdf_batch_processor import process_pdf_bytes
 from crm_mapper import map_crm_operation_to_records
 from config import settings
 from validator import validate_and_correct
-from crm_output_formatter import records_to_house_json, records_to_master_json
+from crm_output_formatter import (
+    apply_bl_type_to_crm_payload,
+    records_to_house_json,
+    records_to_master_json,
+)
 from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
 from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
 from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
@@ -39,6 +44,13 @@ from pdf_consolidated_lcl import (
     is_consolidated_lcl_multi_hbl,
     parse_consolidated_lcl_multi_hbl,
 )
+
+
+class BlTypeQuery(str, Enum):
+    """Dynamics mesco_bltype: master (886150001) or house (886150002)."""
+
+    master = "master"
+    house = "house"
 
 
 app = FastAPI(
@@ -284,9 +296,12 @@ async def health():
     return {
         "status": "ok",
         "version": "4.0.0",
+        **settings.llm_meta(),
+        "azure_in_use": not settings.uses_gemini,
         "azure_openai_configured": bool(
             settings.azure_openai_endpoint and settings.azure_openai_api_key
         ),
+        "gemini_configured": bool(settings.gemini_api_key),
         "azure_openai_deployment": settings.azure_openai_deployment or None,
         "dataverse_configured": bool(
             os.environ.get("AZURE_APP_API_URL")
@@ -303,6 +318,7 @@ class CrmExtractRequest(BaseModel):
 
 class ExtractRequest(BaseModel):
     ocr_text: str
+    bl_type: BlTypeQuery = BlTypeQuery.master
 
 
 class ExtractResponse(BaseModel):
@@ -379,10 +395,22 @@ class DataverseUploadResponse(BaseModel):
 )
 async def upload_to_dataverse(
     file: UploadFile = File(..., description="CRM JSON file (the file downloaded with ?download=true)"),
+    bl_type: BlTypeQuery = Query(
+        BlTypeQuery.master,
+        description="B/L type for the created operation: master or house (sets mesco_bltype on upload)",
+    ),
 ):
     try:
         content = await file.read()
         crm_data = json.loads(content.decode("utf-8"))
+        if isinstance(crm_data, dict):
+            masters = crm_data.get("masters")
+            if isinstance(masters, list):
+                for m in masters:
+                    if isinstance(m, dict):
+                        apply_bl_type_to_crm_payload(m, bl_type.value)
+            else:
+                apply_bl_type_to_crm_payload(crm_data, bl_type.value)
         result = upload_crm_json(crm_data)
         return DataverseUploadResponse(success=True, result=result)
     except json.JSONDecodeError:
@@ -399,8 +427,14 @@ async def upload_to_dataverse(
 )
 async def upload_to_dataverse_json(
     payload: Dict[str, Any] = Body(..., description="CRM JSON structure (the 'data' field from extract endpoints)"),
+    bl_type: BlTypeQuery = Query(
+        BlTypeQuery.master,
+        description="B/L type for the created operation: master or house (sets mesco_bltype on upload)",
+    ),
 ):
     try:
+        if isinstance(payload, dict):
+            apply_bl_type_to_crm_payload(payload, bl_type.value)
         result = upload_crm_json(payload)
         return DataverseUploadResponse(success=True, result=result)
     except Exception as exc:
@@ -415,7 +449,7 @@ def process_single_record(record_text: str, source_info: str) -> Dict[str, Any]:
             raise ValueError("No records extracted from spreadsheet row text.")
         validated = parse_result.records[0]
         validated["_source_info"] = source_info
-        validated["extraction_method"] = validated.get("extraction_method") or "azure_intelligent_record"
+        validated["extraction_method"] = validated.get("extraction_method") or f"{settings.llm_extraction_prefix}_intelligent_record"
         return validated
     except Exception as exc:
         return {"_source_info": source_info, "_error": str(exc)}
@@ -427,7 +461,7 @@ def process_workbook_with_azure(raw_text: str, extracted: Dict[str, Any], extrac
     if not parse_result.records:
         raise ValueError("Intelligent parser returned no B/L records.")
     validated = parse_result.records[0]
-    validated["extraction_method"] = validated.get("extraction_method") or "azure_intelligent_workbook"
+    validated["extraction_method"] = validated.get("extraction_method") or f"{settings.llm_extraction_prefix}_intelligent_workbook"
     validated["source_extraction_method"] = extracted.get("method", "unknown")
     validated["extraction_quality"] = {**extraction_quality, **parse_result.quality}
     validated["_document_layout"] = parse_result.document_layout
@@ -886,12 +920,26 @@ def _direct_spreadsheet_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     "/extract/file",
     response_model=ExtractResponse,
     summary="Extract from any supported file (PDF, XLSX, XLS, CSV)",
-    description="Upload a PDF, Excel, or CSV file to extract B/L data. Set download=true to get the CRM JSON as a file for later upload to /upload/dataverse.",
+    description=(
+        "Upload a PDF, Excel, or CSV file to extract B/L data. "
+        "Choose **bl_type** (master or house) in the form below."
+    ),
+    tags=["Extraction"],
 )
 async def extract_file(
     file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
-    post_to_dataverse: bool = Query(True, description="Automatically upload extracted data to Dynamics 365 Dataverse"),
-    download: bool = Query(False, description="Download the CRM JSON as a file instead of returning the normal response"),
+    bl_type: BlTypeQuery = Form(
+        BlTypeQuery.master,
+        description="B/L type: master (886150001) or house (886150002)",
+    ),
+    post_to_dataverse: bool = Form(
+        True,
+        description="Automatically upload extracted data to Dynamics 365 Dataverse",
+    ),
+    download: bool = Form(
+        False,
+        description="Download the CRM JSON as a file instead of returning the normal response",
+    ),
 ):
     try:
         file_bytes = await file.read()
@@ -968,15 +1016,16 @@ async def extract_file(
                         download,
                         house_output={"value": []},
                         crm_records=crm_masters,
+                        bl_type=bl_type,
                     )
                 extracted_records = parse_result.records
                 crm_output = records_to_master_json(extracted_records)
                 house_output = records_to_house_json(extracted_records)
-                return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output)
+                return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output, bl_type=bl_type)
 
             crm_output = records_to_master_json(extracted_records)
             house_output = records_to_house_json(extracted_records)
-            return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output)
+            return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output, bl_type=bl_type)
         
         # No individual records: future/unknown Excel layouts go to Azure as one workbook.
         extraction_quality["record_routing"] = {
@@ -1021,6 +1070,7 @@ async def extract_file(
                     post_to_dataverse,
                     download,
                     house_output,
+                    bl_type=bl_type,
                 )
 
         if is_export_lcl_manifest(raw_text):
@@ -1058,6 +1108,7 @@ async def extract_file(
                     post_to_dataverse,
                     download,
                     house_output,
+                    bl_type=bl_type,
                 )
 
         if is_consolidated_lcl_multi_hbl(raw_text):
@@ -1096,6 +1147,7 @@ async def extract_file(
                     post_to_dataverse,
                     download,
                     house_output,
+                    bl_type=bl_type,
                 )
 
         parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
@@ -1131,6 +1183,7 @@ async def extract_file(
                 download,
                 house_output={"value": []},
                 crm_records=crm_masters,
+                bl_type=bl_type,
             )
 
         validated = parse_result.records[0]
@@ -1151,7 +1204,7 @@ async def extract_file(
             crm_output = records_to_master_json(extracted_records)
             house_output = records_to_house_json(extracted_records)
 
-        return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output)
+        return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output, bl_type=bl_type)
     except Exception as exc:
         return ExtractResponse(success=False, error=str(exc))
 
@@ -1164,10 +1217,18 @@ def _build_response(
     download: bool = False,
     house_output: Optional[Dict[str, Any]] = None,
     crm_records: Optional[List[Dict[str, Any]]] = None,
+    bl_type: str = "master",
 ) -> Any:
     dataverse_result = None
     dataverse_error = None
     masters = crm_records if crm_records else None
+
+    if isinstance(crm_output, dict) and crm_output:
+        apply_bl_type_to_crm_payload(crm_output, getattr(bl_type, "value", bl_type))
+    if masters:
+        for m in masters:
+            if isinstance(m, dict):
+                apply_bl_type_to_crm_payload(m, getattr(bl_type, "value", bl_type))
 
     # Final defensive guard: enforce Dataverse string-column length caps on
     # every master payload before either Dataverse POST or response download.
@@ -1205,6 +1266,13 @@ def _build_response(
                 "Content-Disposition": f'attachment; filename="crm_output.json"',
                 "Content-Length": str(len(json_bytes)),
             },
+        )
+
+    if isinstance(extraction_quality, dict):
+        resolved_bl_type = getattr(bl_type, "value", bl_type)
+        extraction_quality["bl_type"] = resolved_bl_type
+        extraction_quality["mesco_bltype"] = (
+            886150002 if resolved_bl_type == "house" else 886150001
         )
 
     return ExtractResponse(
@@ -1293,7 +1361,7 @@ async def test_pdf_batch(
     )
 
 
-@app.post("/extract/text", response_model=ExtractResponse)
+@app.post("/extract/text", response_model=ExtractResponse, tags=["Extraction"])
 async def extract_text(request: ExtractRequest):
     try:
         raw_text = request.ocr_text
@@ -1306,6 +1374,8 @@ async def extract_text(request: ExtractRequest):
 
         if len(parse_result.records) >= 2:
             crm_masters = [records_to_master_json([v]) for v in parse_result.records]
+            for m in crm_masters:
+                apply_bl_type_to_crm_payload(m, request.bl_type.value)
             return ExtractResponse(
                 success=True,
                 data=crm_masters[0],
@@ -1316,6 +1386,7 @@ async def extract_text(request: ExtractRequest):
 
         validated = parse_result.records[0]
         crm_output = records_to_master_json([validated])
+        apply_bl_type_to_crm_payload(crm_output, request.bl_type.value)
         return ExtractResponse(
             success=True,
             data=crm_output,
@@ -1329,29 +1400,111 @@ async def extract_text(request: ExtractRequest):
 @app.post(
     "/extract/pdf",
     response_model=ExtractResponse,
-    summary="Extract from PDF file",
-    description="Upload a PDF file to extract B/L data. Use download=true to get the CRM JSON as a downloadable file.",
+    summary="Extract from PDF (Master or House B/L)",
+    description=(
+        "Upload a PDF and extract B/L data. Use **bl_type** to post as "
+        "**master** (886150001) or **house** (886150002) in Dynamics."
+    ),
+    tags=["Extraction"],
 )
 async def extract_pdf(
     file: UploadFile = File(..., description="PDF file to extract"),
-    post_to_dataverse: bool = Query(True, description="Automatically upload extracted data to Dynamics 365 Dataverse"),
-    download: bool = Query(False, description="Download the CRM JSON as a file instead of returning the normal response"),
+    bl_type: BlTypeQuery = Query(
+        BlTypeQuery.master,
+        title="B/L Type",
+        description="Post as Master B/L (886150001) or House B/L (886150002)",
+    ),
+    post_to_dataverse: bool = Query(
+        True,
+        description="Automatically upload extracted data to Dynamics 365 Dataverse",
+    ),
+    download: bool = Query(
+        False,
+        description="Download the CRM JSON as a file instead of returning the normal response",
+    ),
 ):
-    return await extract_file(file, post_to_dataverse=post_to_dataverse, download=download)
+    return await extract_file(
+        file,
+        bl_type=bl_type,
+        post_to_dataverse=post_to_dataverse,
+        download=download,
+    )
 
 
 @app.post(
     "/extract/excel",
     response_model=ExtractResponse,
     summary="Extract from Excel file",
-    description="Upload an Excel file (.xlsx, .xls, .csv) to extract B/L data. Use download=true to get the CRM JSON as a downloadable file.",
+    description="Upload an Excel file (.xlsx, .xls, .csv). Choose **bl_type** (master or house) in the form.",
+    tags=["Extraction"],
 )
 async def extract_excel(
     file: UploadFile = File(..., description="Excel or CSV file (.xlsx, .xls, .csv)"),
-    post_to_dataverse: bool = Query(True, description="Automatically upload extracted data to Dynamics 365 Dataverse"),
-    download: bool = Query(False, description="Download the CRM JSON as a file instead of returning the normal response"),
+    bl_type: BlTypeQuery = Form(
+        BlTypeQuery.master,
+        description="B/L type: master (886150001) or house (886150002)",
+    ),
+    post_to_dataverse: bool = Form(
+        True,
+        description="Automatically upload extracted data to Dynamics 365 Dataverse",
+    ),
+    download: bool = Form(
+        False,
+        description="Download the CRM JSON as a file instead of returning the normal response",
+    ),
 ):
-    return await extract_file(file, post_to_dataverse=post_to_dataverse, download=download)
+    return await extract_file(
+        file,
+        bl_type=bl_type,
+        post_to_dataverse=post_to_dataverse,
+        download=download,
+    )
+
+
+@app.post(
+    "/extract/master",
+    response_model=ExtractResponse,
+    summary="Extract B/L as Master operation",
+    description=(
+        "Extract from PDF, Excel, or CSV and stamp **mesco_bltype = 886150001 (Master)** "
+        "before upload. Same pipeline as POST /extract/file?bl_type=master."
+    ),
+    tags=["Extraction — B/L type"],
+)
+async def extract_as_master(
+    file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
+    post_to_dataverse: bool = Form(True, description="Automatically upload to Dynamics 365 Dataverse"),
+    download: bool = Form(False, description="Download CRM JSON instead of JSON response"),
+):
+    return await extract_file(
+        file,
+        bl_type=BlTypeQuery.master,
+        post_to_dataverse=post_to_dataverse,
+        download=download,
+    )
+
+
+@app.post(
+    "/extract/house",
+    response_model=ExtractResponse,
+    summary="Extract B/L as House operation",
+    description=(
+        "Extract from PDF, Excel, or CSV and stamp **mesco_bltype = 886150002 (House)** "
+        "before upload. Same pipeline as POST /extract/file?bl_type=house."
+    ),
+    tags=["Extraction — B/L type"],
+)
+async def extract_as_house(
+    file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
+    post_to_dataverse: bool = Form(True, description="Automatically upload to Dynamics 365 Dataverse"),
+    download: bool = Form(False, description="Download CRM JSON instead of JSON response"),
+):
+    return await extract_file(
+        file,
+        bl_type=BlTypeQuery.house,
+        post_to_dataverse=post_to_dataverse,
+        download=download,
+    )
 
 
 class CompareRequest(BaseModel):

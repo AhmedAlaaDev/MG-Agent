@@ -46,6 +46,30 @@ class Settings(BaseSettings):
     excel_max_cols_per_sheet: int = Field(default=80, alias="EXCEL_MAX_COLS_PER_SHEET")
     excel_max_cell_chars: int = Field(default=500, alias="EXCEL_MAX_CELL_CHARS")
 
+    # LLM backend: "azure" (default) or "gemini"
+    llm_provider: str = Field(default="azure", alias="LLM_PROVIDER")
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+
+    @property
+    def uses_gemini(self) -> bool:
+        return (self.llm_provider or "azure").strip().lower() == "gemini"
+
+    @property
+    def active_llm_model(self) -> str:
+        return self.gemini_model if self.uses_gemini else self.azure_openai_deployment
+
+    @property
+    def llm_extraction_prefix(self) -> str:
+        """Short tag used in extraction_method metadata (gemini vs azure)."""
+        return "gemini" if self.uses_gemini else "azure"
+
+    def llm_meta(self) -> dict[str, str]:
+        return {
+            "llm_provider": (self.llm_provider or "azure").strip().lower(),
+            "llm_model": self.active_llm_model,
+        }
+
     class Config:
         env_file = ".env"
         extra = "ignore"

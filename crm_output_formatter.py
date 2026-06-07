@@ -37,6 +37,46 @@ def _has(val: Any) -> bool:
     return val is not None and val != "" and val != [] and val != {}
 
 
+def _parse_numeric(value: Any) -> Optional[float]:
+    """Extract a numeric value from plain numbers or strings like '7 PALLETS' / '51.0 kg'."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _set_numeric_field(target: Dict[str, Any], key: str, value: Any) -> None:
+    parsed = _parse_numeric(value)
+    if parsed is not None:
+        target[key] = int(parsed) if parsed.is_integer() else round(parsed, 3)
+
+
+def _normalize_container_number(value: Any) -> Optional[str]:
+    if not _has(value):
+        return None
+    return re.sub(r"\s+", "", str(value).strip()).upper()
+
+
+def _um_hint_from_container_type(container_type: Any) -> Optional[str]:
+    if not _has(container_type):
+        return None
+    text = str(container_type).upper()
+    if "40" in text:
+        return "40 FT"
+    if "20" in text:
+        return "20 FT"
+    return None
+
+
 def _pick(src: Dict[str, Any], *fields: str) -> Dict[str, Any]:
     return {k: src[k] for k in fields if _has(src.get(k))}
 
@@ -321,9 +361,9 @@ def _infer_totals_from_cargo_description(desc: Any) -> Dict[str, Any]:
     total_m = re.search(r"\bTOTAL\s+(\d+)\b", text, re.I)
     if total_m:
         out["cr401_totalpackages"] = int(total_m.group(1))
-    pallets_m = re.search(r"(\d+)\s+WOODEN\s+PALLETS", text, re.I)
+    pallets_m = re.search(r"(\d+)\s+(?:WOODEN\s+)?PALLETS", text, re.I)
     if pallets_m and "cr401_totalpackages" not in out:
-        out["cr401_totalpackages"] = f"{pallets_m.group(1)} PALLETS"
+        out["cr401_totalpackages"] = int(pallets_m.group(1))
     return out
 
 
@@ -480,10 +520,9 @@ def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
             str(line["mesco_descriptionofgoods"]),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
-    if _has(line.get("mesco_noofpackages")):
-        cargo["mesco_noofpackages"] = line["mesco_noofpackages"]
-    if _has(line.get("mesco_grosskg")):
-        cargo["mesco_grosskg"] = line["mesco_grosskg"]
+    _set_numeric_field(cargo, "mesco_noofpackages", line.get("mesco_noofpackages"))
+    _set_numeric_field(cargo, "mesco_grosskg", line.get("mesco_grosskg"))
+    _set_numeric_field(cargo, "mesco_volcbm", line.get("mesco_volcbm"))
     return {k: v for k, v in cargo.items() if _has(v)}
 
 
@@ -533,12 +572,9 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
             "\n".join(desc_parts),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
-    if _has(rec.get("cr401_totalpackages")):
-        cargo["mesco_noofpackages"] = rec["cr401_totalpackages"]
-    if _has(rec.get("cr401_totalgrossweight")):
-        cargo["mesco_grosskg"] = rec["cr401_totalgrossweight"]
-    if _has(rec.get("cr401_totalvolume")):
-        cargo["mesco_volcbm"] = rec["cr401_totalvolume"]
+    _set_numeric_field(cargo, "mesco_noofpackages", rec.get("cr401_totalpackages"))
+    _set_numeric_field(cargo, "mesco_grosskg", rec.get("cr401_totalgrossweight"))
+    _set_numeric_field(cargo, "mesco_volcbm", rec.get("cr401_totalvolume"))
     return {k: v for k, v in cargo.items() if _has(v)}
 
 
@@ -580,20 +616,23 @@ def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optio
 
 def _build_container_from_item(c: Dict[str, Any], master_level: bool = True) -> Dict[str, Any]:
     entry = _project_to_template(_first_container_template(master_level=master_level), {})
-    if _has(c.get("container_number")):
-        entry["mesco_containernumber"] = c["container_number"]
+    container_no = _normalize_container_number(c.get("container_number"))
+    if container_no:
+        # Dynamics Container No is a lookup to mesco_containerno (primary name = number).
+        entry["mesco_containerno"] = container_no
+        entry["mesco_containernumber"] = container_no
         if not _has(entry.get("mesco_name")):
-            entry["mesco_name"] = c["container_number"]
+            entry["mesco_name"] = container_no
     if _has(c.get("seal_number")):
         entry["mesco_carrierseal"] = c["seal_number"]
     if _has(c.get("container_type")):
         entry["mesco_containertype"] = c["container_type"]
-    if _has(c.get("packages")):
-        entry["mesco_noofpackages"] = c["packages"]
-    if _has(c.get("gross_weight_kg")):
-        entry["mesco_grosskg"] = c["gross_weight_kg"]
-    if _has(c.get("measurement_cbm")):
-        entry["mesco_volcbm"] = c["measurement_cbm"]
+        um_hint = _um_hint_from_container_type(c["container_type"])
+        if um_hint:
+            entry["mesco_um"] = um_hint
+    _set_numeric_field(entry, "mesco_noofpackages", c.get("packages"))
+    _set_numeric_field(entry, "mesco_grosskg", c.get("gross_weight_kg"))
+    _set_numeric_field(entry, "mesco_volcbm", c.get("measurement_cbm"))
     for key in ("mesco_sendtowarehouse", "mesco_reefer", "mesco_imo", "mesco_nor"):
         if not _has(entry.get(key)):
             entry[key] = False
@@ -625,7 +664,12 @@ def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "cr401_totalvolume": "measurement_cbm",
     }
     totals: Dict[str, float] = {}
+    unique_containers: set[str] = set()
     for rec in records:
+        for c in _record_container_items(rec):
+            no = _normalize_container_number(c.get("container_number"))
+            if no:
+                unique_containers.add(no)
         for out_key, rec_key in fields.items():
             value = rec.get(out_key)
             if not _has(value):
@@ -633,17 +677,14 @@ def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                     value = c.get(rec_key)
                     if _has(value):
                         break
-            try:
-                if _has(value):
-                    num_text = str(value).replace(",", "")
-                    m = re.search(r"(\d+(?:\.\d+)?)", num_text)
-                    if m:
-                        totals[out_key] = totals.get(out_key, 0.0) + float(m.group(1))
-            except (TypeError, ValueError):
-                pass
+            parsed = _parse_numeric(value)
+            if parsed is not None:
+                totals[out_key] = totals.get(out_key, 0.0) + parsed
     result: Dict[str, Any] = {}
     for key, value in totals.items():
         result[key] = int(value) if value.is_integer() else round(value, 3)
+    if unique_containers:
+        result["cr401_totalteus"] = len(unique_containers)
     return result
 
 
@@ -693,15 +734,11 @@ def records_to_master_json(
     if aggregated:
         output.update(aggregated)
     elif master_record:
-        for key in ("cr401_totalpackages", "cr401_totalgrossweight", "cr401_totalvolume"):
+        for key in ("cr401_totalpackages", "cr401_totalgrossweight", "cr401_totalvolume", "cr401_totalteus"):
             if _has(master_record.get(key)) and not _has(output.get(key)):
-                output[key] = master_record[key]
+                _set_numeric_field(output, key, master_record[key])
     master_mbl = output.get("mesco_masterblno")
     physical_records = [master_record] if master_record else list(records)
-    if len(physical_records) == 1:
-        pkg = physical_records[0].get("cr401_totalpackages")
-        if pkg and re.search(r"PALLETS", str(pkg), re.I):
-            output["cr401_totalpackages"] = pkg
     if not output.get("mesco_nooforgbls") and master_record:
         output["mesco_nooforgbls"] = master_record.get("mesco_nooforgbls")
     _fill_operation_defaults(output, is_master=True)
@@ -819,3 +856,56 @@ def records_to_house_json(
 
     output["value"] = value_list
     return _prune_output(output)
+
+
+def normalize_bl_type(bl_type: Optional[str]) -> str:
+    """Return ``master`` or ``house`` for API query parameters."""
+    normalized = (bl_type or "master").strip().lower()
+    if normalized in ("house", "hbl", "h"):
+        return "house"
+    return "master"
+
+
+def apply_bl_type_to_crm_payload(payload: Dict[str, Any], bl_type: Optional[str]) -> None:
+    """Stamp Dynamics ``mesco_bltype`` on an operation payload before upload."""
+    if not isinstance(payload, dict):
+        return
+    is_house = normalize_bl_type(bl_type) == "house"
+    payload["mesco_bltype"] = HOUSE_BL_TYPE if is_house else MASTER_BL_TYPE
+    if is_house:
+        prepare_standalone_house_upload(payload)
+
+
+def is_house_bl_type(bl_type: Any) -> bool:
+    """True when the operation should be treated as a House B/L."""
+    if bl_type in (HOUSE_BL_TYPE, "886150002"):
+        return True
+    return normalize_bl_type(str(bl_type) if bl_type is not None else "master") == "house"
+
+
+def prepare_standalone_house_upload(payload: Dict[str, Any]) -> None:
+    """
+    House-only uploads (no nested master in the payload) must expose cargo on
+    the house cargo collection and carry an HBL number for Dynamics.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    if not _has(payload.get("mesco_houseblno")):
+        for key in ("mesco_houseblno", "mesco_masterblno"):
+            if _has(payload.get(key)):
+                payload["mesco_houseblno"] = str(payload[key]).strip()
+                break
+
+    master_cargo = payload.get(MASTER_CARGO_KEY) or []
+    house_cargo = payload.get(HOUSE_CARGO_KEY) or []
+    if master_cargo and not house_cargo:
+        payload[HOUSE_CARGO_KEY] = list(master_cargo)
+    elif house_cargo and not master_cargo:
+        payload[MASTER_CARGO_KEY] = list(house_cargo)
+
+    if not payload.get(MASTER_CARGO_KEY) and not payload.get(HOUSE_CARGO_KEY):
+        row = _build_cargo_from_record(payload)
+        if row:
+            payload[MASTER_CARGO_KEY] = [row]
+            payload[HOUSE_CARGO_KEY] = [row]
