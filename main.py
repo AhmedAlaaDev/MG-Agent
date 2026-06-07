@@ -35,6 +35,10 @@ from crm_output_formatter import records_to_house_json, records_to_master_json
 from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
 from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
 from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
+from pdf_consolidated_lcl import (
+    is_consolidated_lcl_multi_hbl,
+    parse_consolidated_lcl_multi_hbl,
+)
 
 
 app = FastAPI(
@@ -1056,6 +1060,44 @@ async def extract_file(
                     house_output,
                 )
 
+        if is_consolidated_lcl_multi_hbl(raw_text):
+            consolidated = parse_consolidated_lcl_multi_hbl(raw_text)
+            if consolidated and len(consolidated["house_records"]) >= 2:
+                house_records = [
+                    validate_and_correct(rec, raw_text)
+                    for rec in consolidated["house_records"]
+                ]
+                master_record = validate_and_correct(
+                    consolidated["master_record"],
+                    raw_text,
+                )
+                extraction_quality["document_type_detected"] = "consolidated_lcl_multi_hbl_pdf"
+                extraction_quality["consolidated_house_count"] = len(house_records)
+                extraction_quality["record_routing"] = {
+                    "direct": len(house_records),
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_consolidated_lcl_multi_hbl",
+                    "mode": "one_master_with_house_records",
+                    "document_layout": "master_with_houses",
+                }
+                crm_output = records_to_master_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                house_output = records_to_house_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                )
+
         parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
         extraction_quality.update(parse_result.quality)
         if parse_result.azure_warnings:
@@ -1372,6 +1414,47 @@ async def get_dynamics_operation(master_id: str):
         data = resp.json()
         return {"success": True, "data": _clean_dataverse_response(data)}
     except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/operation", response_class=HTMLResponse, include_in_schema=False)
+async def operation_view_page() -> str:
+    """Serve the React-based Operation review page that mirrors the Dynamics
+    operation form (all fields, lookups, option sets, houses, containers, cargo).
+    """
+    import os
+
+    html_path = os.path.join(os.path.dirname(__file__), "operation_view.html")
+    try:
+        with open(html_path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return "<h1>operation_view.html not found</h1>"
+
+
+@app.get("/dynamics/operation/{master_id}/full")
+async def get_dynamics_operation_full(master_id: str):
+    """Fetch a master operation with ALL fields, lookups (GUID + display name),
+    option-set labels, and nested houses/containers/cargo.
+
+    Unlike /dynamics/operation/{id}, this keeps the OData annotations
+    (`@OData.Community.Display.V1.FormattedValue`, `_<field>_value`, lookup
+    logical names) so the operation-review React page can resolve lookups and
+    option sets exactly as Dynamics does.
+    """
+    try:
+        client = DataverseClientService.get_instance()
+        expand = (
+            "mesco_Operation_mesco_Operation_mesco_Operation("
+            "$expand=mesco_Container_mesco_houses,"
+            "mesco_Cargo_HouseOperation_mesco_Operation),"
+            "mesco_Container_MasterOperation_mesco_Operation($expand=mesco_ContainerNo),"
+            "mesco_Cargo_MasterOperation_mesco_Operation"
+        )
+        resp = client.get(f"{_ENTITY}({master_id})?$expand={expand}")
+        return {"success": True, "data": resp.json()}
+    except Exception as exc:
+        logger.exception("Failed to fetch full operation %s", master_id)
         return {"success": False, "error": str(exc)}
 
 

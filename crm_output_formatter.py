@@ -59,7 +59,7 @@ _META_KEYS = {
     "mesco_servicetype_text", "cargo_lines",
 }
 
-_MASTER_SKIP = {"mesco_houseblno", "mesco_incoterm"}
+_MASTER_SKIP = {"mesco_houseblno"}
 _ROOT_METADATA_KEYS = {
     "@odata.context",
     "@Microsoft.Dynamics.CRM.totalrecordcount",
@@ -225,6 +225,231 @@ def _project_to_template(template: Dict[str, Any], src: Dict[str, Any], skip: Op
     return _apply_fields(target, src, skip=skip)
 
 
+# ---------------------------------------------------------------------------
+# Lookup-name derivation
+#
+# The AI/regex extractor stores party identities in verbose text fields
+# (mesco_shippernamecontactno / mesco_consigneenamecontactno).  Dataverse,
+# however, exposes shipper/consignee/notify as *account* lookups and country
+# as an xollsp_country lookup.  The uploader can resolve a clean name → GUID
+# and emit the @odata.bind link, but only if we hand it a lookup-name field
+# (mesco_shipper / mesco_consignee / mesco_country / ...).
+#
+# This helper derives those canonical lookup-name fields from whatever the
+# extractor produced, preferring an explicit clean name when the model
+# supplied one.  The verbose text field is left untouched so it still lands
+# in the human-readable column as a fallback when the account does not exist.
+# ---------------------------------------------------------------------------
+
+# Tokens that mark the start of contact / address noise on a party line.
+_PARTY_NOISE_RE = re.compile(
+    r"\b(?:ATTN|ATTENTION|TEL|TELE|PHONE|FAX|EMAIL|E-MAIL|MOB|MOBILE|CELL|"
+    r"CONTACT|P\.?O\.?\s*BOX|ZIP|POSTAL|VAT|TAX\s*ID)\b\s*[:.\-]?",
+    re.I,
+)
+
+# Lookup-name fields that already arrive as canonical strings and only need to
+# be carried through to the operation payload for the uploader to resolve.
+_PASS_THROUGH_LOOKUP_FIELDS = (
+    "mesco_country",
+    "mesco_countryoforigin",
+    "mesco_shippingline",
+    "mesco_origin",
+    "mesco_destination",
+    "mesco_vessel",
+    "mesco_agent",
+)
+
+# Standard Incoterms (2000/2010/2020).  Used to strip a trailing place name
+# ("CIF ALEXANDRIA" -> "CIF") so the value matches an xollsp_incoterm record.
+_INCOTERMS = {
+    "EXW", "FCA", "FAS", "FOB", "CFR", "CIF", "CPT", "CIP",
+    "DAP", "DPU", "DDP", "DAT", "DAF", "DES", "DEQ", "DDU",
+}
+_INCOTERM_RE = re.compile(r"\b(" + "|".join(sorted(_INCOTERMS)) + r")\b", re.I)
+
+
+def _canonical_incoterm(value: Any) -> Optional[str]:
+    """Reduce an incoterm value to its 3-letter code (e.g. 'CIF ALEXANDRIA' -> 'CIF')."""
+    if not _has(value):
+        return None
+    match = _INCOTERM_RE.search(str(value).upper())
+    if match:
+        return match.group(1).upper()
+    text = str(value).strip()
+    return text or None
+
+
+def _split_party_block(value: Any) -> tuple[Optional[str], Optional[str]]:
+    """Split a party block into (company name, address lines)."""
+    if not _has(value):
+        return None, None
+    text = str(value).replace("\r", "\n")
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return None, None
+    name = _clean_company_name(lines[0]) or lines[0].strip()
+    address = "\n".join(lines[1:]).strip() if len(lines) > 1 else None
+    if address:
+        address = address[:250]
+    return name, address or None
+
+
+def _infer_country_from_text(*parts: Any) -> Optional[str]:
+    upper = _egypt_context(*parts)
+    if "EGYPT" in upper or "EG " in upper or ", EG" in upper:
+        return "Egypt"
+    if "INDIA" in upper or ", IN" in upper or " U.P)" in upper:
+        return "India"
+    if "CHINA" in upper or ", CN" in upper:
+        return "China"
+    if "TURKEY" in upper or ", TR" in upper:
+        return "Turkey"
+    return None
+
+
+def _egypt_context(*parts: Any) -> str:
+    return " ".join(str(p) for p in parts if p).upper()
+
+
+def _infer_totals_from_cargo_description(desc: Any) -> Dict[str, Any]:
+    """Best-effort package count from narrative cargo text (e.g. 'TOTAL 320 ... 18 PALLETS')."""
+    if not _has(desc):
+        return {}
+    text = str(desc)
+    out: Dict[str, Any] = {}
+    total_m = re.search(r"\bTOTAL\s+(\d+)\b", text, re.I)
+    if total_m:
+        out["cr401_totalpackages"] = int(total_m.group(1))
+    pallets_m = re.search(r"(\d+)\s+WOODEN\s+PALLETS", text, re.I)
+    if pallets_m and "cr401_totalpackages" not in out:
+        out["cr401_totalpackages"] = f"{pallets_m.group(1)} PALLETS"
+    return out
+
+
+def _apply_party_fields(operation: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """Map verbose party blocks to name + address columns (Dynamics form layout)."""
+    if not _has(operation.get("mesco_shippernamecontactno")) or not _has(
+        operation.get("mesco_shipperaddress")
+    ):
+        name, addr = _split_party_block(src.get("mesco_shippernamecontactno"))
+        if name and not _has(operation.get("mesco_shipper")):
+            operation["mesco_shipper"] = name
+        if name and not _has(operation.get("mesco_shippernamecontactno")):
+            operation["mesco_shippernamecontactno"] = name[:100]
+        if addr and not _has(operation.get("mesco_shipperaddress")):
+            operation["mesco_shipperaddress"] = addr
+
+    if not _has(operation.get("mesco_consigneenamecontactno")) or not _has(
+        operation.get("mesco_consigneeaddress")
+    ):
+        name, addr = _split_party_block(src.get("mesco_consigneenamecontactno"))
+        if name and not _has(operation.get("mesco_consignee")):
+            operation["mesco_consignee"] = name
+        if name and not _has(operation.get("mesco_consigneenamecontactno")):
+            operation["mesco_consigneenamecontactno"] = name[:100]
+        if addr and not _has(operation.get("mesco_consigneeaddress")):
+            operation["mesco_consigneeaddress"] = addr
+
+    if not _has(operation.get("mesco_countryoforigin")):
+        country = _infer_country_from_text(
+            operation.get("mesco_shipperaddress"),
+            src.get("mesco_shipperaddress"),
+            src.get("mesco_shippernamecontactno"),
+        )
+        if country:
+            operation["mesco_countryoforigin"] = country
+    if not _has(operation.get("mesco_country")):
+        country = _infer_country_from_text(
+            operation.get("mesco_consigneeaddress"),
+            src.get("mesco_consigneeaddress"),
+            src.get("mesco_consigneenamecontactno"),
+            src.get("mesco_origin"),
+        )
+        if country:
+            operation["mesco_country"] = country
+    return operation
+
+
+def _clean_company_name(value: Any) -> Optional[str]:
+    """Extract a resolvable company name from a verbose party block.
+
+    Takes the first non-empty line (the legal/company name on a B/L party
+    block) and strips trailing contact noise (ATTN/TEL/FAX/EMAIL/...).
+    """
+    if not _has(value):
+        return None
+    text = str(value).replace("\r", "\n")
+    first_line = None
+    for line in text.split("\n"):
+        stripped = line.strip(" \t,-:;|")
+        if stripped:
+            first_line = stripped
+            break
+    if not first_line:
+        return None
+    first_line = _PARTY_NOISE_RE.split(first_line)[0]
+    first_line = re.sub(r"\s{2,}", " ", first_line).strip(" \t,-:;|")
+    # A bare "SAME AS ..." reference cannot be resolved to an account.
+    if re.match(r"^SAME\s+AS\b", first_line, re.I):
+        return None
+    return first_line or None
+
+
+def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
+    """Build canonical lookup-name fields the uploader can resolve to GUIDs."""
+    out: Dict[str, Any] = {}
+
+    def _account_lookup_name(explicit: Any, block: Any) -> Optional[str]:
+        name = _clean_company_name(explicit) if _has(explicit) else None
+        if not name and _has(explicit) and "," not in str(explicit) and len(str(explicit)) <= 80:
+            name = str(explicit).strip()
+        if not name:
+            name = _clean_company_name(block)
+        return name
+
+    consignee = _account_lookup_name(
+        src.get("mesco_consignee"),
+        src.get("mesco_consigneenamecontactno"),
+    )
+    if _has(consignee):
+        out["mesco_consignee"] = consignee
+
+    shipper = _account_lookup_name(
+        src.get("mesco_shipper"),
+        src.get("mesco_shippernamecontactno"),
+    )
+    if _has(shipper):
+        out["mesco_shipper"] = shipper
+
+    for field in _PASS_THROUGH_LOOKUP_FIELDS:
+        if _has(src.get(field)):
+            out[field] = src[field]
+
+    incoterm = _canonical_incoterm(src.get("mesco_incoterm"))
+    if incoterm:
+        out["mesco_incoterm"] = incoterm
+
+    return out
+
+
+# Fields whose derived/canonical form should replace any value already projected
+# (the canonical form is strictly more resolvable than the raw extracted text).
+_OVERRIDE_LOOKUP_FIELDS = {"mesco_incoterm"}
+
+
+def _apply_operation_lookups(operation: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge derived lookup-name fields into *operation*.
+
+    Most fields are only filled when absent; canonicalized fields
+    (``_OVERRIDE_LOOKUP_FIELDS``) replace the raw projected value.
+    """
+    for key, value in _derive_operation_lookups(src).items():
+        if key in _OVERRIDE_LOOKUP_FIELDS or not _has(operation.get(key)):
+            operation[key] = value
+    return operation
+
+
 def _operation_defaults(is_master: bool) -> Dict[str, Any]:
     return {
         "mesco_bltype": MASTER_BL_TYPE if is_master else HOUSE_BL_TYPE,
@@ -348,6 +573,8 @@ def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optio
     if master_mbl:
         house["mesco_masterbllinkno"] = master_mbl
     _fill_operation_defaults(house, is_master=False)
+    _apply_party_fields(house, rec)
+    _apply_operation_lookups(house, rec)
     return house
 
 
@@ -458,8 +685,17 @@ def records_to_master_json(
 
     output = master or {}
     output["@odata.context"] = output.get("@odata.context") or _DEFAULT_MASTER_CONTEXT
-    totals_source = [master_record] if master_record else records
-    output.update(_aggregate_totals(totals_source))
+    if master_record and len(records) > 1:
+        totals_source = records
+    else:
+        totals_source = [master_record] if master_record else records
+    aggregated = _aggregate_totals(totals_source)
+    if aggregated:
+        output.update(aggregated)
+    elif master_record:
+        for key in ("cr401_totalpackages", "cr401_totalgrossweight", "cr401_totalvolume"):
+            if _has(master_record.get(key)) and not _has(output.get(key)):
+                output[key] = master_record[key]
     master_mbl = output.get("mesco_masterblno")
     physical_records = [master_record] if master_record else list(records)
     if len(physical_records) == 1:
@@ -469,6 +705,15 @@ def records_to_master_json(
     if not output.get("mesco_nooforgbls") and master_record:
         output["mesco_nooforgbls"] = master_record.get("mesco_nooforgbls")
     _fill_operation_defaults(output, is_master=True)
+    lookup_src = {**first, **manifest_overrides}
+    _apply_party_fields(output, lookup_src)
+    if not any(_has(output.get(k)) for k in (
+        "cr401_totalpackages", "cr401_totalgrossweight", "cr401_totalvolume"
+    )):
+        output.update(_infer_totals_from_cargo_description(output.get("mesco_cargodescription")))
+    # Emit consignee/shipper/country lookup names so the uploader can resolve
+    # them to account / xollsp_country GUIDs and bind the lookup columns.
+    _apply_operation_lookups(output, lookup_src)
 
     # Houses — only when a distinct house B/L is present (never duplicate the MBL).
     houses = []
@@ -545,6 +790,7 @@ def records_to_house_json(
         if not master_fields.get("mesco_nooforgbls") and master_src.get("mesco_nooforgbls"):
             master_fields["mesco_nooforgbls"] = master_src.get("mesco_nooforgbls")
         _fill_operation_defaults(master_fields, is_master=True)
+        _apply_operation_lookups(master_fields, master_src)
 
         house = _build_house(rec, master_mbl=master_fields.get("mesco_masterblno"))
         if not house:

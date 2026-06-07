@@ -14,6 +14,7 @@ from extraction_report import ExtractionValidationReport, validate_pdf_extractio
 from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
 from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
 from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
+from pdf_consolidated_lcl import is_consolidated_lcl_multi_hbl, parse_consolidated_lcl_multi_hbl
 from spreadsheet_extractor import extract_document_text_professionally
 from validator import validate_and_correct
 
@@ -147,6 +148,29 @@ def process_pdf_bytes(
                 document_layout = "manifest"
             else:
                 extraction_quality["document_type_detected"] = "export_lcl_manifest_failed"
+
+        if not validated_records and is_consolidated_lcl_multi_hbl(raw_text):
+            consolidated = parse_consolidated_lcl_multi_hbl(raw_text)
+            if consolidated and len(consolidated["house_records"]) >= 2:
+                extraction_quality["document_type_detected"] = "consolidated_lcl_multi_hbl_pdf"
+                house_records = [
+                    validate_and_correct(rec, raw_text)
+                    for rec in consolidated["house_records"]
+                ]
+                master_record = validate_and_correct(
+                    consolidated["master_record"],
+                    raw_text,
+                )
+                validated_records = house_records
+                crm_masters = [
+                    records_to_master_json(house_records, master_record=master_record)
+                ]
+                document_layout = "master_with_houses"
+                extraction_quality["record_routing"] = {
+                    "policy": "pdf_consolidated_lcl_multi_hbl",
+                    "mode": "one_master_with_house_records",
+                    "document_layout": document_layout,
+                }
 
         if not validated_records:
             parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)

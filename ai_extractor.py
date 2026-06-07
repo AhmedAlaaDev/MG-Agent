@@ -14,12 +14,16 @@ def _bl_record_properties() -> Dict[str, Any]:
         "mesco_bookingnumber": {"type": ["string", "null"]},
         "mesco_acidnumber": {"type": ["string", "null"]},
         "mesco_shippernamecontactno": {"type": ["string", "null"]},
+        "mesco_shipper": {"type": ["string", "null"]},
         "mesco_shipperaddress": {"type": ["string", "null"]},
         "mesco_shippercontactnumber": {"type": ["string", "null"]},
         "mesco_consigneenamecontactno": {"type": ["string", "null"]},
+        "mesco_consignee": {"type": ["string", "null"]},
         "mesco_consigneeaddress": {"type": ["string", "null"]},
         "mesco_notify1": {"type": ["string", "null"]},
         "mesco_notifyaddress": {"type": ["string", "null"]},
+        "mesco_country": {"type": ["string", "null"]},
+        "mesco_countryoforigin": {"type": ["string", "null"]},
         "mesco_vessel": {"type": ["string", "null"]},
         "mesco_voytruckno": {"type": ["string", "null"]},
         "mesco_origin": {"type": ["string", "null"]},
@@ -222,6 +226,29 @@ field you cannot find with high confidence on the relevant page.
   Do NOT include the address (that goes in mesco_shipperaddress), HS codes, cargo
   descriptions, exporter IDs, or marks-and-numbers.
 - mesco_notify1: literal "same as cnee" when document says "SAME AS CONSIGNEE".
+
+## Canonical lookup names (CRITICAL for CRM object mapping)
+These fields are resolved against existing Dataverse records (account / country /
+incoterm / shipping line) and bound as lookups. Output the CLEANEST canonical form
+so they can be matched — strip addresses, contact numbers, attn lines, and legal
+suffix noise. Use null when not confidently present.
+- mesco_shipper: the shipper's CLEAN legal COMPANY NAME only (e.g. "ELARABY GROUP",
+  "ARCELORMITTAL"). Same company as mesco_shippernamecontactno but name-only — no
+  address, no "ATTN/TEL/FAX/EMAIL", no marks. This is used to match a CRM account.
+- mesco_consignee: the consignee's CLEAN legal COMPANY NAME only. Same company as
+  mesco_consigneenamecontactno but name-only. Used to match a CRM account. Never a
+  column title ("TO ORDER", "EXPORT REFERENCES") and never a "SAME AS ..." reference.
+- mesco_country: full ENGLISH country NAME of the port of loading / shipper side
+  (e.g. "Turkey", "China", "Germany", "United Arab Emirates"). A COUNTRY, never a
+  city or port. Prefer the full name; a 2-letter ISO code (TR, CN, DE) is acceptable
+  if that is all the document shows.
+- mesco_countryoforigin: full ENGLISH country name stated as the goods' COUNTRY OF
+  ORIGIN / made-in country (e.g. "COUNTRY OF ORIGIN: CHINA" -> "China"). Null if not
+  explicitly stated.
+- mesco_shippingline: the canonical carrier/line name ("EVERGREEN", "MAERSK",
+  "CMA CGM", "MSC", "HAPAG-LLOYD", "COSCO", "ONE", "YANG MING") — not the local agent.
+- mesco_incoterm: the 3-letter Incoterm code only (CIF, CFR, FOB, EXW, FCA, DAP, DDP,
+  CPT, CIP). Strip any trailing place ("CIF ALEXANDRIA" -> "CIF").
 - Container number: 4 letters + 6 digits + check digit. Preserve full form; OCR slash
   forms (CSLU203520 / 4) are acceptable as-is.
 - mesco_containertype: ISO type ONLY ("40HC", "20GP", "40RF") with NO count prefix.
@@ -233,7 +260,7 @@ field you cannot find with high confidence on the relevant page.
 - Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
 - mesco_transporttype: 300000000 for sea.
 - mesco_loadtype: LCL = 300000001; FCL = 300000000.
-- mesco_direction: 300000001 (import) when Egypt is destination; 300000000 (export) when Egypt is origin.
+- mesco_direction: 300000000 (Import) when Egypt is destination/consignee; 300000001 (Export) when Egypt is origin/shipper.
 - mesco_handlinginformation: collect special-handling notes — "***UNSTACKABLE***",
   "DO NOT STACK", "FRAGILE", "KEEP DRY", "HAZARDOUS" — when visible.
 - Do not guess. Use null when not visible on that page/record.
