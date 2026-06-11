@@ -32,7 +32,7 @@ OPERATION_LIMITS: Dict[str, int] = {
     "mesco_cargodescription":         1500,
     "mesco_notes":                    2000,
     "mesco_routenotes":               2000,
-    "mesco_handlinginformation":      2000,
+    "mesco_handlinginformation":      100,
     "mesco_specialinstructions":      2000,
     "mesco_remarks":                  2000,
 
@@ -57,7 +57,7 @@ OPERATION_LIMITS: Dict[str, int] = {
     # Routing
     "mesco_freightpayableat":         100,
     "mesco_placeofissue":             100,
-    "mesco_deliveryaddress":          250,
+    "mesco_deliveryaddress":          100,
     "mesco_pickupaddress":            250,
 
     # Transport
@@ -127,8 +127,30 @@ def cap_field(entity: str, field: str, value: Any) -> Any:
     return _smart_truncate(value, limit)
 
 
+def _spill_handling_information_to_notes(record: Dict[str, Any]) -> None:
+    """Preserve full handling clauses in notes when the CRM column is only 100 chars."""
+    limit = OPERATION_LIMITS.get("mesco_handlinginformation")
+    if not limit:
+        return
+    handling = record.get("mesco_handlinginformation")
+    if not isinstance(handling, str):
+        return
+    full = handling.strip()
+    if len(full) <= limit:
+        return
+    record["mesco_handlinginformation"] = _smart_truncate(full, limit)
+    notes = str(record.get("mesco_notes") or "").strip()
+    if full in notes:
+        return
+    merged = f"{notes}\n{full}".strip() if notes else full
+    notes_limit = OPERATION_LIMITS.get("mesco_notes", 2000)
+    record["mesco_notes"] = _smart_truncate(merged, notes_limit)
+
+
 def cap_record(entity: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """Clamp every known text field on a record in place; returns the record."""
+    if entity == "mesco_operations":
+        _spill_handling_information_to_notes(record)
     limits = _ENTITY_LIMITS.get(entity)
     if not limits:
         return record
@@ -149,6 +171,7 @@ def cap_nested_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     cap_record("mesco_operations", payload)
 
     for nested_key, entity in (
+        ("mesco_Cargo_HouseOperation_mesco_Operation", "mesco_cargos"),
         ("mesco_Operation_mesco_Operation_mesco_Operation", "mesco_operations"),
         ("mesco_Container_MasterOperation_mesco_Operation", "mesco_containers"),
         ("mesco_Cargo_MasterOperation_mesco_Operation",     "mesco_cargos"),

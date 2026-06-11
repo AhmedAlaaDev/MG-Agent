@@ -236,8 +236,10 @@ MARINE & ENGINEERING SERVICES COMPANY (MESCO)
     assert "FRESH ELECTRIC" in data["mesco_notify1"].upper()
     assert "MESCO" not in data["mesco_notify1"].upper()
     assert "RAMADAN" in (data.get("mesco_notifyaddress") or "").upper()
-    assert "MESCO" in data["mesco_shippingline"].upper()
-    assert "BATI" not in data["mesco_shippingline"].upper()
+    assert "BATI" in (data.get("mesco_shippingline") or "").upper()
+    assert "MESCO" in (
+        data.get("mesco_notify2") or data.get("delivery_agent") or ""
+    ).upper()
     assert data.get("mesco_freightpayableat") == "AMBARLI"
 
 

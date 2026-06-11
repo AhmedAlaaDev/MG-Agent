@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
+from llm_context import llm_extraction_prefix, llm_meta
 from pdf_isaly_draft_bl import (
     detect_isaly_draft_multi_bl,
     extract_isaly_draft_records,
@@ -169,16 +170,27 @@ def parse_document_intelligently(
     raw_text: str,
     extracted_meta: Optional[Dict[str, Any]] = None,
     pdf_bytes: Optional[bytes] = None,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
 ) -> IntelligentParseResult:
     """
     Parse a document into validated B/L record(s).
     Multi-page scans: exactly one record per page-anchored ocean B/L (no duplicates).
     """
+    if file_bytes is None and pdf_bytes is not None:
+        file_bytes = pdf_bytes
+    if not filename and isinstance(extracted_meta, dict):
+        filename = extracted_meta.get("filename") or extracted_meta.get("source_filename")
+
     quality: Dict[str, Any] = {
         "parser": "intelligent",
+        **llm_meta(),
+        "llm_attempted": False,
+        "per_page_llm_calls": 0,
+        "fallback_used": False,
+        # Legacy keys kept for downstream consumers
         "azure_attempted": False,
         "per_page_azure_calls": 0,
-        "fallback_used": False,
     }
     azure_warnings: List[str] = []
     document_layout = "unknown"
@@ -186,6 +198,31 @@ def parse_document_intelligently(
     multi_expected = detect_multi_bl_candidate(raw_text)
     quality["isaly_draft_expected"] = isaly_expected
     quality["multi_bl_expected"] = multi_expected
+
+    from pdf_msds_dg import parse_msds_dg_record
+
+    msds_record = parse_msds_dg_record(raw_text, filename=filename)
+    if msds_record:
+        quality["parser_mode"] = "msds_dg_direct"
+        quality["msds_dg_fallback"] = True
+        quality["fallback_used"] = True
+        document_layout = "msds_dg"
+        validated = _validate_records(
+            [msds_record],
+            raw_text,
+            "msds_dg_direct",
+            pdf_bytes=file_bytes,
+        )
+        quality["validated_record_count"] = len(validated)
+        quality["document_type_detected"] = "msds_dg_pdf"
+        if extracted_meta:
+            quality["source_extraction_method"] = extracted_meta.get("method")
+        return IntelligentParseResult(
+            records=validated,
+            document_layout=document_layout,
+            quality=quality,
+            azure_warnings=azure_warnings,
+        )
 
     canonical = None
     if isaly_expected:
@@ -203,7 +240,9 @@ def parse_document_intelligently(
 
         try:
             azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
+            quality["llm_attempted"] = True
             quality["azure_attempted"] = True
+            quality["per_page_llm_calls"] = len(canonical)
             quality["per_page_azure_calls"] = len(canonical)
         except Exception as exc:
             logger.warning("Per-page Azure enrichment skipped: %s", exc)
@@ -214,7 +253,12 @@ def parse_document_intelligently(
     else:
         azure_records: List[Dict[str, Any]] = []
         try:
-            payload = extract_records_with_azure_openai(raw_text)
+            payload = extract_records_with_azure_openai(
+                raw_text,
+                file_bytes=file_bytes,
+                filename=filename,
+            )
+            quality["llm_attempted"] = True
             quality["azure_attempted"] = True
             document_layout = payload.get("document_layout") or "unknown"
             azure_records = [dict(r) for r in (payload.get("records") or [])]
@@ -226,12 +270,36 @@ def parse_document_intelligently(
             azure_warnings.append(f"azure_whole_document_error: {exc}")
             quality["azure_error"] = str(exc)
 
+        from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
+        from pdf_sea_waybill import is_consolidation_sea_waybill, parse_consolidation_sea_waybill
+
+        debit_fallback: List[Dict[str, Any]] = []
+        if is_freight_debit_note(raw_text):
+            dn = parse_freight_debit_note(raw_text)
+            if dn:
+                debit_fallback = [dn]
+                quality["debit_note_fallback"] = True
+
+        sea_waybill_fallback: List[Dict[str, Any]] = []
+        if is_consolidation_sea_waybill(raw_text):
+            sw = parse_consolidation_sea_waybill(raw_text)
+            if sw:
+                sea_waybill_fallback = [sw]
+                quality["sea_waybill_fallback"] = True
+
         fallback_records = (
-            extract_isaly_draft_records(raw_text)
+            debit_fallback
+            or sea_waybill_fallback
+            or extract_isaly_draft_records(raw_text)
             or detect_and_extract_multi_bl_records(raw_text)
             or []
         )
-        if fallback_records and (not azure_records or len(fallback_records) > len(azure_records)):
+        force_special_fallback = bool(sea_waybill_fallback or debit_fallback)
+        if fallback_records and (
+            force_special_fallback
+            or not azure_records
+            or len(fallback_records) > len(azure_records)
+        ):
             from record_reconciliation import reconcile_record_lists
 
             azure_records = reconcile_record_lists(azure_records, fallback_records)
@@ -239,9 +307,10 @@ def parse_document_intelligently(
 
         azure_records = dedupe_records_by_bl(azure_records)
         azure_records = finalize_multi_bl_records(azure_records, raw_text)
-        method = "azure_intelligent"
+        prefix = llm_extraction_prefix()
+        method = f"{prefix}_intelligent"
         if quality.get("fallback_used"):
-            method = "azure_intelligent_with_fallback"
+            method = f"{prefix}_intelligent_with_fallback"
 
     if not azure_records:
         quality["parser"] = "failed"
@@ -252,8 +321,8 @@ def parse_document_intelligently(
             azure_warnings=azure_warnings,
         )
 
-    azure_records = finalize_multi_bl_records(azure_records, raw_text, pdf_bytes=pdf_bytes)
-    validated = _validate_records(azure_records, raw_text, method, pdf_bytes=pdf_bytes)
+    azure_records = finalize_multi_bl_records(azure_records, raw_text, pdf_bytes=file_bytes)
+    validated = _validate_records(azure_records, raw_text, method, pdf_bytes=file_bytes)
 
     quality["validated_record_count"] = len(validated)
     quality["document_type_detected"] = (

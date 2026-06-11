@@ -122,7 +122,9 @@ def extract_intelligent(
         the deterministic parsers produced.
     """
     parse_result = parse_document_intelligently(
-        raw_text, extracted_meta=extracted_meta, pdf_bytes=pdf_bytes,
+        raw_text, extracted_meta=extracted_meta, file_bytes=pdf_bytes, filename=(
+            (extracted_meta or {}).get("filename") if isinstance(extracted_meta, dict) else None
+        ),
     )
 
     records = list(parse_result.records or [])

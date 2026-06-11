@@ -113,5 +113,23 @@
       "Registration number": 886150000,
       "Tax Number": 886150001
     }
+  },
+  "mesco_cargo": {
+    "mesco_loadtype": {
+      "FCL": 300000000,
+      "LCL": 300000001,
+      "RORO": 886150001,
+      "General Cargo": 886150002,
+      "Bulk Cargo": 886150003,
+      "Flexi": 886150004,
+      "Tank": 886150005,
+      "LCL logistics": 886150006,
+      "FCL logistics": 886150007
+    },
+    "mesco_product": {
+      "Flexi": 886150000,
+      "Heater Pad": 886150001,
+      "Iron": 886150002
+    }
   }
 }

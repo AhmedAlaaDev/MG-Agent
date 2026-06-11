@@ -29,13 +29,28 @@ def _visual_page_text(raw_text: str, page_index: int = 1) -> str:
     return m.group(1) if m else body
 
 
+def _is_mtd_document(text: str) -> bool:
+    """Multi-Modal Transport Document (MTD) layout — not a standard ocean B/L."""
+    sample = (text or "")[:12000]
+    return bool(
+        re.search(
+            r"MULTI-?MODAL\s+TRANSPORT\s+DOCUMENT|\bMTD\s+NO\b",
+            sample,
+            re.I,
+        )
+    )
+
+
 def _cargo_pages_text(raw_text: str) -> str:
     """All pages that contain the goods / HS description table."""
     pages = re.split(r"---\s*PAGE\s*\d+\s*---", raw_text or "", flags=re.I)
     parts: List[str] = []
     for body in pages[1:]:
         if re.search(
-            r"DESCRIPTION OF PACKAGES|SAID TO CONTAIN|HS\s*CODE|Continued on Next Sheet|Continued From Previous",
+            r"DESCRIPTION OF PACKAGES|SAID TO CONTAIN|HS\s*CODE|"
+            r"Continued on Next Sheet|Continued From Previous|"
+            r"MULTI-?MODAL\s+TRANSPORT|MTD\s+NO|Particulars above furnished|"
+            r"Kind of Packages and Goods",
             body,
             re.I,
         ):
@@ -44,21 +59,37 @@ def _cargo_pages_text(raw_text: str) -> str:
 
 
 _CARGO_LINE_STOP_RE = re.compile(
-    r"^(CONSOLIDATED CARGO|CARGO IN TRANSIT|ACID\s*:|EGYPTIAN FREIGHT|FOREIGN FREIGHT|"
-    r"Continued on Next Sheet|Continued From Previous|ABOVE PARTICULARS|"
-    r"SAY ONE HUNDRED|SAY \w+ HUNDRED|Shipped on Board|Weight in Kgs Total|"
-    r"SIGNED FOR THE CARRIER|FREIGHT (?:PREPAID|COLLECT)|SHIPPED ON BOARD)",
+    r"^(CONSOLIDATED CARGO|CARGO IN TRANSIT|FOREIGN EXPORTER|EGYPTIAN FREIGHT|FOREIGN FREIGHT|"
+    r"REGISTRATION TYPE|PARTICULARS OF GOODS|Continued on Next Sheet|Continued From Previous|"
+    r"ABOVE PARTICULARS|SAY ONE HUNDRED|SAY \w+ HUNDRED|Shipped on Board|Weight in Kgs Total|"
+    r"SIGNED FOR THE CARRIER|FREIGHT AND CHARGES|SHIPPED ON BOARD)",
     re.I,
 )
 _CARGO_LINE_SKIP_RE = re.compile(
-    r"^(MARKS AND|CONTAINER AND|NO AND KIND|DESCRIPTION OF PACKAGES|"
-    r"GROSS WEIGHT|TARE|MEASUREMENT|SHIPPER'?S LOAD|SAID TO CONTAIN|"
+    r"^(MARKS AND|CONTAINER AND|NO AND KIND|DESCRIPTION OF PACKAGES|DESCRIPTIONS OF GOODS|"
+    r"NUMBER OF PACKAGES|GROSS WEIGHT|TARE|MEASUREMENT|SHIPPER'?S LOAD|SAID TO CONTAIN|"
     r"VOYAGE|BILL OF LADING|PRE CARRIAGE|VESSEL|PORT OF LOADING|"
     r"PORT OF DISCHARGE|FINAL PLACE|COPY NON|BILL OF LADING NUMBER|"
     r"PLACE OF RECEIPT|FREIGHT TO BE|NUMBER OF ORIGINAL|"
+    r"FREIGHT\s+PREPAID|FREIGHT\s+COLLECT|TELEX\s+RELEASE|SEAL\s+NO|"
     r"KGS\s*$|CBM\s*$|KGS\s+KGS\s+CBM|"
     r"\*{3,}|SHENZHEN THREE|"
-    r"(?:TLLU|MSCU|CMAU|SEGU|OOLU|TCNU|TGHU|MEDU|GESU|CSLU|TGBU|HLBU|MSKU|MAEU)[A-Z0-9]{4,})",
+    r"MARKS\s+\d+\s*:|^\d{2}\s+HC-|"
+    r"(?:TLLU|MSCU|CMAU|SEGU|OOLU|TCNU|TGHU|MEDU|GESU|CSLU|TGBU|HLBU|MSKU|MAEU|GAOU)[A-Z0-9]{4,}|"
+    r"^[A-Z]{4}\d{6,7}[-]?\s*$)",
+    re.I,
+)
+_GOODS_LINE_START_RE = re.compile(
+    r"^\d+\s+PALLETS?\b|"
+    r"^\d+\s+(?:CARTONS?|PACKAGES?|DRUMS?|BAGS?|ROLLS?|CASES?|BALES?)\b|"
+    r"^(?:ROASTED|SALTED|DRIED|FROZEN|FRESH|BLANCHED|RAW|WHOLE|GROUND)\b",
+    re.I,
+)
+_GOODS_NARRATIVE_STOP_RE = re.compile(
+    r"^(FOREIGN EXPORTER|REGISTRATION TYPE|PARTICULARS OF GOODS|"
+    r"Shipped on Board|Weight in Kgs Total|SIGNED FOR THE CARRIER|"
+    r"FREIGHT AND CHARGES|Continued on Next Sheet|EGYPTIAN FREIGHT|"
+    r"All above particulars)",
     re.I,
 )
 # Container header row e.g. "TLLU4178846 1 x 40HC 179 PACKAGE(S) 14801.730 3900 50.657"
@@ -197,6 +228,10 @@ def _is_goods_noise(line: str) -> bool:
         return True
     if re.match(r"^SEAL\s+", line, re.I):
         return True
+    if re.match(r"^\d{2}\s+HC-", line, re.I):
+        return True
+    if re.match(r"^[A-Z]{4}\d{6,7}[-]?\s*$", line, re.I):
+        return True
     if re.match(r"^\d+\s*x\s*\d{2}[A-Z]{0,3}\b", line, re.I):
         return True
     if re.match(r"^\d+\s+PACKAGE", line, re.I):
@@ -206,8 +241,122 @@ def _is_goods_noise(line: str) -> bool:
     return False
 
 
-def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
-    """Goods lines from all cargo pages (continuation sheets included), deduped and capped."""
+_MTD_CARGO_STOP_RE = re.compile(
+    r"^(Particulars above furnished|Shipped on Board|Weight in Kgs Total|"
+    r"SIGNED FOR THE CARRIER|FREIGHT\s+AND\s+CHARGES|Place and Date of Issue|"
+    r"All above particulars|LADEN ON BOARD|CARRIAGE FORWARD)",
+    re.I,
+)
+_MTD_CARGO_SKIP_RE = re.compile(
+    r"^(Container No:?\s*$|A/Seal|C/Seal|M/Seal|Marks and Numbers|"
+    r"Packages and Packaging|Gross Weight|Measurement|Type of Movement|"
+    r"Kind of Packages|QUANTITY\s+GROSS|MODE OF TRANSPORT|"
+    r"MULTI-?MODAL\s+TRANSPORT|MTD\s+No|B/L\s+No|Shipper|Consignee|Notify|"
+    r"Port of Loading|Port of Discharge|Place of Delivery|"
+    r"Pre-carriage|On-carriage|Vessel|Voyage|"
+    r"(?:TLLU|TRKU|MSCU|CSLU|CMAU|SEGU|OOLU|TCNU|HLBU|MSKU|MAEU)[A-Z0-9]{4,7}\s*$|"
+    r"^\d+\s+PALLETS?\s*$|^\d+[,.]\d+\s*KGS|^\d+[,.]?\d*\s*CBM)",
+    re.I,
+)
+_MTD_INLINE_GOODS_RE = re.compile(
+    r"(\d+\s+PALLETS?\s+STC.+?)(?=\s*\d+[,.]\d+\s*KGS|\s*\d+[,.]?\d*\s*CBM|\s*Particulars above)",
+    re.I | re.S,
+)
+
+
+def _cap_cargo_description(description: str) -> str:
+    if len(description) > _CARGO_DESCRIPTION_MAX:
+        return description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
+    return description
+
+
+def extract_mtd_cargo_description_from_pdf(text: str) -> Optional[str]:
+    """
+    Goods narrative from Multi-Modal Transport Documents (MTD).
+
+    MTD layouts place the full cargo text between the container/seal block and
+    the "Particulars above furnished" / "Shipped on Board" footer — not after
+    the standard "SAID TO CONTAIN CARGO" / N/M markers used on ocean B/Ls.
+    """
+    lines_out: List[str] = []
+    seen: set[str] = set()
+
+    def add_line(raw: str) -> None:
+        s = re.sub(r"\s+", " ", (raw or "")).strip()
+        if not s or len(s) < 4:
+            return
+        if _MTD_CARGO_SKIP_RE.match(s):
+            return
+        if _CARGO_NUMERIC_NOISE_RE.match(s):
+            return
+        if re.search(r"\d+[,.]\d+\s*KGS|\d+[,.]?\d*\s*CBM", s, re.I):
+            s = re.sub(r"\s+\d+[,.]\d+\s*KGS.*$", "", s, flags=re.I).strip()
+            if not s or len(s) < 4:
+                return
+        key = re.sub(r"[^A-Z0-9]+", "", s.upper())[:80]
+        if not key or key in seen:
+            return
+        seen.add(key)
+        lines_out.append(s)
+
+    pages = re.split(r"---\s*PAGE\s*\d+\s*---", text or "", flags=re.I)
+    for idx in range(1, len(pages)):
+        bodies = (_visual_page_text(text, idx), pages[idx])
+        for body in bodies:
+            inline = _MTD_INLINE_GOODS_RE.search(body)
+            if inline:
+                chunk = re.sub(r"\s+", " ", inline.group(1)).strip()
+                for part in re.split(
+                    r"(?<=[.)])\s+(?=(?:\(\s*(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|\d+)\s+PALLETS?\s+SAID|[A-Z0-9]))",
+                    chunk,
+                ):
+                    add_line(part)
+
+            start = 0
+            m_stc = re.search(r"\d+\s+PALLETS?\s+STC", body, re.I)
+            m_paren = re.search(
+                r"\(\s*(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|\d+)\s+PALLETS?\s+SAID TO CONTAIN",
+                body,
+                re.I,
+            )
+            if m_stc:
+                start = m_stc.start()
+            elif m_paren:
+                start = m_paren.start()
+            elif inline:
+                continue
+            else:
+                continue
+
+            for ln in body[start:].splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                if _MTD_CARGO_STOP_RE.match(s):
+                    break
+                if _MTD_CARGO_SKIP_RE.match(s):
+                    continue
+                if _is_goods_noise(s):
+                    continue
+                add_line(s)
+
+            if lines_out:
+                break
+        if lines_out:
+            break
+
+    if not lines_out:
+        return None
+    return _cap_cargo_description("\n".join(lines_out))
+
+
+def _collect_goods_lines(
+    body: str,
+    start: int,
+    *,
+    stop_re: re.Pattern[str],
+) -> List[str]:
+    """Walk cargo page lines from *start*, dedupe and return goods narrative lines."""
     lines_out: List[str] = []
     seen: set[str] = set()
 
@@ -221,35 +370,90 @@ def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
         seen.add(key)
         lines_out.append(s)
 
+    for ln in body[start:].splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if stop_re.match(s):
+            break
+        if _CARGO_LINE_SKIP_RE.match(s):
+            continue
+        if _is_goods_noise(s):
+            continue
+        add_line(s)
+    return lines_out
+
+
+def _extract_goods_narrative_block(text: str) -> Optional[str]:
+    """
+    Extract goods narrative anchored at the first package/product line.
+
+    Handles standard B/L layouts where FREIGHT PREPAID / container marks appear
+    before the actual DESCRIPTIONS OF GOODS column text.
+    """
+    pages = re.split(r"---\s*PAGE\s*\d+\s*---", text or "", flags=re.I)
+    for idx in range(1, len(pages)):
+        body = _visual_page_text(text, idx) if idx < len(pages) else pages[idx]
+        split_lines = body.splitlines()
+        start_idx: Optional[int] = None
+        for i, ln in enumerate(split_lines):
+            s = ln.strip()
+            if s and _GOODS_LINE_START_RE.match(s):
+                start_idx = i
+                break
+        if start_idx is None:
+            continue
+        start = sum(len(split_lines[j]) + 1 for j in range(start_idx))
+        lines_out = _collect_goods_lines(
+            body,
+            start,
+            stop_re=_GOODS_NARRATIVE_STOP_RE,
+        )
+        if lines_out:
+            return _cap_cargo_description("\n".join(lines_out))
+    return None
+
+
+def _extract_standard_cargo_description(text: str) -> Optional[str]:
+    """Goods lines from standard ocean B/L cargo pages."""
+    lines_out: List[str] = []
     pages = re.split(r"---\s*PAGE\s*\d+\s*---", text or "", flags=re.I)
     for idx in range(1, len(pages)):
         body = _visual_page_text(text, idx) if idx < len(pages) else pages[idx]
         start = 0
         m = re.search(
-            r"(?:SEAL\s+[A-Z0-9]+\s*\n|SAID TO CONTAIN CARGO\s*\n|N/M\s+)",
+            r"(?:SEAL\s+NO\s*:?\s*\d+\s*\n|SEAL\s+[A-Z0-9]+\s*\n|"
+            r"SAID TO CONTAIN CARGO\s*\n|N/M\s+|\d+\s+PALLETS?\s*\n)",
             body,
             re.I,
         )
         if m:
             start = m.end()
-        for ln in body[start:].splitlines():
-            s = ln.strip()
-            if not s:
-                continue
-            if _CARGO_LINE_STOP_RE.match(s):
-                break
-            if _CARGO_LINE_SKIP_RE.match(s):
-                continue
-            if _is_goods_noise(s):
-                continue
-            add_line(s)
+        chunk = _collect_goods_lines(body, start, stop_re=_CARGO_LINE_STOP_RE)
+        lines_out.extend(chunk)
+        if lines_out:
+            break
 
     if not lines_out:
         return None
-    description = "\n".join(lines_out)
-    if len(description) > _CARGO_DESCRIPTION_MAX:
-        description = description[: _CARGO_DESCRIPTION_MAX].rsplit("\n", 1)[0]
-    return description
+    return _cap_cargo_description("\n".join(lines_out))
+
+
+def extract_cargo_description_from_pdf(text: str) -> Optional[str]:
+    """Goods lines from PDF text — standard B/L and MTD layouts."""
+    mtd_desc = extract_mtd_cargo_description_from_pdf(text) if _is_mtd_document(text) else None
+    std_desc = _extract_standard_cargo_description(text)
+    narrative_desc = _extract_goods_narrative_block(text)
+
+    candidates = [d for d in (narrative_desc, std_desc, mtd_desc) if d]
+    if not candidates:
+        return None
+    best = max(candidates, key=len)
+    merged = best
+    for candidate in candidates:
+        if candidate != best:
+            merged = _merge_cargo_description(merged, candidate) or merged
+    return merged
 
 
 def _merge_hs_codes(existing: Optional[str], pdf_hs: Optional[str]) -> Optional[str]:
@@ -295,6 +499,10 @@ def _merge_cargo_description(
 
     existing_tokens = {_key(t) for t in _split(existing) if _key(t)}
     pdf_tokens = {_key(t) for t in _split(pdf_desc) if _key(t)}
+
+    if pdf_desc and len(pdf_desc.strip()) >= max(len((existing or "").strip()) * 2, 100):
+        if not existing_tokens or existing_tokens.issubset(pdf_tokens):
+            return _cap_cargo_description(pdf_desc)
 
     if existing_tokens and existing_tokens.issubset(pdf_tokens):
         merged_lines = _split(pdf_desc)
@@ -608,6 +816,146 @@ def _is_plausible_consignee_name(name: str) -> bool:
     return True
 
 
+_BOGUS_PARTY_ADDRESS_RE = re.compile(
+    r"^(?:packages?|package\(s\)|number\s+of(?:\s+packages)?|of\s+packages|"
+    r"no\.?\s+and\s+kind(?:\s+of\s+packages)?|description\s+of\s+packages|"
+    r"marks\s+and(?:\s+nos)?|container\s+and(?:\s+seals)?|gross\s+weight|"
+    r"measurements?|shipper'?s\s+load|said\s+to\s+contain|coupling\.?|"
+    r"shpr:|notify|mto\s+registration|kind\s+of\s+packages)$",
+    re.I,
+)
+
+_ADDRESS_SIGNAL_RE = re.compile(
+    r"\d|(?:^|[\s,])(?:ST\.?|STREET|ROAD|AVE|BLVD|PORT|CITY|ZONE|"
+    r"EGYPT|INDIA|CAIRO|ALEXANDRIA|PUNE|MUMBAI|GIZA|RAMADAN)(?:[\s,]|$)",
+    re.I,
+)
+
+
+def _is_plausible_party_address(addr: Optional[str]) -> bool:
+    """Reject cargo-table column headers and other non-address OCR bleed."""
+    if not addr or not str(addr).strip():
+        return False
+    text = re.sub(r"\s+", " ", str(addr)).strip()
+    if len(text) < 6:
+        return False
+    if _BOGUS_PARTY_ADDRESS_RE.match(text):
+        return False
+    upper = text.upper()
+    if upper in {"PACKAGES", "PACKAGE(S)", "OF PACKAGES", "PACKAGE", "COUPLING"}:
+        return False
+    if re.fullmatch(r"[A-Z\s()./\-]{3,40}", upper) and not _ADDRESS_SIGNAL_RE.search(text):
+        return False
+    return bool(_ADDRESS_SIGNAL_RE.search(text) or len(text) > 24)
+
+
+def sanitize_party_address(addr: Optional[str]) -> Optional[str]:
+    if not _is_plausible_party_address(addr):
+        return None
+    return re.sub(r"\s+", " ", str(addr)).strip()[:250]
+
+
+def _is_to_order_consignee_name(name: Optional[str]) -> bool:
+    return bool(re.search(r"\bTO\s+THE\s+ORDER\s+OF\b", str(name or ""), re.I))
+
+
+_TO_ORDER_BANK_STOP_RE = re.compile(
+    r"^(?:NOTIFY|MTO\s+REGISTRATION|MARKS\s+AND|CONTAINER|VESSEL|PLACE\s+OF|"
+    r"BYTEPORT|WORKAFELLA)",
+    re.I,
+)
+
+
+def _extract_mtd_consignee_block(text: str) -> Dict[str, Optional[str]]:
+    """MTD: company + street lines after Consignee header (skip MTO registration line)."""
+    page1 = _page1_text(text)
+    if not (
+        _is_mtd_document(text)
+        or re.search(r"Consignee[^\n]*\n\s*MTO\s+REGISTRATION", page1, re.I)
+    ):
+        return {}
+    if re.search(r"TO\s+THE\s+ORDER\s+OF", page1, re.I):
+        return {}
+    m = re.search(
+        r"Consignee[^\n]*\n"
+        r"(?:MTO\s+REGISTRATION[^\n]*\n)?"
+        r"([^\n]+)\n"
+        r"(.*?)(?=\n(?:TEL:|FAX:|Notify|NOTIFY|SAME\s+AS|Vessel|Place\s+Of|Port\s+of|BYTEPORT|ICD/|MARKS\s*&))",
+        page1,
+        re.I | re.S,
+    )
+    if not m:
+        return {}
+    name = re.sub(r"\s+", " ", m.group(1)).strip()
+    if not _is_plausible_consignee_name(name) or name.upper().startswith("MTO "):
+        return {}
+    addr_parts: List[str] = []
+    contact: Optional[str] = None
+    for ln in m.group(2).splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if re.match(r"^(TEL|FAX|EMAIL)", s, re.I):
+            if re.match(r"^TEL", s, re.I):
+                contact = re.sub(r"\s+", " ", s)
+            continue
+        cleaned = re.sub(r"\s+", " ", s)
+        if _is_plausible_party_address(cleaned) or re.search(
+            r"\d|ST\.?|STREET|ROAD|EGYPT|INDIA|CAIRO|ALEXANDRIA|MANSOURA",
+            cleaned,
+            re.I,
+        ):
+            addr_parts.append(cleaned)
+    address = sanitize_party_address(", ".join(addr_parts)) if addr_parts else None
+    out: Dict[str, Optional[str]] = {"name": name[:200], "address": address}
+    if contact:
+        out["contact"] = contact[:250]
+    return out
+
+
+def normalize_delivery_address_for_crm(
+    value: Optional[str],
+    *,
+    destination: Optional[str] = None,
+) -> Optional[str]:
+    """Keep destination-agent blocks out of the short delivery-address column."""
+    from dataverse_field_limits import cap_field
+
+    if not value or not str(value).strip():
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    upper = text.upper()
+    if "MARINE" in upper and "ENGINEERING" in upper:
+        if destination and str(destination).strip():
+            return cap_field("mesco_operations", "mesco_deliveryaddress", str(destination).strip())
+        return None
+    return cap_field("mesco_operations", "mesco_deliveryaddress", text)
+
+
+def _extract_to_order_consignee(page1: str) -> Dict[str, Optional[str]]:
+    """Consignee when goods are to order of a bank — name only, no street address."""
+    bank: Optional[str] = None
+    m = re.search(r"TO\s+THE\s+ORDER\s+OF\s*\n\s*([^\n]+)", page1, re.I)
+    if m:
+        bank = re.sub(r"\s+", " ", m.group(1)).strip()
+    else:
+        m = re.search(
+            r"TO\s+THE\s+ORDER\s+OF\s+([A-Z0-9][A-Z0-9 &./\-'()]+)",
+            page1,
+            re.I,
+        )
+        if m:
+            bank = re.sub(r"\s+", " ", m.group(1)).strip()
+    if not bank or _TO_ORDER_BANK_STOP_RE.match(bank):
+        return {}
+    if "MESCO" in bank.upper() and "MARINE" in bank.upper():
+        return {}
+    if not _is_plausible_consignee_name(bank) and "BANK" not in bank.upper():
+        return {}
+    name = bank if _is_to_order_consignee_name(bank) else f"TO THE ORDER OF {bank}"
+    return {"name": name[:200], "address": None}
+
+
 def _extract_holder_consignee(page1: str) -> Dict[str, Optional[str]]:
     m = re.search(r"TO THE HOLDER OF\s*\n([A-Z0-9\-]+)", page1, re.I)
     if not m:
@@ -646,6 +994,88 @@ def _extract_express_bl_notify_party(page1: str) -> Dict[str, Optional[str]]:
     if addr_parts:
         result["mesco_notifyaddress"] = re.sub(r"\s+", " ", ", ".join(addr_parts))[:250]
     return result
+
+
+_DESTINATION_AGENT_RE = re.compile(
+    r"MESCO|MARINE\s*&?\s*ENGINEERING\s+SERVICES?\s+COMPANY",
+    re.I,
+)
+
+_ISSUING_AGENT_HINT_RE = re.compile(
+    r"\b(?:LOGISTICS|FREIGHT|FORWARDING|NAVEXEL|BYTEPORT|NXT|UTT|SHIPPING\s+AGENCY)\b",
+    re.I,
+)
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r"(?:PRIVATE\s+)?(?:LIMITED|LTD\.?|PTE\.?\s*LTD\.?|LLC|INC\.?|GMBH|S\.A\.?|CO\.?)$",
+    re.I,
+)
+
+
+def _clean_issuing_agent_name(name: str) -> Optional[str]:
+    cleaned = re.sub(r"\s+", " ", (name or "")).strip(" .,-|")
+    cleaned = re.sub(r"^(?:FOR|THE)\s+", "", cleaned, flags=re.I).strip()
+    if not cleaned or len(cleaned) < 6:
+        return None
+    if _DESTINATION_AGENT_RE.search(cleaned):
+        return None
+    if re.search(r"^(CONSIGNEE|SHIPPER|NOTIFY|VESSEL|PORT\s+OF|MTO\s+REGISTRATION)\b", cleaned, re.I):
+        return None
+    if not _ISSUING_AGENT_HINT_RE.search(cleaned) and not _COMPANY_SUFFIX_RE.search(cleaned):
+        return None
+    return cleaned[:200]
+
+
+def _is_destination_agent_name(name: Optional[str]) -> bool:
+    return bool(name and _DESTINATION_AGENT_RE.search(str(name)))
+
+
+def extract_issuing_agent(text: str) -> Optional[str]:
+    """
+    Issuing forwarder / MTO on the B/L (maps to Dynamics ``mesco_agent``).
+
+  Not the ocean carrier (``mesco_shippingline``) and not the destination
+    delivery agent at the bottom of the page (MESCO / notify2).
+    """
+    page1 = _page1_text(text)
+    sample = (text or "")[:20000]
+
+    patterns = (
+        r"(?:Freight\s+Amount\s+)?For\s+([A-Z0-9][A-Z0-9 &./\-'()]{4,100}?(?:PRIVATE\s+)?(?:LIMITED|LTD\.?))",
+        r"SIGNED\s+FOR\s+(?:THE\s+)?([A-Z0-9][A-Z0-9 &./\-'()]{4,100}?(?:LIMITED|LTD\.?))",
+        r"(?:Forwarding\s+Agent|Issued\s+by|As\s+agents?\s+for)\s*[:\-]?\s*"
+        r"([A-Z0-9][A-Z0-9 &./\-'()]{4,100}?(?:LIMITED|LTD\.?))",
+    )
+    for pat in patterns:
+        m = re.search(pat, sample, re.I)
+        if m:
+            name = _clean_issuing_agent_name(m.group(1))
+            if name:
+                return name
+
+    if _is_mtd_document(text) or re.search(r"MTO\s+REGISTRATION", page1, re.I):
+        for pat in (
+            r"\n([A-Z][A-Z0-9 &./\-'()]*LOGISTICS[^\n]{0,80}?(?:PRIVATE\s+)?(?:LIMITED|LTD\.?))",
+            r"\n(BYTEPORT\s+LOGISTICS[^\n]{0,80}?(?:PRIVATE\s+)?(?:LIMITED|LTD\.?))",
+            r"(NAVEXEL[^\n]{0,40})",
+        ):
+            m = re.search(pat, page1, re.I)
+            if m:
+                name = _clean_issuing_agent_name(m.group(1))
+                if name:
+                    return name
+
+    m = re.search(
+        r"Carrier['\u2019]?s?\s+Agent[^\n]*\n\s*([A-Z][^\n]{5,100}?(?:LIMITED|LTD\.?))",
+        page1,
+        re.I,
+    )
+    if m:
+        name = _clean_issuing_agent_name(m.group(1))
+        if name:
+            return name
+
+    return None
 
 
 def _extract_mesco_delivery_agent(page1: str) -> Dict[str, Optional[str]]:
@@ -753,15 +1183,13 @@ def extract_consignee_block(text: str) -> Dict[str, Optional[str]]:
     if holder:
         return holder
 
-    for pat in (
-        r"Consignee(?:\s+or\s+Order)?\s*\n(TO THE ORDER OF[^\n]+)",
-        r"\n(TO THE ORDER OF [A-Z0-9 &./\-']+)\n",
-    ):
-        m = re.search(pat, page1, re.I)
-        if m:
-            name = re.sub(r"\s+", " ", m.group(1)).strip()
-            if name and "MESCO" not in name.upper():
-                return {"name": name[:200], "address": None}
+    order = _extract_to_order_consignee(page1)
+    if order:
+        return order
+
+    mtd_cnee = _extract_mtd_consignee_block(text)
+    if mtd_cnee:
+        return mtd_cnee
 
     m = re.search(
         r"(?<!SAME AS )Consignee(?:\s+or\s+Order)?\s*\n([^\n]+)\n([^\n]+)",
@@ -776,7 +1204,8 @@ def extract_consignee_block(text: str) -> Dict[str, Optional[str]]:
         elif _is_plausible_consignee_name(name):
             if addr.upper().startswith(("SHPR:", "IMPORTER VAT", "DELIVERY AGENT", "NOTIFY")):
                 return {"name": name[:200], "address": None}
-            return {"name": name[:200], "address": addr[:250]}
+            clean_addr = sanitize_party_address(addr)
+            return {"name": name[:200], "address": clean_addr}
 
     same_as_block = _extract_consignee_before_same_as(page1)
     if same_as_block:
@@ -1112,9 +1541,41 @@ def enrich_bl_from_pdf_text(data: Dict[str, Any], raw_text: str) -> Dict[str, An
     if not raw_text:
         return data
 
-    # Manifest / ISALY draft rows already have per-B/L fields from the dedicated parser.
-    if data.get("_manifest_pdf_row") or data.get("_isaly_draft_row"):
-        return data
+    # Manifest / ISALY draft / debit-note / sea-waybill rows already have per-B/L fields.
+    if (
+        data.get("_manifest_pdf_row")
+        or data.get("_isaly_draft_row")
+        or data.get("document_type") == "debit_note"
+        or data.get("extraction_method") == "debit_note_direct"
+        or data.get("document_type") == "consolidation_sea_waybill"
+        or data.get("extraction_method") == "pdf_sea_waybill_direct"
+    ):
+        locked = {
+            k: data[k]
+            for k in (
+                "mesco_vessel",
+                "mesco_voytruckno",
+                "cr401_totalpackages",
+                "cr401_totalgrossweight",
+                "mesco_cargodescription",
+                "cargo_lines",
+                "mesco_bookingnumber",
+            )
+            if data.get(k) not in (None, "", [], {})
+        }
+        if not locked:
+            return data
+        enriched = dict(data)
+        hs = extract_hs_codes_from_goods(raw_text)
+        if hs:
+            enriched["mesco_hscode"] = _merge_hs_codes(enriched.get("mesco_hscode"), hs)
+        if not enriched.get("mesco_shippingline"):
+            carrier = extract_carrier_name(raw_text)
+            if carrier:
+                enriched["mesco_shippingline"] = carrier
+        for key, val in locked.items():
+            enriched[key] = val
+        return enriched
 
     attached = extract_attached_list_house_refs(raw_text)
     page1_refs = extract_page1_cargo_references(raw_text, attached)
@@ -1146,21 +1607,32 @@ def enrich_bl_from_pdf_text(data: Dict[str, Any], raw_text: str) -> Dict[str, An
     if consignee_block.get("name"):
         data["mesco_consigneenamecontactno"] = consignee_block["name"]
     if consignee_block.get("address"):
-        data["mesco_consigneeaddress"] = consignee_block["address"]
-    elif (consignee_block.get("name") or "").upper().startswith("TO THE HOLDER"):
+        data["mesco_consigneeaddress"] = sanitize_party_address(consignee_block["address"])
+    elif _is_to_order_consignee_name(consignee_block.get("name")) or (
+        (consignee_block.get("name") or "").upper().startswith("TO THE HOLDER")
+    ):
+        data["mesco_consigneeaddress"] = None
+    else:
+        data["mesco_consigneeaddress"] = sanitize_party_address(
+            data.get("mesco_consigneeaddress"),
+        )
+    if _is_to_order_consignee_name(data.get("mesco_consigneenamecontactno")):
         data["mesco_consigneeaddress"] = None
     if consignee_block.get("contact"):
         data["mesco_consigneecontactnumber"] = consignee_block["contact"]
 
     literal_same_as = _uses_literal_same_as_consignee_notify(raw_text)
+    same_as_notify_addr = sanitize_party_address(
+        consignee_block.get("address") or data.get("mesco_consigneeaddress"),
+    )
     if literal_same_as:
         data["mesco_notify1"] = "SAME AS CONSIGNEE"
-        if consignee_block.get("address"):
-            data["mesco_notifyaddress"] = consignee_block["address"]
+        if same_as_notify_addr:
+            data["mesco_notifyaddress"] = same_as_notify_addr
     elif re.search(r"SAME\s+AS\s+CONSIGNEE", raw_text, re.I) and consignee_block.get("name"):
         data["mesco_notify1"] = consignee_block["name"]
-        if consignee_block.get("address"):
-            data["mesco_notifyaddress"] = consignee_block["address"]
+        if same_as_notify_addr:
+            data["mesco_notifyaddress"] = same_as_notify_addr
     else:
         express_notify = _extract_express_bl_notify_party(page1)
         if express_notify.get("mesco_notify1"):
@@ -1168,13 +1640,18 @@ def enrich_bl_from_pdf_text(data: Dict[str, Any], raw_text: str) -> Dict[str, An
         if express_notify.get("mesco_notifyaddress"):
             data["mesco_notifyaddress"] = express_notify["mesco_notifyaddress"]
 
-    mesco_agent = _extract_mesco_delivery_agent(page1)
-    if mesco_agent.get("delivery_agent"):
-        data["delivery_agent"] = mesco_agent["delivery_agent"]
-        data["mesco_notify2"] = mesco_agent["delivery_agent"]
-        data["mesco_shippingline"] = mesco_agent["mesco_shippingline"]
-        if mesco_agent.get("delivery_agent_address"):
-            data["delivery_agent_address"] = mesco_agent["delivery_agent_address"]
+    mesco_delivery = _extract_mesco_delivery_agent(page1)
+    if mesco_delivery.get("delivery_agent"):
+        data["delivery_agent"] = mesco_delivery["delivery_agent"]
+        data["mesco_notify2"] = mesco_delivery["delivery_agent"]
+        if mesco_delivery.get("delivery_agent_address"):
+            data["delivery_agent_address"] = mesco_delivery["delivery_agent_address"]
+
+    issuing_agent = extract_issuing_agent(raw_text)
+    if issuing_agent:
+        data["mesco_agent"] = issuing_agent
+    elif _is_destination_agent_name(data.get("mesco_agent")):
+        data["mesco_agent"] = None
 
     freight_at = extract_freight_payable_at(raw_text)
     if freight_at:
@@ -1201,13 +1678,25 @@ def enrich_bl_from_pdf_text(data: Dict[str, Any], raw_text: str) -> Dict[str, An
 
     pod = extract_place_of_delivery(raw_text)
     delivery = extract_delivery_address(raw_text)
+    dest_hint = data.get("mesco_destination") or pod
     if pod:
-        data["mesco_deliveryaddress"] = pod
+        data["mesco_deliveryaddress"] = normalize_delivery_address_for_crm(
+            pod, destination=dest_hint,
+        )
     elif delivery:
-        data["mesco_deliveryaddress"] = delivery
+        data["mesco_deliveryaddress"] = normalize_delivery_address_for_crm(
+            delivery, destination=dest_hint,
+        )
+    elif data.get("mesco_deliveryaddress"):
+        data["mesco_deliveryaddress"] = normalize_delivery_address_for_crm(
+            data.get("mesco_deliveryaddress"),
+            destination=dest_hint,
+        )
     elif re.search(r"ISTANBUL\s*,\s*TURKEY", str(data.get("mesco_deliveryaddress") or ""), re.I):
         if pod:
-            data["mesco_deliveryaddress"] = pod
+            data["mesco_deliveryaddress"] = normalize_delivery_address_for_crm(
+                pod, destination=dest_hint,
+            )
 
     from pdf_groupage_cargo import extract_groupage_cargo_lines
 

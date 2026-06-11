@@ -56,6 +56,7 @@ class BLEntity(BaseModel):
     cr401_totalteus: StrOrNum = None
 
     mesco_pcfreightterm: StrOrNum = None
+    mesco_bookingterm: StrOrNum = None
     mesco_etdorigin: StrOrNum = None
     mesco_etadestination: StrOrNum = None
     mesco_pickupaddress: StrOrNum = None
@@ -64,10 +65,12 @@ class BLEntity(BaseModel):
     mesco_notes: StrOrNum = None
     mesco_certificatenumber: StrOrNum = None
     mesco_shippingline: StrOrNum = None
+    mesco_agent: StrOrNum = None
     mesco_transhipmentport: StrOrNum = None
     mesco_importerstaxno: StrOrNum = None
     mesco_foreignsupplierregistrationnumber: StrOrNum = None
     mesco_incoterm: StrOrNum = None
+    mesco_blstatus: StrOrNum = None
     mesco_telexrelease: Optional[bool] = False
     mesco_imoclass: StrOrNum = None
     mesco_unnumber: StrOrNum = None

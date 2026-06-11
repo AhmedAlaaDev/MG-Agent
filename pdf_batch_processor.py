@@ -173,7 +173,9 @@ def process_pdf_bytes(
                 }
 
         if not validated_records:
-            parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
+            parse_result = parse_document_intelligently(
+                raw_text, extracted, file_bytes=file_bytes, filename=name
+            )
             extraction_quality.update(parse_result.quality)
             document_layout = parse_result.document_layout
             if parse_result.azure_warnings:
