@@ -30,19 +30,39 @@ from ai_extractor import extract_with_azure_openai
 from document_parser import parse_document_intelligently
 from pdf_batch_processor import process_pdf_bytes
 from crm_mapper import map_crm_operation_to_records
-from config import settings
+from config import GEMINI_MODELS, settings
+from llm_context import (
+    llm_extraction_prefix,
+    llm_meta,
+    llm_request_overrides,
+    uses_gemini,
+    validate_llm_request,
+)
+from llm_models import GeminiModelQuery, LlmProviderQuery
 from validator import validate_and_correct
 from crm_output_formatter import (
     apply_bl_type_to_crm_payload,
+    normalize_bl_type,
     records_to_house_json,
     records_to_master_json,
 )
 from pdf_attached_list import build_house_records_from_attached_list, extract_attached_list_house_refs
 from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
 from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
+from pdf_cargo_manifest import (
+    is_cargo_manifest_hbl_blocks,
+    parse_cargo_manifest_hbl_blocks,
+)
 from pdf_consolidated_lcl import (
     is_consolidated_lcl_multi_hbl,
     parse_consolidated_lcl_multi_hbl,
+)
+from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
+from pdf_sea_waybill import (
+    build_house_records_for_consolidation_sea_waybill,
+    is_consolidation_sea_waybill,
+    master_record_without_house_cargo,
+    parse_consolidation_sea_waybill,
 )
 
 
@@ -293,22 +313,56 @@ async def health():
     from dotenv import load_dotenv
 
     load_dotenv()
+    meta = llm_meta()
     return {
         "status": "ok",
         "version": "4.0.0",
-        **settings.llm_meta(),
-        "azure_in_use": not settings.uses_gemini,
+        **meta,
+        "azure_in_use": not uses_gemini(),
         "azure_openai_configured": bool(
             settings.azure_openai_endpoint and settings.azure_openai_api_key
         ),
         "gemini_configured": bool(settings.gemini_api_key),
         "azure_openai_deployment": settings.azure_openai_deployment or None,
+        "default_gemini_model": settings.gemini_model,
+        "gemini_models": list(GEMINI_MODELS),
         "dataverse_configured": bool(
             os.environ.get("AZURE_APP_API_URL")
             and os.environ.get("TENANT_ID")
             and os.environ.get("CLIENT_ID")
             and os.environ.get("CLIENT_SECRET")
         ),
+    }
+
+
+@app.get("/business-rules", tags=["Extraction"])
+async def business_rules_status():
+    """Describe toggleable CRM business rules (env + per-request override)."""
+    from custom_business_rules import custom_rules_enabled
+
+    return {
+        "enabled_by_default": custom_rules_enabled(),
+        "env_var": "CUSTOM_BUSINESS_RULES_ENABLED",
+        "request_param": "apply_custom_rules",
+        "rules": [
+            "Prepaid → Booking Term Freehand, Freight Payable At Origin",
+            "Collect → Booking Term Nomination, Freight Payable At Destination",
+            "Load type FCL vs LCL from document meaning (consolidation/CFS/manifest)",
+            "LCL house operations: Total TEUs = 0",
+            "Multi-house master: totals = sum of house rows",
+        ],
+    }
+
+
+@app.get("/llm/models", tags=["Extraction"])
+async def list_llm_models():
+    """Gemini model ids available for per-request selection (same ids as Puter.js)."""
+    return {
+        "providers": ["azure", "gemini"],
+        "default_provider": (settings.llm_provider or "azure").strip().lower(),
+        "default_gemini_model": settings.gemini_model,
+        "default_azure_deployment": settings.azure_openai_deployment,
+        "gemini_models": list(GEMINI_MODELS),
     }
 
 
@@ -319,6 +373,8 @@ class CrmExtractRequest(BaseModel):
 class ExtractRequest(BaseModel):
     ocr_text: str
     bl_type: BlTypeQuery = BlTypeQuery.master
+    llm_provider: Optional[LlmProviderQuery] = None
+    llm_model: Optional[str] = None
 
 
 class ExtractResponse(BaseModel):
@@ -399,19 +455,28 @@ async def upload_to_dataverse(
         BlTypeQuery.master,
         description="B/L type for the created operation: master or house (sets mesco_bltype on upload)",
     ),
+    apply_custom_rules: bool = Query(
+        True,
+        description="Apply CRM business rules (freight→booking, load type, LCL TEUs, house totals)",
+    ),
 ):
     try:
         content = await file.read()
         crm_data = json.loads(content.decode("utf-8"))
-        if isinstance(crm_data, dict):
-            masters = crm_data.get("masters")
-            if isinstance(masters, list):
-                for m in masters:
-                    if isinstance(m, dict):
-                        apply_bl_type_to_crm_payload(m, bl_type.value)
-            else:
-                apply_bl_type_to_crm_payload(crm_data, bl_type.value)
-        result = upload_crm_json(crm_data)
+        from custom_business_rules import prepare_crm_payload_for_upload, use_custom_rules
+
+        with use_custom_rules(apply_custom_rules):
+            if isinstance(crm_data, dict):
+                masters = crm_data.get("masters")
+                if isinstance(masters, list):
+                    for m in masters:
+                        if isinstance(m, dict):
+                            apply_bl_type_to_crm_payload(m, bl_type.value)
+                            prepare_crm_payload_for_upload(m)
+                else:
+                    apply_bl_type_to_crm_payload(crm_data, bl_type.value)
+                    prepare_crm_payload_for_upload(crm_data)
+            result = upload_crm_json(crm_data)
         return DataverseUploadResponse(success=True, result=result)
     except json.JSONDecodeError:
         return DataverseUploadResponse(success=False, error="Invalid JSON file.")
@@ -431,43 +496,147 @@ async def upload_to_dataverse_json(
         BlTypeQuery.master,
         description="B/L type for the created operation: master or house (sets mesco_bltype on upload)",
     ),
+    apply_custom_rules: bool = Query(
+        True,
+        description="Apply CRM business rules (freight→booking, load type, LCL TEUs, house totals)",
+    ),
 ):
     try:
-        if isinstance(payload, dict):
-            apply_bl_type_to_crm_payload(payload, bl_type.value)
-        result = upload_crm_json(payload)
+        from custom_business_rules import prepare_crm_payload_for_upload, use_custom_rules
+
+        with use_custom_rules(apply_custom_rules):
+            if isinstance(payload, dict):
+                apply_bl_type_to_crm_payload(payload, bl_type.value)
+                prepare_crm_payload_for_upload(payload)
+            result = upload_crm_json(payload)
         return DataverseUploadResponse(success=True, result=result)
     except Exception as exc:
         return DataverseUploadResponse(success=False, error=str(exc))
 
 
-def process_single_record(record_text: str, source_info: str) -> Dict[str, Any]:
+def process_single_record(
+    record_text: str,
+    source_info: str,
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
     """Process a single record through intelligent AI extraction and validation."""
     try:
-        parse_result = parse_document_intelligently(record_text)
+        parse_result = parse_document_intelligently(
+            record_text,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
         if not parse_result.records:
             raise ValueError("No records extracted from spreadsheet row text.")
         validated = parse_result.records[0]
         validated["_source_info"] = source_info
-        validated["extraction_method"] = validated.get("extraction_method") or f"{settings.llm_extraction_prefix}_intelligent_record"
+        validated["extraction_method"] = validated.get("extraction_method") or f"{llm_extraction_prefix()}_intelligent_record"
         return validated
     except Exception as exc:
         return {"_source_info": source_info, "_error": str(exc)}
 
 
-def process_workbook_with_azure(raw_text: str, extracted: Dict[str, Any], extraction_quality: Dict[str, Any]) -> Dict[str, Any]:
+def process_workbook_with_azure(
+    raw_text: str,
+    extracted: Dict[str, Any],
+    extraction_quality: Dict[str, Any],
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
     """Intelligent parse for unknown workbook/PDF layouts; returns first validated record."""
-    parse_result = parse_document_intelligently(raw_text, extracted)
+    parse_result = parse_document_intelligently(
+        raw_text,
+        extracted,
+        file_bytes=file_bytes,
+        filename=filename,
+    )
     if not parse_result.records:
         raise ValueError("Intelligent parser returned no B/L records.")
     validated = parse_result.records[0]
-    validated["extraction_method"] = validated.get("extraction_method") or f"{settings.llm_extraction_prefix}_intelligent_workbook"
+    validated["extraction_method"] = validated.get("extraction_method") or f"{llm_extraction_prefix()}_intelligent_workbook"
     validated["source_extraction_method"] = extracted.get("method", "unknown")
     validated["extraction_quality"] = {**extraction_quality, **parse_result.quality}
     validated["_document_layout"] = parse_result.document_layout
     if len(parse_result.records) > 1:
         validated["_additional_records"] = parse_result.records[1:]
     return validated
+
+
+def _should_use_gemini_workbook_llm(records: List[Dict[str, Any]], raw_text: str) -> bool:
+    """Prefer one whole-workbook Gemini call for long manifests instead of per-row LLM."""
+    if not uses_gemini():
+        return False
+    if len(records) >= settings.gemini_workbook_llm_min_rows:
+        return True
+    if len(raw_text or "") >= 25_000:
+        return True
+    upper = (raw_text or "").upper()
+    manifest_markers = ("MANIFEST", "H/BL", "HOUSE B/L", "LOADING SHEET", "PROXY BILL")
+    if any(m in upper for m in manifest_markers) and len(records) >= 2:
+        return True
+    return False
+
+
+def _response_from_intelligent_parse(
+    parse_result,
+    raw_text: str,
+    extraction_quality: Dict[str, Any],
+    post_to_dataverse: bool,
+    download: bool,
+    bl_type: BlTypeQuery,
+    *,
+    routing_policy: str = "gemini_intelligent_workbook",
+) -> Any:
+    """Build ExtractResponse from parse_document_intelligently output."""
+    extraction_quality.update(parse_result.quality)
+    if parse_result.azure_warnings:
+        extraction_quality["azure_warnings"] = parse_result.azure_warnings
+    records = parse_result.records
+    layout = parse_result.document_layout or "unknown"
+    extraction_quality.setdefault("record_routing", {})
+    extraction_quality["record_routing"].update({
+        "policy": routing_policy,
+        "mode": layout,
+        "azure_fallback": len(records),
+    })
+
+    house_recs = [r for r in records if r.get("mesco_houseblno")]
+    master_recs = [
+        r for r in records
+        if r.get("mesco_masterblno") and not r.get("mesco_houseblno")
+    ]
+
+    if layout in ("manifest", "master_with_houses") and len(house_recs) >= 2:
+        master_record = master_recs[0] if master_recs else None
+        crm_output = records_to_master_json(house_recs, master_record=master_record)
+        house_output = records_to_house_json(house_recs, master_record=master_record)
+        extraction_quality["consolidated_house_count"] = len(house_recs)
+        return _build_response(
+            crm_output, raw_text, extraction_quality,
+            post_to_dataverse, download, house_output, bl_type=bl_type,
+        )
+
+    if len(records) >= 2 and layout == "multi_bl_pages":
+        crm_masters = [records_to_master_json([v]) for v in records]
+        return _build_response(
+            crm_masters[0], raw_text, extraction_quality,
+            post_to_dataverse, download, house_output={"value": []},
+            crm_records=crm_masters, bl_type=bl_type,
+        )
+
+    if len(records) >= 2:
+        crm_output = records_to_master_json(records)
+        house_output = records_to_house_json(records)
+    else:
+        crm_output = records_to_master_json(records)
+        house_output = records_to_house_json(records)
+    return _build_response(
+        crm_output, raw_text, extraction_quality,
+        post_to_dataverse, download, house_output, bl_type=bl_type,
+    )
 
 
 def _drop_empty_values(value: Any) -> Any:
@@ -716,9 +885,17 @@ def _parse_manifest_context(record_text: str) -> Dict[str, Optional[str]]:
     if agent:
         agent = re.split(r"\s+(?:\[|[A-Z][A-Z0-9 ()/\-]*\s+ROW\s+\d+:)", agent, 1)[0].strip()
 
+    consol_job_no = cells.get("C3") or (job_match.group(1) if job_match else None)
+    job_no = _value_below_label(cells, r"JOB\s*NO") or header_map.get("JOB NO.")
+    # An LCL loading sheet may have no ocean M/BL number — only a JOB NO that
+    # identifies the consolidation. Use it as the master B/L so the master
+    # operation has a B/L and every house links back to it via
+    # mesco_masterbllinkno.
+    master_bl = mbl_no or consol_job_no or job_no
+
     return {
-        "consol_job_no": cells.get("C3") or (job_match.group(1) if job_match else None),
-        "mesco_masterblno": mbl_no,
+        "consol_job_no": consol_job_no,
+        "mesco_masterblno": master_bl,
         "mesco_vessel": vessel,
         "mesco_voytruckno": voyage,
         "pod": cells.get("J3") or _value_below_label(cells, r"POD", r"PORT\s+OF\s+DISCHARG") or header_map.get("Port Of Discharging"),
@@ -728,7 +905,7 @@ def _parse_manifest_context(record_text: str) -> Dict[str, Optional[str]]:
         "mesco_containertype": container_type,
         "mesco_etdorigin": _excel_serial_date(etd_value),
         "carrier": _value_below_label(cells, r"CARRIER") or header_map.get("Carrier"),
-        "job_no": _value_below_label(cells, r"JOB\s*NO") or header_map.get("JOB NO."),
+        "job_no": job_no,
         "mbl_shipper": _value_below_label(cells, r"M/?BL\s+SHIPPER") or header_map.get("M/BL Shipper"),
         "delivery_agent": _value_below_label(cells, r"DELIVERY\s+AGENT") or header_map.get("Delivery Agent"),
         "mbl_acid": _value_below_label(cells, r"M/?BL\s+ACID") or header_map.get("M/BL ACID"),
@@ -932,6 +1109,14 @@ async def extract_file(
         BlTypeQuery.master,
         description="B/L type: master (886150001) or house (886150002)",
     ),
+    llm_provider: Optional[LlmProviderQuery] = Form(
+        None,
+        description="AI backend: azure or gemini (defaults to LLM_PROVIDER in .env)",
+    ),
+    llm_model: Optional[GeminiModelQuery] = Form(
+        None,
+        description="Gemini model id when llm_provider=gemini (same list as Puter.js free tier)",
+    ),
     post_to_dataverse: bool = Form(
         True,
         description="Automatically upload extracted data to Dynamics 365 Dataverse",
@@ -940,6 +1125,59 @@ async def extract_file(
         False,
         description="Download the CRM JSON as a file instead of returning the normal response",
     ),
+    apply_custom_rules: bool = Form(
+        True,
+        description="Apply CRM business rules (freight→booking, load type, LCL TEUs, house totals)",
+    ),
+):
+    provider_val = llm_provider.value if llm_provider else None
+    model_val = llm_model.value if llm_model else None
+    try:
+        validate_llm_request(provider_val, model_val)
+    except ValueError as exc:
+        return ExtractResponse(success=False, error=str(exc))
+
+    try:
+        with llm_request_overrides(provider_val, model_val):
+            return await _extract_file_inner(
+                file,
+                bl_type=bl_type,
+                post_to_dataverse=post_to_dataverse,
+                download=download,
+                apply_custom_rules=apply_custom_rules,
+            )
+    except Exception as exc:
+        return ExtractResponse(success=False, error=str(exc))
+
+
+async def _extract_file_inner(
+    file: UploadFile,
+    *,
+    bl_type: BlTypeQuery,
+    post_to_dataverse: bool,
+    download: bool,
+    apply_custom_rules: bool = True,
+):
+    from custom_business_rules import use_custom_rules
+
+    try:
+        with use_custom_rules(apply_custom_rules):
+            return await _extract_file_inner_impl(
+                file,
+                bl_type=bl_type,
+                post_to_dataverse=post_to_dataverse,
+                download=download,
+            )
+    except Exception as exc:
+        return ExtractResponse(success=False, error=str(exc))
+
+
+async def _extract_file_inner_impl(
+    file: UploadFile,
+    *,
+    bl_type: BlTypeQuery,
+    post_to_dataverse: bool,
+    download: bool,
 ):
     try:
         file_bytes = await file.read()
@@ -952,8 +1190,36 @@ async def extract_file(
         if not raw_text.strip():
             return ExtractResponse(success=False, error="No text extracted from file.")
 
+        extracted["filename"] = file.filename
+
         # If spreadsheet has individual records, process each separately
         if records and len(records) > 0:
+            # Gemini: read the whole workbook natively (xlsx layout + long text).
+            if _should_use_gemini_workbook_llm(records, raw_text):
+                parse_result = parse_document_intelligently(
+                    raw_text,
+                    extracted,
+                    file_bytes=file_bytes,
+                    filename=file.filename,
+                )
+                if parse_result.records:
+                    extraction_quality["record_routing"] = {
+                        "direct": 0,
+                        "azure_fallback": len(parse_result.records),
+                        "skipped": 0,
+                        "policy": "gemini_whole_workbook",
+                        "mode": "native_spreadsheet_or_chunked_text",
+                    }
+                    return _response_from_intelligent_parse(
+                        parse_result,
+                        raw_text,
+                        extraction_quality,
+                        post_to_dataverse,
+                        download,
+                        bl_type,
+                        routing_policy="gemini_whole_workbook",
+                    )
+
             extracted_records = []
             route_counts = {
                 "direct": 0,
@@ -983,7 +1249,12 @@ async def extract_file(
                 source_info = _record_source_info(rec)
                 
                 if record_text:
-                    result = process_single_record(record_text, source_info)
+                    result = process_single_record(
+                        record_text,
+                        source_info,
+                        file_bytes=file_bytes,
+                        filename=file.filename,
+                    )
                     result["_routing"] = {
                         "route": "azure_fallback",
                         "reason": (
@@ -998,35 +1269,80 @@ async def extract_file(
 
             extraction_quality["record_routing"] = route_counts
             if not extracted_records:
-                parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
-                extraction_quality.update(parse_result.quality)
+                parse_result = parse_document_intelligently(
+                    raw_text,
+                    extracted,
+                    file_bytes=file_bytes,
+                    filename=file.filename,
+                )
                 if not parse_result.records:
                     return ExtractResponse(
                         success=False,
                         error="No processable records in spreadsheet/workbook.",
                         extraction_quality=extraction_quality,
                     )
-                if len(parse_result.records) >= 2:
-                    crm_masters = [records_to_master_json([v]) for v in parse_result.records]
-                    return _build_response(
-                        crm_masters[0],
-                        raw_text,
-                        extraction_quality,
-                        post_to_dataverse,
-                        download,
-                        house_output={"value": []},
-                        crm_records=crm_masters,
-                        bl_type=bl_type,
-                    )
-                extracted_records = parse_result.records
-                crm_output = records_to_master_json(extracted_records)
-                house_output = records_to_house_json(extracted_records)
-                return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output, bl_type=bl_type)
+                return _response_from_intelligent_parse(
+                    parse_result,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    bl_type,
+                    routing_policy="intelligent_workbook_fallback",
+                )
 
             crm_output = records_to_master_json(extracted_records)
             house_output = records_to_house_json(extracted_records)
             return _build_response(crm_output, raw_text, extraction_quality, post_to_dataverse, download, house_output, bl_type=bl_type)
         
+        if is_consolidation_sea_waybill(raw_text):
+            sea_waybill = parse_consolidation_sea_waybill(raw_text)
+            if sea_waybill:
+                validated = validate_and_correct(sea_waybill, raw_text)
+                extraction_quality["document_type_detected"] = "consolidation_sea_waybill_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_consolidation_sea_waybill",
+                    "mode": "master_with_attached_list",
+                }
+                house_records = build_house_records_for_consolidation_sea_waybill(
+                    validated,
+                    raw_text,
+                )
+                if house_records:
+                    extraction_quality["attached_list_house_count"] = len(house_records)
+                    master_for_crm = (
+                        master_record_without_house_cargo(validated)
+                        if any(r.get("_per_house_cargo") for r in house_records)
+                        else validated
+                    )
+                    crm_output = records_to_master_json(
+                        house_records,
+                        master_record=master_for_crm,
+                    )
+                    house_output = records_to_house_json(
+                        house_records,
+                        master_record=master_for_crm,
+                    )
+                else:
+                    crm_output = records_to_master_json([validated])
+                    house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(getattr(bl_type, "value", bl_type))
+                if resolved_bl == "house" and not house_records:
+                    bl_type = BlTypeQuery.master
+                    extraction_quality["bl_type_corrected"] = "master_consolidation_sea_waybill"
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
         # No individual records: future/unknown Excel layouts go to Azure as one workbook.
         extraction_quality["record_routing"] = {
             "direct": 0,
@@ -1111,6 +1427,73 @@ async def extract_file(
                     bl_type=bl_type,
                 )
 
+        if is_freight_debit_note(raw_text):
+            debit_record = parse_freight_debit_note(raw_text)
+            if debit_record:
+                validated = validate_and_correct(debit_record, raw_text)
+                extraction_quality["document_type_detected"] = "freight_debit_note_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_freight_debit_note",
+                    "mode": "single_house_from_debit_note",
+                }
+                house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(
+                    getattr(bl_type, "value", bl_type),
+                )
+                if resolved_bl == "house" and house_output.get("value"):
+                    crm_output = house_output["value"][0]
+                else:
+                    crm_output = records_to_master_json([validated])
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
+        if is_cargo_manifest_hbl_blocks(raw_text):
+            manifest = parse_cargo_manifest_hbl_blocks(raw_text)
+            if manifest and len(manifest["house_records"]) >= 2:
+                # House blocks are already self-contained and per-house clean.
+                # Deliberately skip validate_and_correct here: its whole-document
+                # enrichment (consignee block, merged HS codes, cargo description)
+                # would bleed the master header / other houses into every record.
+                house_records = manifest["house_records"]
+                master_record = manifest["master_record"]
+                extraction_quality["document_type_detected"] = "cargo_manifest_hbl_blocks_pdf"
+                extraction_quality["consolidated_house_count"] = len(house_records)
+                extraction_quality["record_routing"] = {
+                    "direct": len(house_records),
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_cargo_manifest_hbl_blocks",
+                    "mode": "one_master_with_house_records",
+                    "document_layout": "master_with_labelled_house_blocks",
+                }
+                crm_output = records_to_master_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                house_output = records_to_house_json(
+                    house_records,
+                    master_record=master_record,
+                )
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
         if is_consolidated_lcl_multi_hbl(raw_text):
             consolidated = parse_consolidated_lcl_multi_hbl(raw_text)
             if consolidated and len(consolidated["house_records"]) >= 2:
@@ -1150,7 +1533,12 @@ async def extract_file(
                     bl_type=bl_type,
                 )
 
-        parse_result = parse_document_intelligently(raw_text, extracted, pdf_bytes=file_bytes)
+        parse_result = parse_document_intelligently(
+            raw_text,
+            extracted,
+            file_bytes=file_bytes,
+            filename=file.filename,
+        )
         extraction_quality.update(parse_result.quality)
         if parse_result.azure_warnings:
             extraction_quality["azure_warnings"] = parse_result.azure_warnings
@@ -1187,17 +1575,24 @@ async def extract_file(
             )
 
         validated = parse_result.records[0]
-        attached_refs = extract_attached_list_house_refs(raw_text)
-        if attached_refs:
-            house_records = build_house_records_from_attached_list(validated, attached_refs)
+        house_records = build_house_records_for_consolidation_sea_waybill(
+            validated,
+            raw_text,
+        )
+        if house_records:
             extraction_quality["attached_list_house_count"] = len(house_records)
+            master_for_crm = (
+                master_record_without_house_cargo(validated)
+                if any(r.get("_per_house_cargo") for r in house_records)
+                else validated
+            )
             crm_output = records_to_master_json(
                 house_records,
-                master_record=validated,
+                master_record=master_for_crm,
             )
             house_output = records_to_house_json(
                 house_records,
-                master_record=validated,
+                master_record=master_for_crm,
             )
         else:
             extracted_records = [validated]
@@ -1223,8 +1618,12 @@ def _build_response(
     dataverse_error = None
     masters = crm_records if crm_records else None
 
+    from custom_business_rules import apply_crm_payload_rules, custom_rules_enabled
+
     if isinstance(crm_output, dict) and crm_output:
         apply_bl_type_to_crm_payload(crm_output, getattr(bl_type, "value", bl_type))
+    if custom_rules_enabled() and isinstance(crm_output, dict) and crm_output:
+        apply_crm_payload_rules(crm_output)
     if masters:
         for m in masters:
             if isinstance(m, dict):
@@ -1274,6 +1673,7 @@ def _build_response(
         extraction_quality["mesco_bltype"] = (
             886150002 if resolved_bl_type == "house" else 886150001
         )
+        extraction_quality.update(llm_meta())
 
     return ExtractResponse(
         success=True,
@@ -1363,36 +1763,44 @@ async def test_pdf_batch(
 
 @app.post("/extract/text", response_model=ExtractResponse, tags=["Extraction"])
 async def extract_text(request: ExtractRequest):
+    provider_val = request.llm_provider.value if request.llm_provider else None
+    model_val = (request.llm_model or "").strip() or None
     try:
-        raw_text = request.ocr_text
-        if not raw_text.strip():
-            return ExtractResponse(success=False, error="No text provided.")
+        validate_llm_request(provider_val, model_val)
+    except ValueError as exc:
+        return ExtractResponse(success=False, error=str(exc))
 
-        parse_result = parse_document_intelligently(raw_text)
-        if not parse_result.records:
-            return ExtractResponse(success=False, error="No B/L records extracted.", raw_text=raw_text)
+    try:
+        with llm_request_overrides(provider_val, model_val):
+            raw_text = request.ocr_text
+            if not raw_text.strip():
+                return ExtractResponse(success=False, error="No text provided.")
 
-        if len(parse_result.records) >= 2:
-            crm_masters = [records_to_master_json([v]) for v in parse_result.records]
-            for m in crm_masters:
-                apply_bl_type_to_crm_payload(m, request.bl_type.value)
+            parse_result = parse_document_intelligently(raw_text)
+            if not parse_result.records:
+                return ExtractResponse(success=False, error="No B/L records extracted.", raw_text=raw_text)
+
+            if len(parse_result.records) >= 2:
+                crm_masters = [records_to_master_json([v]) for v in parse_result.records]
+                for m in crm_masters:
+                    apply_bl_type_to_crm_payload(m, request.bl_type.value)
+                return ExtractResponse(
+                    success=True,
+                    data=crm_masters[0],
+                    records=crm_masters,
+                    raw_text=raw_text,
+                    extraction_quality=parse_result.quality,
+                )
+
+            validated = parse_result.records[0]
+            crm_output = records_to_master_json([validated])
+            apply_bl_type_to_crm_payload(crm_output, request.bl_type.value)
             return ExtractResponse(
                 success=True,
-                data=crm_masters[0],
-                records=crm_masters,
+                data=crm_output,
                 raw_text=raw_text,
                 extraction_quality=parse_result.quality,
             )
-
-        validated = parse_result.records[0]
-        crm_output = records_to_master_json([validated])
-        apply_bl_type_to_crm_payload(crm_output, request.bl_type.value)
-        return ExtractResponse(
-            success=True,
-            data=crm_output,
-            raw_text=raw_text,
-            extraction_quality=parse_result.quality,
-        )
     except Exception as exc:
         return ExtractResponse(success=False, error=str(exc))
 
@@ -1403,7 +1811,11 @@ async def extract_text(request: ExtractRequest):
     summary="Extract from PDF (Master or House B/L)",
     description=(
         "Upload a PDF and extract B/L data. Use **bl_type** to post as "
-        "**master** (886150001) or **house** (886150002) in Dynamics."
+        "**master** (886150001) or **house** (886150002) in Dynamics.\n\n"
+        "**Gemini (recommended for long PDFs):** set `llm_provider=gemini` and optionally "
+        "`llm_model=gemini-2.5-flash`. With Gemini, the original PDF is sent to the model "
+        "for layout/table understanding; documents longer than the context budget are "
+        "split by page and merged automatically."
     ),
     tags=["Extraction"],
 )
@@ -1414,6 +1826,14 @@ async def extract_pdf(
         title="B/L Type",
         description="Post as Master B/L (886150001) or House B/L (886150002)",
     ),
+    llm_provider: Optional[LlmProviderQuery] = Query(
+        None,
+        description="AI backend: azure or gemini (defaults to LLM_PROVIDER in .env)",
+    ),
+    llm_model: Optional[GeminiModelQuery] = Query(
+        None,
+        description="Gemini model id when llm_provider=gemini (Puter.js-compatible ids)",
+    ),
     post_to_dataverse: bool = Query(
         True,
         description="Automatically upload extracted data to Dynamics 365 Dataverse",
@@ -1422,12 +1842,19 @@ async def extract_pdf(
         False,
         description="Download the CRM JSON as a file instead of returning the normal response",
     ),
+    apply_custom_rules: bool = Query(
+        True,
+        description="Apply CRM business rules (freight→booking, load type, LCL TEUs, house totals)",
+    ),
 ):
     return await extract_file(
         file,
         bl_type=bl_type,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
         post_to_dataverse=post_to_dataverse,
         download=download,
+        apply_custom_rules=apply_custom_rules,
     )
 
 
@@ -1435,7 +1862,12 @@ async def extract_pdf(
     "/extract/excel",
     response_model=ExtractResponse,
     summary="Extract from Excel file",
-    description="Upload an Excel file (.xlsx, .xls, .csv). Choose **bl_type** (master or house) in the form.",
+    description=(
+        "Upload an Excel file (.xlsx, .xls, .csv). Choose **bl_type** (master or house) in the form.\n\n"
+        "**Gemini (recommended for long manifests):** set `llm_provider=gemini`. The workbook "
+        "file is sent natively to Gemini (sheet layout + headers) alongside flattened text; "
+        "large workbooks are chunked by sheet and merged."
+    ),
     tags=["Extraction"],
 )
 async def extract_excel(
@@ -1443,6 +1875,14 @@ async def extract_excel(
     bl_type: BlTypeQuery = Form(
         BlTypeQuery.master,
         description="B/L type: master (886150001) or house (886150002)",
+    ),
+    llm_provider: Optional[LlmProviderQuery] = Form(
+        None,
+        description="AI backend: azure or gemini (defaults to LLM_PROVIDER in .env)",
+    ),
+    llm_model: Optional[GeminiModelQuery] = Form(
+        None,
+        description="Gemini model id when llm_provider=gemini",
     ),
     post_to_dataverse: bool = Form(
         True,
@@ -1452,12 +1892,19 @@ async def extract_excel(
         False,
         description="Download the CRM JSON as a file instead of returning the normal response",
     ),
+    apply_custom_rules: bool = Form(
+        True,
+        description="Apply CRM business rules (freight→booking, load type, LCL TEUs, house totals)",
+    ),
 ):
     return await extract_file(
         file,
         bl_type=bl_type,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
         post_to_dataverse=post_to_dataverse,
         download=download,
+        apply_custom_rules=apply_custom_rules,
     )
 
 

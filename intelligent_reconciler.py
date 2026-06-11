@@ -52,6 +52,7 @@ _PREFER_DETERMINISTIC: Set[str] = {
     "mesco_loadtype",
     "mesco_direction",
     "mesco_bltype",
+    "mesco_agent",
 }
 
 #: Fields where Azure tends to win — multi-page narrative content the

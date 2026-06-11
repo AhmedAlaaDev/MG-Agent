@@ -502,9 +502,24 @@ def validate_and_correct(
             data["mesco_hscode"] = hs
             add_warning(data, "mesco_hscode filled by regex fallback.")
 
-    from pdf_bl_enrichment import enrich_bl_from_pdf_text
+    from imo_extractor import merge_imo_fields
 
-    if not is_isaly_draft_record(data):
+    before_imo = bool(data.get("_imo_detected") or data.get("mesco_imoclass") or data.get("mesco_unnumber"))
+    data = merge_imo_fields(data, data, enrich_src)
+    after_imo = bool(data.get("_imo_detected") or data.get("mesco_imoclass") or data.get("mesco_unnumber"))
+    if after_imo and not before_imo:
+        add_warning(data, "IMO/DG fields filled by transport fallback.")
+
+    from pdf_bl_enrichment import enrich_bl_from_pdf_text
+    from pdf_debit_note import is_freight_debit_note
+
+    if not is_isaly_draft_record(data) and not (
+        data.get("document_type") == "debit_note"
+        or data.get("extraction_method") == "debit_note_direct"
+        or data.get("_msds_dg_document") is True
+        or data.get("extraction_method") == "msds_dg_direct"
+        or is_freight_debit_note(enrich_src)
+    ):
         data = enrich_bl_from_pdf_text(data, enrich_src)
 
     hs_val = data.get("mesco_hscode")
@@ -520,10 +535,21 @@ def validate_and_correct(
     if vessel and not data.get("mesco_vessel"):
         data["mesco_vessel"] = vessel
         add_warning(data, "mesco_vessel filled by regex fallback.")
-    if data.get("extraction_method") in ("pdf_export_lcl_manifest", "pdf_tur_cargo_manifest"):
-        bad_vessel = (data.get("mesco_vessel") or "").upper()
-        if bad_vessel.startswith("EXPORT LCL") or "MANIFEST" in bad_vessel:
-            data.pop("mesco_vessel", None)
+    bad_vessel = (data.get("mesco_vessel") or "").upper()
+    if bad_vessel and (
+        bad_vessel.startswith(("ZERO", "FCL", "LCL", "FREE", "NON-NEG"))
+        or bad_vessel.startswith("EXPORT LCL")
+        or "MANIFEST" in bad_vessel
+    ):
+        data.pop("mesco_vessel", None)
+        from pdf_sea_waybill import _extract_route_vessel
+
+        _v, _vo, _pol, _pod = _extract_route_vessel(raw_text)
+        if _v:
+            data["mesco_vessel"] = _v
+            add_warning(data, "mesco_vessel corrected from sea-waybill route parser.")
+        if _vo and not data.get("mesco_voytruckno"):
+            data["mesco_voytruckno"] = _vo
     if voyage and not data.get("mesco_voytruckno"):
         data["mesco_voytruckno"] = voyage
         add_warning(data, "mesco_voytruckno filled by regex fallback.")
@@ -573,7 +599,15 @@ def validate_and_correct(
     data["cr401_totalgrossweight"] = normalize_numeric(data.get("cr401_totalgrossweight"))
     data["cr401_totalvolume"] = normalize_numeric(data.get("cr401_totalvolume"))
     pkg_val = data.get("cr401_totalpackages")
-    if is_manifest_house_record(data) and pkg_val is not None:
+    if data.get("extraction_method") == "pdf_sea_waybill_direct":
+        total_m = re.search(r"TOTAL\s*:\s*(\d+)\s+PALLET", raw_text, re.I)
+        if total_m:
+            data["cr401_totalpackages"] = int(total_m.group(1))
+        elif pkg_val is not None:
+            num = normalize_numeric(pkg_val)
+            if num is not None:
+                data["cr401_totalpackages"] = int(num)
+    elif is_manifest_house_record(data) and pkg_val is not None:
         data["cr401_totalpackages"] = re.sub(r"\s+", " ", str(pkg_val)).strip()
     elif pkg_val is not None and re.search(
         r"PALLETS|PACKAGES|ROLLS|CARTONS?|UNSTACKABLE", str(pkg_val), re.I
@@ -653,6 +687,14 @@ def validate_and_correct(
     ):
         data["mesco_telexrelease"] = True
 
+    from bl_status_rules import infer_bl_status
+
+    data = infer_bl_status(data, raw_text)
+
+    from pdf_debit_note import repair_debit_note_parties
+
+    data = repair_debit_note_parties(data, raw_text)
+
     infer_direction(data)
 
     # Cap free-text fields so they fit Dataverse column limits.
@@ -684,9 +726,34 @@ def validate_and_correct(
         raw_text,
     )
 
+    from pdf_bl_enrichment import (
+        _is_to_order_consignee_name,
+        normalize_delivery_address_for_crm,
+        sanitize_party_address,
+    )
+
+    data["mesco_consigneeaddress"] = sanitize_party_address(
+        data.get("mesco_consigneeaddress"),
+    )
+    if _is_to_order_consignee_name(data.get("mesco_consigneenamecontactno")):
+        data["mesco_consigneeaddress"] = None
+    data["mesco_deliveryaddress"] = normalize_delivery_address_for_crm(
+        data.get("mesco_deliveryaddress"),
+        destination=data.get("mesco_destination"),
+    )
+
     data.setdefault("confidence", {})
     data["confidence"]["post_validation"] = "completed"
     data["confidence"]["bl_number_rule"] = "accepted" if data.get("mesco_masterblno") or data.get("mesco_houseblno") else "missing"
     data["confidence"]["container_number_rule"] = "accepted" if data.get("container_number") else "missing"
+
+    from custom_business_rules import apply_record_business_rules
+
+    hbl = data.get("mesco_houseblno")
+    mbl = data.get("mesco_masterblno")
+    is_house = bool(hbl) and (
+        not mbl or str(hbl).strip().upper() != str(mbl).strip().upper()
+    )
+    data = apply_record_business_rules(data, raw_text, is_house=is_house)
 
     return BLEntity(**data).model_dump()

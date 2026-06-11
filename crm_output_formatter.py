@@ -97,6 +97,8 @@ _META_KEYS = {
     "_mbl_bookingno", "_mbl_masterblno",
     "_cargo_page1_references", "_attached_list_house_refs",
     "mesco_servicetype_text", "cargo_lines",
+    "_imo_detected", "mesco_imo", "mesco_chemical",
+    "mesco_unno", "mesco_flashptc",
 }
 
 _MASTER_SKIP = {"mesco_houseblno"}
@@ -178,6 +180,8 @@ def _prune_output(value: Any, key: Optional[str] = None) -> Any:
     if isinstance(value, dict):
         cleaned: Dict[str, Any] = {}
         for child_key, child_value in value.items():
+            if child_key.startswith("_"):
+                continue
             if "@" in child_key and child_key not in _PRESERVE_ANNOTATION_KEYS:
                 continue
             if isinstance(child_value, dict) and child_key != HOUSE_MASTER_KEY:
@@ -260,6 +264,20 @@ def _apply_fields(target: Dict[str, Any], src: Dict[str, Any], skip: Optional[se
     return target
 
 
+_DG_RESPONSE_FIELDS = (
+    "dg_proper_shipping_name",
+    "dg_packing_group",
+    "dg_cas_no",
+)
+
+
+def _preserve_dg_response_fields(target: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    for key in _DG_RESPONSE_FIELDS:
+        if _has(src.get(key)):
+            target[key] = src[key]
+    return target
+
+
 def _project_to_template(template: Dict[str, Any], src: Dict[str, Any], skip: Optional[set[str]] = None) -> Dict[str, Any]:
     target = _blank_template(template) if template else {}
     return _apply_fields(target, src, skip=skip)
@@ -307,6 +325,12 @@ _INCOTERMS = {
     "DAP", "DPU", "DDP", "DAT", "DAF", "DES", "DEQ", "DDU",
 }
 _INCOTERM_RE = re.compile(r"\b(" + "|".join(sorted(_INCOTERMS)) + r")\b", re.I)
+_MESCO_ACCOUNT_LOOKUP_NAME = "MARINE AND ENGINEERING SERVICES COMPANY (MESCO)"
+
+
+def _is_mesco_party(*parts: Any) -> bool:
+    upper = " ".join(str(part) for part in parts if _has(part)).upper()
+    return "MESCO" in upper
 
 
 def _canonical_incoterm(value: Any) -> Optional[str]:
@@ -318,6 +342,27 @@ def _canonical_incoterm(value: Any) -> Optional[str]:
         return match.group(1).upper()
     text = str(value).strip()
     return text or None
+
+
+def _finalize_consignee_address(operation: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop bogus OCR addresses; clear CRM when consignee is to-order (no street)."""
+    from pdf_bl_enrichment import (
+        _is_to_order_consignee_name,
+        sanitize_party_address,
+    )
+
+    raw = operation.get("mesco_consigneeaddress")
+    cleaned = sanitize_party_address(raw)
+    if cleaned:
+        operation["mesco_consigneeaddress"] = cleaned
+        return operation
+    if _is_to_order_consignee_name(operation.get("mesco_consigneenamecontactno")):
+        operation["mesco_consigneeaddress"] = ""
+    elif raw and str(raw).strip():
+        operation["mesco_consigneeaddress"] = ""
+    else:
+        operation.pop("mesco_consigneeaddress", None)
+    return operation
 
 
 def _split_party_block(value: Any) -> tuple[Optional[str], Optional[str]]:
@@ -389,8 +434,11 @@ def _apply_party_fields(operation: Dict[str, Any], src: Dict[str, Any]) -> Dict[
         if name and not _has(operation.get("mesco_consigneenamecontactno")):
             operation["mesco_consigneenamecontactno"] = name[:100]
         if addr and not _has(operation.get("mesco_consigneeaddress")):
-            operation["mesco_consigneeaddress"] = addr
+            from pdf_bl_enrichment import sanitize_party_address
 
+            operation["mesco_consigneeaddress"] = sanitize_party_address(addr)
+
+    operation = _finalize_consignee_address(operation)
     if not _has(operation.get("mesco_countryoforigin")):
         country = _infer_country_from_text(
             operation.get("mesco_shipperaddress"),
@@ -441,6 +489,8 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
 
     def _account_lookup_name(explicit: Any, block: Any) -> Optional[str]:
+        if _is_mesco_party(explicit, block):
+            return _MESCO_ACCOUNT_LOOKUP_NAME
         name = _clean_company_name(explicit) if _has(explicit) else None
         if not name and _has(explicit) and "," not in str(explicit) and len(str(explicit)) <= 80:
             name = str(explicit).strip()
@@ -462,6 +512,15 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
     if _has(shipper):
         out["mesco_shipper"] = shipper
 
+    notify = _account_lookup_name(
+        src.get("mesco_notify1"),
+        src.get("mesco_notifyaddress"),
+    )
+    if _has(notify):
+        out["mesco_notify1"] = notify
+    elif _has(consignee) and re.match(r"^SAME\s+AS\b", str(src.get("mesco_notify1") or ""), re.I):
+        out["mesco_notify1"] = consignee
+
     for field in _PASS_THROUGH_LOOKUP_FIELDS:
         if _has(src.get(field)):
             out[field] = src[field]
@@ -475,7 +534,7 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
 
 # Fields whose derived/canonical form should replace any value already projected
 # (the canonical form is strictly more resolvable than the raw extracted text).
-_OVERRIDE_LOOKUP_FIELDS = {"mesco_incoterm"}
+_OVERRIDE_LOOKUP_FIELDS = {"mesco_incoterm", "mesco_notify1"}
 
 
 def _apply_operation_lookups(operation: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
@@ -523,16 +582,30 @@ def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     _set_numeric_field(cargo, "mesco_noofpackages", line.get("mesco_noofpackages"))
     _set_numeric_field(cargo, "mesco_grosskg", line.get("mesco_grosskg"))
     _set_numeric_field(cargo, "mesco_volcbm", line.get("mesco_volcbm"))
+    _apply_imo_fields_to_cargo(cargo, line)
     return {k: v for k, v in cargo.items() if _has(v)}
+
+
+def _records_have_per_house_cargo(records: List[Dict[str, Any]]) -> bool:
+    """True when each house record carries its own cargo row (Arkas attached list)."""
+    if not records:
+        return False
+    return all(isinstance(rec, dict) and rec.get("_per_house_cargo") for rec in records)
 
 
 def _cargo_rows_from_record(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     lines = rec.get("cargo_lines")
     if isinstance(lines, list) and lines:
         rows = [_build_cargo_from_line(ln) for ln in lines if isinstance(ln, dict)]
-        return [row for row in rows if row]
-    cargo = _build_cargo_from_record(rec)
-    return [cargo] if cargo else []
+        rows = [row for row in rows if row]
+    else:
+        cargo = _build_cargo_from_record(rec)
+        rows = [cargo] if cargo else []
+    hbl = rec.get("mesco_houseblno")
+    if hbl:
+        for row in rows:
+            row["_house_hbl"] = str(hbl).strip()
+    return rows
 
 
 _DATAVERSE_DESC_OF_GOODS_MAX = 1500
@@ -549,6 +622,22 @@ def _truncate_to_limit(value: str, limit: int) -> str:
     return snippet.rstrip()
 
 
+def _dg_description_parts(rec: Dict[str, Any]) -> List[str]:
+    if not rec.get("_msds_dg_document"):
+        return []
+    parts: List[str] = []
+    proper = rec.get("dg_proper_shipping_name")
+    packing = rec.get("dg_packing_group")
+    cas_no = rec.get("dg_cas_no")
+    if _has(proper):
+        parts.append(f"UN proper shipping name: {proper}")
+    if _has(packing):
+        parts.append(f"Packing group: {packing}")
+    if _has(cas_no):
+        parts.append(f"CAS No.: {cas_no}")
+    return parts
+
+
 def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     desc_parts = []
@@ -557,12 +646,22 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
 
     # Avoid duplicating HS codes that already appear inline in the cargo text.
     if _has(hs_value):
-        if cargo_desc and re.search(r"\bHS\s*CODE\b", str(cargo_desc), re.I):
-            pass
-        else:
+        cargo_str = str(cargo_desc or "")
+        hs_digits = re.sub(r"\D", "", str(hs_value))
+        hs_inline = bool(
+            cargo_desc
+            and (
+                re.search(r"\bHS\s*CODE\b", cargo_str, re.I)
+                or (hs_digits and hs_digits in re.sub(r"\D", "", cargo_str))
+            )
+        )
+        if not hs_inline:
             desc_parts.append(f"HS: {hs_value}")
     if _has(cargo_desc):
         desc_parts.append(str(cargo_desc))
+    for dg_part in _dg_description_parts(rec):
+        if dg_part not in desc_parts:
+            desc_parts.append(dg_part)
     if _has(rec.get("cargo_type")):
         ct = str(rec["cargo_type"]).strip()
         if ct not in " ".join(desc_parts):
@@ -575,7 +674,33 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     _set_numeric_field(cargo, "mesco_noofpackages", rec.get("cr401_totalpackages"))
     _set_numeric_field(cargo, "mesco_grosskg", rec.get("cr401_totalgrossweight"))
     _set_numeric_field(cargo, "mesco_volcbm", rec.get("cr401_totalvolume"))
+    _apply_imo_fields_to_cargo(cargo, rec)
     return {k: v for k, v in cargo.items() if _has(v)}
+
+
+def _apply_imo_fields_to_cargo(cargo: Dict[str, Any], src: Dict[str, Any]) -> None:
+    """Copy operation/MSDS IMO facts into the nested cargo row shown by CRM."""
+    imo_class = src.get("mesco_imoclass")
+    un_number = src.get("mesco_unno") or src.get("mesco_unnumber")
+    flash = src.get("mesco_flashptc")
+    detected = bool(
+        src.get("_imo_detected")
+        or src.get("mesco_imo") is True
+        or _has(imo_class)
+        or _has(un_number)
+    )
+    if not detected:
+        return
+
+    cargo["mesco_imo"] = True
+    cargo["mesco_chemical"] = True
+    if _has(imo_class):
+        _set_numeric_field(cargo, "mesco_imoclass", imo_class)
+    if _has(un_number):
+        m = re.search(r"\b(?:UN\s*)?(\d{4})\b", str(un_number), re.I)
+        cargo["mesco_unno"] = m.group(1) if m else str(un_number).strip()
+    if _has(flash):
+        _set_numeric_field(cargo, "mesco_flashptc", flash)
 
 
 def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -604,6 +729,7 @@ def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optio
         }
 
     house = _project_to_template(_first_house_template(), rec, skip=skip)
+    _preserve_dg_response_fields(house, rec)
     house["mesco_bltype"] = HOUSE_BL_TYPE
     house["mesco_masterblno"] = hbl
     if master_mbl:
@@ -657,12 +783,18 @@ def _record_container_items(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return containers
 
 
-def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _aggregate_totals(
+    records: List[Dict[str, Any]],
+    *,
+    multi_house: bool = False,
+) -> Dict[str, Any]:
     fields = {
         "cr401_totalpackages": "packages",
         "cr401_totalgrossweight": "gross_weight_kg",
         "cr401_totalvolume": "measurement_cbm",
     }
+    if not multi_house and len(records) > 1:
+        multi_house = True
     totals: Dict[str, float] = {}
     unique_containers: set[str] = set()
     for rec in records:
@@ -672,7 +804,9 @@ def _aggregate_totals(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 unique_containers.add(no)
         for out_key, rec_key in fields.items():
             value = rec.get(out_key)
-            if not _has(value):
+            # Multi-house manifests repeat the same container on every row — never
+            # fall back to container line quantities when summing house totals.
+            if not _has(value) and not multi_house:
                 for c in _record_container_items(rec):
                     value = c.get(rec_key)
                     if _has(value):
@@ -723,14 +857,20 @@ def records_to_master_json(
         master.update(manifest_overrides)
     if extra:
         master.update(extra)
+    _preserve_dg_response_fields(master, first)
 
     output = master or {}
     output["@odata.context"] = output.get("@odata.context") or _DEFAULT_MASTER_CONTEXT
     if master_record and len(records) > 1:
         totals_source = records
+        aggregated = _aggregate_totals(totals_source, multi_house=True)
+        teu_source = [master_record] if master_record else records[:1]
+        teu_agg = _aggregate_totals(teu_source, multi_house=False)
+        if teu_agg.get("cr401_totalteus") is not None:
+            aggregated["cr401_totalteus"] = teu_agg["cr401_totalteus"]
     else:
         totals_source = [master_record] if master_record else records
-    aggregated = _aggregate_totals(totals_source)
+        aggregated = _aggregate_totals(totals_source)
     if aggregated:
         output.update(aggregated)
     elif master_record:
@@ -776,14 +916,26 @@ def records_to_master_json(
 
     output[MASTER_CONTAINERS_KEY] = crm_containers
 
-    # Cargo items (one row per groupage shipper line when parsed from PDF)
+    # Cargo items — per-house rows for Arkas-style attached lists; else master-level cargo.
     cargo = []
-    for rec in physical_records:
-        cargo.extend(_cargo_rows_from_record(rec))
+    if houses and _records_have_per_house_cargo(records):
+        for rec in records:
+            cargo.extend(_cargo_rows_from_record(rec))
+    else:
+        for rec in physical_records:
+            cargo.extend(_cargo_rows_from_record(rec))
     if not cargo and crm_containers:
         for c in crm_containers:
             cargo.append(_pick(c, "mesco_noofpackages", "mesco_grosskg", "mesco_volcbm"))
     output[MASTER_CARGO_KEY] = cargo
+
+    from custom_business_rules import apply_crm_payload_rules, custom_rules_enabled
+
+    if custom_rules_enabled():
+        apply_crm_payload_rules(
+            output,
+            house_records=records if len(records) > 1 else None,
+        )
 
     return _prune_output(output)
 
@@ -800,6 +952,8 @@ def records_to_house_json(
     }
     ctx = master_context or {}
     master_src = master_record or (records[0] if records else {})
+
+    from custom_business_rules import apply_crm_operation_rules, custom_rules_enabled
 
     value_list = []
     for rec in records:
@@ -832,6 +986,7 @@ def records_to_house_json(
         house = _build_house(rec, master_mbl=master_fields.get("mesco_masterblno"))
         if not house:
             continue
+        _preserve_dg_response_fields(house, rec)
         house[HOUSE_MASTER_KEY] = master_fields
 
         # Containers per house — shared master equipment for attached-list houses
@@ -843,15 +998,25 @@ def records_to_house_json(
                 crm_containers.append(entry)
         house[HOUSE_CONTAINERS_KEY] = crm_containers
 
-        # Cargo on master only for consolidated multi-house B/Ls (except manifest PDF rows)
+        # Cargo on master only for consolidated multi-house B/Ls (except manifest / per-house cargo).
         manifest_row = rec.get("_manifest_pdf_row") or rec.get("extraction_method") == "pdf_export_lcl_manifest"
-        if master_record and len(records) > 1 and not manifest_row:
+        per_house_cargo = rec.get("_per_house_cargo") or (
+            isinstance(rec.get("cargo_lines"), list) and rec["cargo_lines"]
+        )
+        if (
+            master_record
+            and len(records) > 1
+            and not manifest_row
+            and not per_house_cargo
+        ):
             house[HOUSE_CARGO_KEY] = []
         else:
             house[HOUSE_CARGO_KEY] = _cargo_rows_from_record(
-                rec if manifest_row else container_source
+                rec if (manifest_row or per_house_cargo) else container_source
             )
 
+        if custom_rules_enabled():
+            apply_crm_operation_rules(house, is_house=True)
         value_list.append(house)
 
     output["value"] = value_list
@@ -892,10 +1057,16 @@ def prepare_standalone_house_upload(payload: Dict[str, Any]) -> None:
         return
 
     if not _has(payload.get("mesco_houseblno")):
-        for key in ("mesco_houseblno", "mesco_masterblno"):
-            if _has(payload.get(key)):
-                payload["mesco_houseblno"] = str(payload[key]).strip()
-                break
+        nested_houses = payload.get(MASTER_HOUSES_KEY) or []
+        if nested_houses and isinstance(nested_houses[0], dict):
+            nested_hbl = nested_houses[0].get("mesco_masterblno")
+            if _has(nested_hbl):
+                payload["mesco_houseblno"] = str(nested_hbl).strip()
+        if not _has(payload.get("mesco_houseblno")):
+            for key in ("mesco_houseblno", "mesco_masterblno"):
+                if _has(payload.get(key)):
+                    payload["mesco_houseblno"] = str(payload[key]).strip()
+                    break
 
     master_cargo = payload.get(MASTER_CARGO_KEY) or []
     house_cargo = payload.get(HOUSE_CARGO_KEY) or []
@@ -903,6 +1074,10 @@ def prepare_standalone_house_upload(payload: Dict[str, Any]) -> None:
         payload[HOUSE_CARGO_KEY] = list(master_cargo)
     elif house_cargo and not master_cargo:
         payload[MASTER_CARGO_KEY] = list(house_cargo)
+
+    # Standalone house upload: cargo belongs on the house grid only (avoid duplicate rows).
+    if payload.get("mesco_bltype") == HOUSE_BL_TYPE and house_cargo:
+        payload.pop(MASTER_CARGO_KEY, None)
 
     if not payload.get(MASTER_CARGO_KEY) and not payload.get(HOUSE_CARGO_KEY):
         row = _build_cargo_from_record(payload)

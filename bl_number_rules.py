@@ -124,6 +124,11 @@ def clean_shipper_address_bl_bleed(
 
 def is_form_or_serial_bl_candidate(bl: str, page_text: str = "") -> bool:
     """True when the value is a MESCO form no. / header serial, not an ocean B/L."""
+    raw = str(bl or "").strip().upper()
+    # Carrier-prefixed ocean B/L numbers (e.g. Arkas IST000027163, NSA…).
+    if re.fullmatch(r"[A-Z]{3}\d{6,12}", raw):
+        return False
+
     compact = _digits(bl)
     if not compact:
         return True
@@ -162,6 +167,8 @@ def is_valid_ocean_bl_number(bl: str, page_text: str = "", acid: Optional[str] =
     # Ocean B/L on these scans: 9–12 digits, typically 202512xxxx
     if compact.isdigit() and len(compact) >= 9:
         return True
+    if re.fullmatch(r"[A-Z]{3}\d{6,12}", str(bl).strip().upper()):
+        return True
     return len(compact) >= 7 and not compact.startswith("00")
 
 
@@ -169,6 +176,13 @@ def extract_ocean_bl_from_page(page_text: str) -> Optional[str]:
     """Authoritative ocean B/L from shipper header (Combicon / MESCO / SACO layout)."""
     if not page_text:
         return None
+    carrier_m = re.search(
+        r"\b(IST\d{9,12}|NSA\d{9,12}|ARK[A-Z]?\d{8,12})\b",
+        page_text,
+        re.I,
+    )
+    if carrier_m:
+        return carrier_m.group(1).upper()
     glued = extract_shipper_glued_bl_number(page_text)
     if glued:
         return glued
@@ -402,6 +416,9 @@ def finalize_multi_bl_records(
         filtered = []
         for rec in records:
             page_text = raw_text
+            if rec.get("extraction_method") == "pdf_sea_waybill_direct":
+                filtered.append(rec)
+                continue
             bl = rec.get("mesco_masterblno")
             if bl and is_form_or_serial_bl_candidate(str(bl), page_text):
                 fixed = extract_ocean_bl_from_page(page_text)
