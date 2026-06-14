@@ -456,10 +456,55 @@
       selectedId: null,
       responseCache: new Map(),
       socket: null,
-      reconnectTimer: null
+      reconnectTimer: null,
+      apiBase: ""
     };
 
     const $ = (id) => document.getElementById(id);
+
+    function normalizeBaseUrl(value) {
+      return String(value || "").trim().replace(/\/+$/, "");
+    }
+
+    function resolveApiBase() {
+      const params = new URLSearchParams(window.location.search);
+      const fromQuery = normalizeBaseUrl(params.get("api"));
+      if (fromQuery) {
+        localStorage.setItem("auditApiBase", fromQuery);
+        return fromQuery;
+      }
+      const fromStorage = normalizeBaseUrl(localStorage.getItem("auditApiBase"));
+      if (fromStorage) return fromStorage;
+      if (window.location.protocol === "file:") return "";
+      return window.location.origin;
+    }
+
+    function apiUrl(path) {
+      return `${state.apiBase}${path}`;
+    }
+
+    function websocketUrl(path) {
+      if (!state.apiBase) return "";
+      const base = new URL(state.apiBase);
+      const scheme = base.protocol === "https:" ? "wss" : "ws";
+      return `${scheme}://${base.host}${path}`;
+    }
+
+    function isFileModeWithoutApi() {
+      return window.location.protocol === "file:" && !state.apiBase;
+    }
+
+    function showFileModeMessage() {
+      setSocketState("offline", "Open from server");
+      setError(
+        "This dashboard was opened as a local file, so the browser blocked API and websocket calls. " +
+        "Open it from the FastAPI server instead: http://localhost:8000/audit, or use your Railway URL ending in /audit. " +
+        "If you must open this file directly, add ?api=http://localhost:8000 to the address."
+      );
+      $("lastUpdated").textContent = "Audit dashboard is waiting for a server URL.";
+      $("reloadBtn").disabled = true;
+      $("refreshBtn").disabled = true;
+    }
 
     function friendlyError(error) {
       if (!error) return "Something went wrong while loading the audit data.";
@@ -613,11 +658,11 @@
       $("detailSubtitle").textContent = selected.id;
       $("loadResponseBtn").disabled = false;
       $("downloadFileLink").hidden = !selected.download_url;
-      $("downloadFileLink").href = selected.download_url || "#";
+      $("downloadFileLink").href = selected.download_url ? apiUrl(selected.download_url) : "#";
 
       const opId = operationId(selected);
       $("operationLink").hidden = !opId;
-      $("operationLink").href = opId ? `/dynamics/operation/${encodeURIComponent(opId)}/full` : "#";
+      $("operationLink").href = opId ? apiUrl(`/dynamics/operation/${encodeURIComponent(opId)}/full`) : "#";
 
       const user = selected.uploader_name || selected.uploader_email || selected.uploader_id || selected.client_ip || "-";
       const rows = [
@@ -652,9 +697,13 @@
     async function loadUploads() {
       setError("");
       $("reloadBtn").disabled = true;
+      if (isFileModeWithoutApi()) {
+        showFileModeMessage();
+        return;
+      }
       try {
         const limit = encodeURIComponent($("limitSelect").value || "100");
-        const res = await fetch(`/audit/uploads?limit=${limit}`, { headers: { "Accept": "application/json" } });
+        const res = await fetch(apiUrl(`/audit/uploads?limit=${limit}`), { headers: { "Accept": "application/json" } });
         if (!res.ok) throw new Error(`Audit history could not be loaded (${res.status}).`);
         const body = await res.json();
         state.items = Array.isArray(body.data) ? body.data : [];
@@ -673,7 +722,7 @@
       if (!id) return;
       $("loadResponseBtn").disabled = true;
       try {
-        const res = await fetch(`/audit/uploads/${encodeURIComponent(id)}`, { headers: { "Accept": "application/json" } });
+        const res = await fetch(apiUrl(`/audit/uploads/${encodeURIComponent(id)}`), { headers: { "Accept": "application/json" } });
         if (!res.ok) throw new Error(`The saved response could not be loaded (${res.status}).`);
         const body = await res.json();
         if (body?.data) {
@@ -693,8 +742,11 @@
       if (state.socket) {
         try { state.socket.close(); } catch (_) {}
       }
-      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const url = `${scheme}://${window.location.host}/audit/ws`;
+      if (isFileModeWithoutApi()) {
+        showFileModeMessage();
+        return;
+      }
+      const url = websocketUrl("/audit/ws");
       setSocketState("", "Connecting");
       const socket = new WebSocket(url);
       state.socket = socket;
@@ -737,6 +789,7 @@
       renderDetail();
     });
 
+    state.apiBase = resolveApiBase();
     loadUploads();
     connectSocket();
   </script>
