@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -12,6 +13,8 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import Request, UploadFile, WebSocket
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -78,13 +81,29 @@ def _response_summary(value: Any) -> Dict[str, Any]:
 
 class UploadAuditStore:
     def __init__(self) -> None:
-        root = Path(os.environ.get("BL_AUDIT_DIR", "upload_audit")).resolve()
+        root = self._resolve_root()
         self.root = root
         self.files_dir = root / "files"
         self.db_path = root / "upload_audit.sqlite3"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self._clients: Set[WebSocket] = set()
         self._init_db()
+
+    def _resolve_root(self) -> Path:
+        candidates = [
+            Path(os.environ.get("BL_AUDIT_DIR", "upload_audit")),
+            Path("/tmp/bl_upload_audit"),
+        ]
+        last_error: Optional[Exception] = None
+        for candidate in candidates:
+            try:
+                root = candidate.resolve()
+                (root / "files").mkdir(parents=True, exist_ok=True)
+                return root
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Audit storage path %s is not writable: %s", candidate, exc)
+        raise RuntimeError("No writable upload audit storage path is available") from last_error
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
