@@ -1416,6 +1416,25 @@ def _query_first(
     return None
 
 
+def _query_many(
+    client: DataverseClientService,
+    entity_set: str,
+    filter_expr: str,
+    select: str,
+    *,
+    top: int = 25,
+) -> List[Dict[str, Any]]:
+    query = f"{entity_set}?$filter={filter_expr}&$select={select}&$top={top}"
+    try:
+        resp = client.get(query)
+        data = resp.json() if resp.content else {}
+        rows = data.get("value") if isinstance(data, dict) else None
+        return list(rows or []) if isinstance(rows, list) else []
+    except Exception as exc:
+        logger.warning("Dataverse candidate query failed (%s): %s", filter_expr, exc)
+    return []
+
+
 def _find_existing_operation(
     client: DataverseClientService,
     bl_no: Optional[str],
@@ -1459,6 +1478,228 @@ def _find_existing_operation(
         return None
     row = _query_first(client, _ENTITY, " and ".join(clauses), id_field)
     return row.get(id_field) if row else None
+
+
+_MASTER_MATCH_SELECT = ",".join(
+    (
+        "mesco_operationid",
+        "mesco_code",
+        "mesco_masterblno",
+        "mesco_voytruckno",
+        "mesco_etdorigin",
+        "mesco_atdorigin",
+        "mesco_shippedonboarddate",
+        "_mesco_vessel_value",
+        "_mesco_origin_value",
+        "_mesco_destination_value",
+    )
+)
+
+
+def _norm_match_text(value: Any) -> str:
+    text = re.sub(r"[^A-Z0-9]+", " ", str(value or "").upper())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _row_lookup_label(row: Dict[str, Any], logical_key: str) -> str:
+    value_key = f"_{logical_key}_value"
+    for key in (
+        f"{value_key}@OData.Community.Display.V1.FormattedValue",
+        f"{value_key}@Microsoft.Dynamics.CRM.lookuplogicalname",
+        logical_key,
+        _NAV_PROPERTY_MAP.get(logical_key, logical_key),
+    ):
+        if row.get(key):
+            return str(row[key])
+    return ""
+
+
+def _payload_container_numbers(
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    numbers: List[str] = []
+
+    def add(value: Any) -> None:
+        normalized = _normalize_container_number(str(value or ""))
+        if normalized and normalized not in numbers:
+            numbers.append(normalized)
+
+    add(payload.get("container_number"))
+    for key in ("mesco_containernumber", "mesco_containerno", "mesco_name"):
+        add(payload.get(key))
+    for item in containers or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
+            add(item.get(key))
+    return numbers
+
+
+def _payload_match_dates(payload: Dict[str, Any]) -> Set[str]:
+    dates: Set[str] = set()
+    for key in (
+        "mesco_etdorigin",
+        "mesco_atdorigin",
+        "mesco_shippedonboarddate",
+        "mesco_dateofissue",
+        "laden_date",
+    ):
+        value = _normalize_date(payload.get(key))
+        if value:
+            dates.add(value)
+    return dates
+
+
+def _row_match_dates(row: Dict[str, Any]) -> Set[str]:
+    dates: Set[str] = set()
+    for key in ("mesco_etdorigin", "mesco_atdorigin", "mesco_shippedonboarddate"):
+        value = _normalize_date(row.get(key))
+        if value:
+            dates.add(value)
+    return dates
+
+
+def _candidate_master_ids_by_container(
+    client: DataverseClientService,
+    container_numbers: List[str],
+) -> Set[str]:
+    ids: Set[str] = set()
+    select = f"{_id_field(_CONTAINER_ENTITY)},{_CONTAINER_MASTER_VALUE_FIELD},mesco_containernumber"
+    for number in container_numbers:
+        safe = _odata_escape(number)
+        if not safe:
+            continue
+        rows = _query_many(
+            client,
+            _CONTAINER_ENTITY,
+            f"mesco_containernumber eq '{safe}' and {_CONTAINER_MASTER_VALUE_FIELD} ne null",
+            select,
+            top=10,
+        )
+        for row in rows:
+            master_id = row.get(_CONTAINER_MASTER_VALUE_FIELD)
+            if master_id:
+                ids.add(str(master_id))
+    return ids
+
+
+def _get_master_candidate_row(
+    client: DataverseClientService,
+    master_id: str,
+) -> Optional[Dict[str, Any]]:
+    return _query_first(
+        client,
+        _ENTITY,
+        f"{_id_field(_ENTITY)} eq {master_id} and mesco_bltype eq {_MASTER_BL_TYPE}",
+        _MASTER_MATCH_SELECT,
+    )
+
+
+def _master_candidate_rows_by_voyage(
+    client: DataverseClientService,
+    voyage: Any,
+) -> List[Dict[str, Any]]:
+    safe = _odata_escape(str(voyage or "").strip())
+    if not safe:
+        return []
+    return _query_many(
+        client,
+        _ENTITY,
+        f"mesco_bltype eq {_MASTER_BL_TYPE} and mesco_voytruckno eq '{safe}'",
+        _MASTER_MATCH_SELECT,
+        top=25,
+    )
+
+
+def _score_master_match(
+    row: Dict[str, Any],
+    payload: Dict[str, Any],
+    container_master_ids: Set[str],
+    house_dates: Set[str],
+) -> Tuple[int, List[str]]:
+    score = 0
+    reasons: List[str] = []
+    row_id = row.get(_id_field(_ENTITY))
+
+    payload_vessel = _norm_match_text(payload.get("mesco_vessel"))
+    row_vessel = _norm_match_text(_row_lookup_label(row, "mesco_vessel"))
+    payload_voyage = _norm_match_text(payload.get("mesco_voytruckno"))
+    row_voyage = _norm_match_text(row.get("mesco_voytruckno"))
+    if payload_vessel and row_vessel and payload_vessel == row_vessel:
+        score += 2
+        reasons.append("vessel")
+    if payload_voyage and row_voyage and payload_voyage == row_voyage:
+        score += 3
+        reasons.append("voyage")
+
+    if row_id and str(row_id) in container_master_ids:
+        score += 4
+        reasons.append("container")
+
+    for logical_key, label in (("mesco_origin", "origin"), ("mesco_destination", "destination")):
+        payload_port = _norm_match_text(payload.get(logical_key))
+        row_port = _norm_match_text(_row_lookup_label(row, logical_key))
+        if payload_port and row_port and (payload_port == row_port or payload_port in row_port or row_port in payload_port):
+            score += 1
+            reasons.append(label)
+
+    if house_dates and (_row_match_dates(row) & house_dates):
+        score += 2
+        reasons.append("date")
+
+    return score, reasons
+
+
+def _find_master_by_shipment_evidence(
+    client: DataverseClientService,
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Find an existing master from vessel/voyage + container + route + date evidence."""
+    id_field = _id_field(_ENTITY)
+    container_numbers = _payload_container_numbers(payload, containers)
+    container_master_ids = _candidate_master_ids_by_container(client, container_numbers)
+
+    candidate_rows: Dict[str, Dict[str, Any]] = {}
+    for row in _master_candidate_rows_by_voyage(client, payload.get("mesco_voytruckno")):
+        if row.get(id_field):
+            candidate_rows[str(row[id_field])] = row
+    for master_id in container_master_ids:
+        row = _get_master_candidate_row(client, master_id)
+        if row and row.get(id_field):
+            candidate_rows[str(row[id_field])] = row
+
+    if not candidate_rows:
+        return None
+
+    house_dates = _payload_match_dates(payload)
+    scored: List[Tuple[int, str, List[str]]] = []
+    for master_id, row in candidate_rows.items():
+        score, reasons = _score_master_match(row, payload, container_master_ids, house_dates)
+        scored.append((score, master_id, reasons))
+    scored.sort(reverse=True, key=lambda item: item[0])
+    best_score, best_id, best_reasons = scored[0]
+    tied = [item for item in scored if item[0] == best_score]
+    if len(tied) > 1:
+        logger.warning(
+            "Shipment-evidence master match is ambiguous: score=%s ids=%s",
+            best_score,
+            [item[1] for item in tied],
+        )
+        return None
+    strong_anchor = "container" in best_reasons or (
+        "vessel" in best_reasons and "voyage" in best_reasons
+    )
+    if strong_anchor and best_score >= 6:
+        logger.info(
+            "Linked standalone house to master %s by shipment evidence (%s, score=%s)",
+            best_id,
+            ", ".join(best_reasons),
+            best_score,
+        )
+        return best_id
+    return None
 
 
 def _find_orphan_house_operations(
@@ -2238,6 +2479,16 @@ def upload_crm_json(
                 logger.info(
                     "Linked standalone house to master %s via M/BL %s",
                     parent_master_id, link_bl,
+                )
+        if not parent_master_id:
+            parent_master_id = _find_master_by_shipment_evidence(
+                client,
+                payload,
+                containers,
+            )
+            if parent_master_id:
+                payload[_lookup_bind_key("mesco_Operation")] = (
+                    f"/{_ENTITY}({parent_master_id})"
                 )
 
     standalone_had_shippingline = _payload_has_lookup_value(payload, "mesco_shippingline")

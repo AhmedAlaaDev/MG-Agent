@@ -415,6 +415,45 @@ def infer_direction(data: Dict[str, Any]) -> None:
         data["mesco_direction"] = 300000000
 
 
+def has_lcl_signal(data: Dict[str, Any], raw_text: str) -> bool:
+    """True when the document/record is clearly consolidated LCL."""
+    upper = (raw_text or "").upper()
+    method = str(data.get("extraction_method") or "").upper()
+    if data.get("_consolidated_lcl_row") or data.get("mesco_consolidation"):
+        return True
+    if "LCL" in method or "MANIFEST" in method or "CONSOLIDATED" in method:
+        return True
+    if re.search(r"\bLCL\b|LCL\s*/\s*LCL|LCLYLCL", upper):
+        return True
+    if re.search(r"\bCFS\b|CFS\s+TERMINAL|CY\s*/\s*CFS|CFS\s*/\s*CY", upper):
+        return True
+    if re.search(r"\bGROUPAGE\b|\bCONSOLIDAT(?:ED|ION)\b|N/?M\s+CONSOLIDATION", upper):
+        return True
+    if re.search(r"\bHOUSE\s+B/?L\b|\bH/?BL\b|ATTACHED\s+LIST|MASTER\s+WITH\s+HOUSES", upper):
+        return True
+    hbl = str(data.get("mesco_houseblno") or "").strip()
+    mbl = str(data.get("mesco_masterblno") or "").strip()
+    return bool(
+        hbl
+        and mbl
+        and hbl.upper() != mbl.upper()
+        and re.search(r"\bCONSOLIDAT|LCL|CFS", upper)
+    )
+
+
+def infer_load_type(data: Dict[str, Any], raw_text: str, has_containers: bool) -> None:
+    """Set/correct Dataverse load type. LCL evidence wins over containers."""
+    upper = (raw_text or "").upper()
+    if has_lcl_signal(data, raw_text):
+        data["mesco_loadtype"] = 300000001
+        return
+    if re.search(r"\bFCL\b|CY\s*/\s*CY", upper):
+        data["mesco_loadtype"] = 300000000
+        return
+    if data.get("mesco_loadtype") is None and has_containers:
+        data["mesco_loadtype"] = 300000000
+
+
 def validate_and_correct(
     data: Dict[str, Any],
     raw_text: str,
@@ -669,10 +708,7 @@ def validate_and_correct(
     upper = raw_text.upper()
     data["mesco_transporttype"] = data.get("mesco_transporttype") or 300000000
 
-    if "LCL" in upper or " CFS " in f" {upper} " or "CFS TERMINAL" in upper:
-        data["mesco_loadtype"] = 300000001
-    elif data.get("mesco_loadtype") is None and (cleaned_containers or re.search(r"\bFCL\b", upper)):
-        data["mesco_loadtype"] = 300000000
+    infer_load_type(data, raw_text, bool(cleaned_containers))
 
     if not data.get("mesco_pcfreightterm"):
         if "FREIGHT COLLECT" in upper:
