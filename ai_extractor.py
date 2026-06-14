@@ -299,6 +299,10 @@ suffix noise. Use null when not confidently present.
   Set mesco_telexrelease true when Telex, false when Original.
 - mesco_transporttype: 300000000 for sea.
 - mesco_loadtype: LCL = 300000001; FCL = 300000000.
+  CRITICAL: one or more container numbers does NOT automatically mean FCL.
+  Use LCL when the document says LCL, CFS, groupage, consolidation,
+  consolidated cargo, N/M consolidation, attached house list, master with
+  houses, or multiple house B/Ls sharing one master/container.
 - mesco_direction: 300000000 (Import) when Egypt is destination/consignee; 300000001 (Export) when Egypt is origin/shipper.
 - MSDS / Safety Data Sheet / Dangerous Goods documents:
   * Treat "Supplier's details", "Supplier details", "Manufacturer", or "Company Name"

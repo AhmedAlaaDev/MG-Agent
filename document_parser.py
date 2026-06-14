@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
 from llm_context import llm_extraction_prefix, llm_meta
+from pdf_consolidated_lcl import parse_consolidated_lcl_multi_hbl
 from pdf_isaly_draft_bl import (
     detect_isaly_draft_multi_bl,
     extract_isaly_draft_records,
@@ -220,6 +221,43 @@ def parse_document_intelligently(
         return IntelligentParseResult(
             records=validated,
             document_layout=document_layout,
+            quality=quality,
+            azure_warnings=azure_warnings,
+        )
+
+    consolidated = parse_consolidated_lcl_multi_hbl(raw_text)
+    if consolidated:
+        house_records = consolidated["house_records"]
+        master_record = consolidated["master_record"]
+        validated_houses = _validate_records(
+            house_records,
+            raw_text,
+            "pdf_consolidated_lcl_house",
+            pdf_bytes=file_bytes,
+        )
+        validated_master = validate_and_correct(
+            master_record,
+            raw_text,
+            enrichment_text=raw_text,
+        )
+        quality.update(
+            {
+                "parser_mode": "pdf_consolidated_lcl",
+                "fallback_used": True,
+                "canonical_bl_count": len(validated_houses),
+                "validated_record_count": len(validated_houses),
+                "document_type_detected": "consolidated_lcl_master_with_houses",
+                "master_bl": validated_master.get("mesco_masterblno"),
+            }
+        )
+        for house in validated_houses:
+            house["mesco_masterblno"] = validated_master.get("mesco_masterblno")
+            house["mesco_loadtype"] = 300000001
+            house["mesco_consolidation"] = True
+            house["_consolidated_lcl_row"] = True
+        return IntelligentParseResult(
+            records=validated_houses,
+            document_layout="master_with_houses",
             quality=quality,
             azure_warnings=azure_warnings,
         )

@@ -189,6 +189,7 @@ _META_KEYS = {
     "mesco_servicetype_text", "cargo_lines",
     "_imo_detected", "mesco_imo", "mesco_chemical",
     "mesco_unno", "mesco_flashptc",
+    "_consolidated_lcl_row",
 }
 
 _MASTER_SKIP = {"mesco_houseblno"}
@@ -662,6 +663,34 @@ def _fill_operation_defaults(operation: Dict[str, Any], is_master: bool) -> Dict
     return operation
 
 
+def _record_signals_lcl(rec: Dict[str, Any]) -> bool:
+    if rec.get("_consolidated_lcl_row") or rec.get("mesco_consolidation"):
+        return True
+    if rec.get("mesco_loadtype") == LOAD_LCL:
+        return True
+    method = str(rec.get("extraction_method") or "").upper()
+    if "LCL" in method or "MANIFEST" in method or "CONSOLIDATED" in method:
+        return True
+    text = " ".join(
+        str(rec.get(key) or "")
+        for key in (
+            "mesco_cargodescription",
+            "mesco_servicetype_text",
+            "mesco_handlinginformation",
+        )
+    ).upper()
+    return bool(re.search(r"\bLCL\b|\bCFS\b|CONSOLIDAT|GROUPAGE", text))
+
+
+def _shipment_signals_lcl(
+    records: List[Dict[str, Any]],
+    master_record: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if master_record and _record_signals_lcl(master_record):
+        return True
+    return any(_record_signals_lcl(rec) for rec in records)
+
+
 def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     if _has(line.get("mesco_descriptionofgoods")):
@@ -844,6 +873,9 @@ def _build_house(rec: Dict[str, Any], master_mbl: Optional[str] = None) -> Optio
     if master_mbl:
         house["mesco_masterbllinkno"] = master_mbl
     _fill_operation_defaults(house, is_master=False)
+    if _record_signals_lcl(rec):
+        house["mesco_loadtype"] = LOAD_LCL
+        house["mesco_consolidation"] = True
     _apply_party_fields(house, rec)
     _apply_operation_lookups(house, rec)
     return house
@@ -991,6 +1023,10 @@ def records_to_master_json(
     if not output.get("mesco_nooforgbls") and master_record:
         output["mesco_nooforgbls"] = master_record.get("mesco_nooforgbls")
     _fill_operation_defaults(output, is_master=True)
+    shipment_is_lcl = _shipment_signals_lcl(records, master_record)
+    if shipment_is_lcl:
+        output["mesco_loadtype"] = LOAD_LCL
+        output["mesco_consolidation"] = True
     lookup_src = {**first, **manifest_overrides}
     _apply_party_fields(output, lookup_src)
     if not any(_has(output.get(k)) for k in (
@@ -1006,6 +1042,9 @@ def records_to_master_json(
     for rec in records:
         house = _build_house(rec, master_mbl=master_mbl)
         if house:
+            if shipment_is_lcl:
+                house["mesco_loadtype"] = LOAD_LCL
+                house["mesco_consolidation"] = True
             houses.append(house)
     if houses and not output.get("mesco_nooforgbls"):
         output["mesco_nooforgbls"] = str(len(houses))
@@ -1061,6 +1100,7 @@ def records_to_house_json(
     }
     ctx = master_context or {}
     master_src = master_record or (records[0] if records else {})
+    shipment_is_lcl = _shipment_signals_lcl(records, master_record)
 
     from custom_business_rules import apply_crm_operation_rules, custom_rules_enabled
 
@@ -1090,12 +1130,18 @@ def records_to_house_json(
         if not master_fields.get("mesco_nooforgbls") and master_src.get("mesco_nooforgbls"):
             master_fields["mesco_nooforgbls"] = master_src.get("mesco_nooforgbls")
         _fill_operation_defaults(master_fields, is_master=True)
+        if shipment_is_lcl:
+            master_fields["mesco_loadtype"] = LOAD_LCL
+            master_fields["mesco_consolidation"] = True
         _apply_operation_lookups(master_fields, master_src)
 
         house = _build_house(rec, master_mbl=master_fields.get("mesco_masterblno"))
         if not house:
             continue
         _preserve_dg_response_fields(house, rec)
+        if shipment_is_lcl:
+            house["mesco_loadtype"] = LOAD_LCL
+            house["mesco_consolidation"] = True
         house[HOUSE_MASTER_KEY] = master_fields
 
         # Containers per house — shared master equipment for attached-list houses
