@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B/L Upload Audit</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --text: #101828;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --blue: #1f6feb;
+      --green: #067647;
+      --red: #b42318;
+      --amber: #b54708;
+      --ink: #243b53;
+      --shadow: 0 1px 2px rgba(16, 24, 40, .08);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Segoe UI, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--amber);
+      display: inline-block;
+    }
+
+    .dot.live { background: var(--green); }
+    .dot.offline { background: var(--red); }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(650px, 1fr) minmax(380px, 520px);
+      gap: 16px;
+      padding: 16px;
+      min-height: calc(100vh - 70px);
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) 150px 120px auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    input, select, button {
+      height: 36px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      padding: 0 10px;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      background: #fbfdff;
+      padding: 10px;
+      min-height: 68px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 8px;
+      font-size: 20px;
+      color: var(--ink);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      height: calc(100vh - 248px);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 13px;
+    }
+
+    th, td {
+      border-bottom: 1px solid #e6edf5;
+      padding: 10px 9px;
+      text-align: left;
+      vertical-align: top;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    th {
+      color: #344054;
+      background: #f8fafc;
+      font-size: 12px;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    tr {
+      cursor: pointer;
+    }
+
+    tr:hover td {
+      background: #f8fbff;
+    }
+
+    tr.selected td {
+      background: #edf4ff;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-width: 78px;
+      justify-content: center;
+      height: 24px;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: capitalize;
+      border: 1px solid;
+    }
+
+    .status.success {
+      color: var(--green);
+      background: #ecfdf3;
+      border-color: #abefc6;
+    }
+
+    .status.failed {
+      color: var(--red);
+      background: #fef3f2;
+      border-color: #fecdca;
+    }
+
+    .status.processing {
+      color: var(--amber);
+      background: #fffaeb;
+      border-color: #fedf89;
+    }
+
+    .detail {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: 0;
+    }
+
+    .detail-head {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .detail-head h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .detail-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      word-break: break-all;
+    }
+
+    .detail-actions {
+      display: flex;
+      gap: 8px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      flex-wrap: wrap;
+    }
+
+    .detail-actions a {
+      display: inline-flex;
+      align-items: center;
+      height: 34px;
+      padding: 0 10px;
+      border: 1px solid #cbd5e1;
+      color: var(--blue);
+      background: #fff;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .detail-body {
+      overflow: auto;
+      padding: 14px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 145px minmax(0, 1fr);
+      gap: 8px 10px;
+      margin-bottom: 14px;
+      font-size: 13px;
+    }
+
+    .kv div:nth-child(odd) {
+      color: var(--muted);
+    }
+
+    .kv div:nth-child(even) {
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .json-title {
+      margin: 18px 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #344054;
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px;
+      background: #0f172a;
+      color: #dbeafe;
+      overflow: auto;
+      min-height: 140px;
+      max-height: 460px;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .empty, .error {
+      padding: 24px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .error {
+      color: var(--red);
+      background: #fff5f5;
+      border-top: 1px solid #fecdca;
+      border-bottom: 1px solid #fecdca;
+      text-align: left;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    @media (max-width: 1120px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      .table-wrap {
+        height: 52vh;
+      }
+
+      .toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 640px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      main {
+        padding: 8px;
+      }
+
+      .toolbar, .summary {
+        grid-template-columns: 1fr;
+      }
+
+      .kv {
+        grid-template-columns: 1fr;
+      }
+
+      th:nth-child(4), td:nth-child(4),
+      th:nth-child(6), td:nth-child(6) {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>B/L Upload Audit</h1>
+      <div class="muted" id="lastUpdated">Loading upload history...</div>
+    </div>
+    <div class="header-meta">
+      <span class="dot" id="socketDot"></span>
+      <span id="socketState">Connecting</span>
+      <button type="button" id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="toolbar">
+        <input id="searchInput" type="search" placeholder="Search file, user, operation, error">
+        <select id="statusFilter" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          <option value="processing">Processing</option>
+          <option value="success">Success</option>
+          <option value="failed">Failed</option>
+        </select>
+        <select id="limitSelect" aria-label="Rows to load">
+          <option value="50">50 rows</option>
+          <option value="100" selected>100 rows</option>
+          <option value="200">200 rows</option>
+          <option value="500">500 rows</option>
+        </select>
+        <button type="button" id="clearBtn">Clear</button>
+        <button type="button" class="primary" id="reloadBtn">Reload</button>
+      </div>
+
+      <div class="summary">
+        <div class="metric"><span>Total</span><strong id="totalMetric">0</strong></div>
+        <div class="metric"><span>Success</span><strong id="successMetric">0</strong></div>
+        <div class="metric"><span>Failed</span><strong id="failedMetric">0</strong></div>
+        <div class="metric"><span>Processing</span><strong id="processingMetric">0</strong></div>
+      </div>
+
+      <div id="errorBox" class="error" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 132px;">Time</th>
+              <th style="width: 96px;">Status</th>
+              <th style="width: 210px;">File</th>
+              <th style="width: 150px;">Uploaded By</th>
+              <th style="width: 120px;">Operation</th>
+              <th style="width: 100px;">Type</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="emptyState" class="empty">No upload logs yet.</div>
+      </div>
+    </section>
+
+    <section class="detail">
+      <div class="detail-head">
+        <h2 id="detailTitle">Select an upload</h2>
+        <p id="detailSubtitle">Upload details and response payload will appear here.</p>
+      </div>
+      <div class="detail-actions">
+        <button type="button" id="loadResponseBtn" disabled>Load Response</button>
+        <a id="downloadFileLink" href="#" hidden>Download File</a>
+        <a id="operationLink" href="#" hidden>Open Operation API</a>
+      </div>
+      <div class="detail-body">
+        <div class="kv" id="detailKv"></div>
+        <div class="json-title">Response Summary</div>
+        <pre id="summaryJson">{}</pre>
+        <div class="json-title">Full Response</div>
+        <pre id="responseJson">Select a row and click Load Response.</pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      items: [],
+      selectedId: null,
+      responseCache: new Map(),
+      socket: null,
+      reconnectTimer: null
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function friendlyError(error) {
+      if (!error) return "Something went wrong while loading the audit data.";
+      if (typeof error === "string") return error;
+      return error.message || "Something went wrong while loading the audit data.";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function safeStatus(value) {
+      return ["success", "failed", "processing"].includes(value) ? value : "processing";
+    }
+
+    function formatDate(value) {
+      if (!value) return "-";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString();
+    }
+
+    function formatDuration(ms) {
+      if (ms === null || ms === undefined || ms === "") return "-";
+      const n = Number(ms);
+      if (!Number.isFinite(n)) return "-";
+      if (n < 1000) return `${n} ms`;
+      return `${(n / 1000).toFixed(1)} s`;
+    }
+
+    function fileSize(bytes) {
+      const n = Number(bytes);
+      if (!Number.isFinite(n)) return "-";
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function operationId(item) {
+      return item?.response_summary?.operation_id || "";
+    }
+
+    function rowMessage(item) {
+      if (item.error_message) return item.error_message;
+      if (item.response_summary?.dataverse_error) return item.response_summary.dataverse_error;
+      if (item.response_summary?.error) return item.response_summary.error;
+      if (item.status === "processing") return "Upload is being processed";
+      if (item.status === "success") return "Posted successfully";
+      return "-";
+    }
+
+    function setError(message) {
+      const box = $("errorBox");
+      if (!message) {
+        box.hidden = true;
+        box.textContent = "";
+        return;
+      }
+      box.hidden = false;
+      box.textContent = message;
+    }
+
+    function setSocketState(kind, label) {
+      $("socketDot").className = `dot ${kind}`;
+      $("socketState").textContent = label;
+    }
+
+    function mergeItem(item) {
+      if (!item || !item.id) return;
+      const index = state.items.findIndex((existing) => existing.id === item.id);
+      if (index >= 0) {
+        state.items[index] = item;
+      } else {
+        state.items.unshift(item);
+      }
+      state.items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    }
+
+    function filteredItems() {
+      const search = $("searchInput").value.trim().toLowerCase();
+      const status = $("statusFilter").value;
+      return state.items.filter((item) => {
+        if (status && item.status !== status) return false;
+        if (!search) return true;
+        const haystack = [
+          item.original_filename,
+          item.uploader_name,
+          item.uploader_email,
+          item.endpoint,
+          item.bl_type,
+          operationId(item),
+          rowMessage(item),
+          item.id
+        ].join(" ").toLowerCase();
+        return haystack.includes(search);
+      });
+    }
+
+    function renderMetrics(items) {
+      $("totalMetric").textContent = items.length;
+      $("successMetric").textContent = items.filter((item) => item.status === "success").length;
+      $("failedMetric").textContent = items.filter((item) => item.status === "failed").length;
+      $("processingMetric").textContent = items.filter((item) => item.status === "processing").length;
+    }
+
+    function renderRows() {
+      const tbody = $("rows");
+      const items = filteredItems();
+      renderMetrics(items);
+      tbody.innerHTML = "";
+      $("emptyState").hidden = items.length > 0;
+      for (const item of items) {
+        const tr = document.createElement("tr");
+        if (item.id === state.selectedId) tr.classList.add("selected");
+        const status = safeStatus(item.status);
+        tr.innerHTML = `
+          <td title="${escapeHtml(item.created_at || "")}">${escapeHtml(formatDate(item.created_at))}</td>
+          <td><span class="status ${status}">${escapeHtml(status)}</span></td>
+          <td title="${escapeHtml(item.original_filename || "")}">${escapeHtml(item.original_filename || "-")}</td>
+          <td title="${escapeHtml(item.uploader_email || item.uploader_name || "")}">${escapeHtml(item.uploader_name || item.uploader_email || item.client_ip || "-")}</td>
+          <td title="${escapeHtml(operationId(item))}">${escapeHtml(operationId(item) || "-")}</td>
+          <td>${escapeHtml(item.bl_type || "-")}</td>
+          <td title="${escapeHtml(rowMessage(item))}">${escapeHtml(rowMessage(item))}</td>
+        `;
+        tr.addEventListener("click", () => selectItem(item.id));
+        tbody.appendChild(tr);
+      }
+      $("lastUpdated").textContent = `Loaded ${state.items.length} upload log${state.items.length === 1 ? "" : "s"}`;
+    }
+
+    function renderDetail(item) {
+      const selected = item || state.items.find((entry) => entry.id === state.selectedId);
+      if (!selected) {
+        $("detailTitle").textContent = "Select an upload";
+        $("detailSubtitle").textContent = "Upload details and response payload will appear here.";
+        $("detailKv").innerHTML = "";
+        $("summaryJson").textContent = "{}";
+        $("responseJson").textContent = "Select a row and click Load Response.";
+        $("loadResponseBtn").disabled = true;
+        $("downloadFileLink").hidden = true;
+        $("operationLink").hidden = true;
+        return;
+      }
+
+      $("detailTitle").textContent = selected.original_filename || "Upload";
+      $("detailSubtitle").textContent = selected.id;
+      $("loadResponseBtn").disabled = false;
+      $("downloadFileLink").hidden = !selected.download_url;
+      $("downloadFileLink").href = selected.download_url || "#";
+
+      const opId = operationId(selected);
+      $("operationLink").hidden = !opId;
+      $("operationLink").href = opId ? `/dynamics/operation/${encodeURIComponent(opId)}/full` : "#";
+
+      const user = selected.uploader_name || selected.uploader_email || selected.uploader_id || selected.client_ip || "-";
+      const rows = [
+        ["Status", selected.status || "-"],
+        ["Uploaded By", user],
+        ["Endpoint", `${selected.method || ""} ${selected.endpoint || ""}`.trim() || "-"],
+        ["Created", formatDate(selected.created_at)],
+        ["Completed", formatDate(selected.completed_at)],
+        ["Duration", formatDuration(selected.duration_ms)],
+        ["B/L Type", selected.bl_type || "-"],
+        ["Dataverse", selected.post_to_dataverse ? "Post enabled" : "Extract only"],
+        ["LLM", [selected.llm_provider, selected.llm_model].filter(Boolean).join(" / ") || "-"],
+        ["File Size", fileSize(selected.file_size)],
+        ["SHA-256", selected.sha256 || "-"],
+        ["Client IP", selected.client_ip || "-"]
+      ];
+      $("detailKv").innerHTML = rows
+        .map(([key, value]) => `<div>${escapeHtml(key)}</div><div>${escapeHtml(value)}</div>`)
+        .join("");
+      $("summaryJson").textContent = JSON.stringify(selected.response_summary || {}, null, 2);
+      $("responseJson").textContent = state.responseCache.has(selected.id)
+        ? JSON.stringify(state.responseCache.get(selected.id), null, 2)
+        : "Click Load Response to fetch the full saved response.";
+    }
+
+    function selectItem(id) {
+      state.selectedId = id;
+      renderRows();
+      renderDetail();
+    }
+
+    async function loadUploads() {
+      setError("");
+      $("reloadBtn").disabled = true;
+      try {
+        const limit = encodeURIComponent($("limitSelect").value || "100");
+        const res = await fetch(`/audit/uploads?limit=${limit}`, { headers: { "Accept": "application/json" } });
+        if (!res.ok) throw new Error(`Audit history could not be loaded (${res.status}).`);
+        const body = await res.json();
+        state.items = Array.isArray(body.data) ? body.data : [];
+        if (!state.selectedId && state.items[0]) state.selectedId = state.items[0].id;
+        renderRows();
+        renderDetail();
+      } catch (error) {
+        setError(friendlyError(error));
+      } finally {
+        $("reloadBtn").disabled = false;
+      }
+    }
+
+    async function loadSelectedResponse() {
+      const id = state.selectedId;
+      if (!id) return;
+      $("loadResponseBtn").disabled = true;
+      try {
+        const res = await fetch(`/audit/uploads/${encodeURIComponent(id)}`, { headers: { "Accept": "application/json" } });
+        if (!res.ok) throw new Error(`The saved response could not be loaded (${res.status}).`);
+        const body = await res.json();
+        if (body?.data) {
+          state.responseCache.set(id, body.data.response || {});
+          mergeItem(body.data);
+          renderRows();
+          renderDetail(body.data);
+        }
+      } catch (error) {
+        setError(friendlyError(error));
+      } finally {
+        $("loadResponseBtn").disabled = false;
+      }
+    }
+
+    function connectSocket() {
+      if (state.socket) {
+        try { state.socket.close(); } catch (_) {}
+      }
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      const url = `${scheme}://${window.location.host}/audit/ws`;
+      setSocketState("", "Connecting");
+      const socket = new WebSocket(url);
+      state.socket = socket;
+
+      socket.addEventListener("open", () => setSocketState("live", "Live"));
+      socket.addEventListener("message", (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === "snapshot" && Array.isArray(payload.items)) {
+            state.items = payload.items;
+          }
+          if (payload.type === "upload" && payload.item) {
+            mergeItem(payload.item);
+            if (!state.selectedId) state.selectedId = payload.item.id;
+          }
+          renderRows();
+          renderDetail();
+        } catch (error) {
+          setError("A live audit update arrived in an unexpected format.");
+        }
+      });
+      socket.addEventListener("close", () => {
+        setSocketState("offline", "Reconnecting");
+        clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = setTimeout(connectSocket, 2500);
+      });
+      socket.addEventListener("error", () => setSocketState("offline", "Connection issue"));
+    }
+
+    $("refreshBtn").addEventListener("click", loadUploads);
+    $("reloadBtn").addEventListener("click", loadUploads);
+    $("loadResponseBtn").addEventListener("click", loadSelectedResponse);
+    $("searchInput").addEventListener("input", () => { renderRows(); renderDetail(); });
+    $("statusFilter").addEventListener("change", () => { renderRows(); renderDetail(); });
+    $("limitSelect").addEventListener("change", loadUploads);
+    $("clearBtn").addEventListener("click", () => {
+      $("searchInput").value = "";
+      $("statusFilter").value = "";
+      renderRows();
+      renderDetail();
+    });
+
+    loadUploads();
+    connectSocket();
+  </script>
+</body>
+</html>
