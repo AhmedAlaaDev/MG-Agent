@@ -116,9 +116,32 @@ async def root() -> str:
       </form>
       <h2>Batch PDF Test</h2>
       <p><a href="/test/pdf">Open batch upload page</a> (multipart form, multiple PDFs, no Dataverse).</p>
+      <h2>Audit</h2>
+      <p><a href="/audit">Open upload audit dashboard</a> (live upload log, saved files, and responses).</p>
     </body>
     </html>
     """
+
+
+@app.get("/audit", response_class=HTMLResponse, include_in_schema=False)
+async def upload_audit_page() -> str:
+    """Serve the realtime upload audit dashboard."""
+    import os
+
+    html_path = os.path.join(os.path.dirname(__file__), "audit_view.html")
+    try:
+        with open(html_path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return """
+        <!doctype html>
+        <html>
+        <body>
+          <h1>Upload audit dashboard is not available</h1>
+          <p>The audit_view.html file was not found on this deployment.</p>
+        </body>
+        </html>
+        """
 
 
 @app.get("/audit/uploads", tags=["Audit"])
