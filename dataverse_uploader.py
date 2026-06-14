@@ -69,7 +69,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_field_limits import limit_for as _registry_limit_for
 from dataverse_metadata import is_option_set_field, resolve_option_value
-from crm_output_formatter import is_house_bl_type, prepare_standalone_house_upload
+from crm_output_formatter import (
+    infer_package_unit_label,
+    is_house_bl_type,
+    prepare_standalone_house_upload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -610,6 +614,19 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "UTT LOGISTICS",
             "UTT LOGISTICS AND FOREIGN TRADE",
         ],
+    },
+    "xollsp_unitsofmeasure": {
+        "DRUMS": ["DRUM", "DRUMS", "DRM", "DRMS"],
+        "PALLETS": ["PALLET", "PALLETS", "PLT", "PLTS"],
+        "CARTONS": ["CARTON", "CARTONS", "CTN", "CTNS"],
+        "PACKAGES": ["PACKAGE", "PACKAGES", "PKG", "PKGS"],
+        "BOXES": ["BOX", "BOXES"],
+        "BAGS": ["BAG", "BAGS"],
+        "ROLLS": ["ROLL", "ROLLS"],
+        "CASES": ["CASE", "CASES"],
+        "CRATES": ["CRATE", "CRATES"],
+        "BUNDLES": ["BUNDLE", "BUNDLES"],
+        "CANS": ["CAN", "CANS"],
     },
 }
 
@@ -1706,6 +1723,38 @@ def _delete_cargo_entities(
             logger.warning("Cargo delete %s failed: %s", cargo_id, exc)
 
 
+def _apply_cargo_package_unit_hint(cargo_clean: Dict[str, Any]) -> None:
+    """Populate mesco_umpackages from cargo text before lookup preprocessing."""
+    def _present(value: Any) -> bool:
+        return value is not None and value != "" and value != [] and value != {}
+
+    if not isinstance(cargo_clean, dict):
+        return
+    bind_keys = {
+        _lookup_bind_key("mesco_UMPackages"),
+        _lookup_bind_key("mesco_umpackages"),
+        "mesco_UMPackages@odata.bind",
+        "mesco_umpackages@odata.bind",
+    }
+    if _present(cargo_clean.get("mesco_umpackages")) or any(
+        _present(cargo_clean.get(key)) for key in bind_keys
+    ):
+        return
+
+    package_unit = infer_package_unit_label(
+        cargo_clean.get("package_unit"),
+        cargo_clean.get("u_m_packages"),
+        cargo_clean.get("um_packages"),
+        cargo_clean.get("cargo_type"),
+        cargo_clean.get("cr401_totalpackages"),
+        cargo_clean.get("mesco_noofpackages"),
+        cargo_clean.get("mesco_cargodescription"),
+        cargo_clean.get("mesco_descriptionofgoods"),
+    )
+    if package_unit:
+        cargo_clean["mesco_umpackages"] = package_unit
+
+
 def _cargo_fields_for_update(
     cargo_clean: Dict[str, Any],
     client: Optional[DataverseClientService] = None,
@@ -2340,6 +2389,7 @@ def upload_crm_json(
     for idx, cargo in enumerate(cargo_list):
         cargo_clean = _clean_odata_meta(cargo)
         cargo_clean = _strip_null(cargo_clean)
+        _apply_cargo_package_unit_hint(cargo_clean)
         cargo_hbl = (
             cargo_clean.pop("_house_hbl", None)
             or cargo_clean.pop("mesco_houseblno", None)

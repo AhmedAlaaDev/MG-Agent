@@ -10,15 +10,15 @@ Run:
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, File, Form, Query, UploadFile, Body
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
 from dataverse.client_service import DataverseClientService, RetryConfig
@@ -64,6 +64,7 @@ from pdf_sea_waybill import (
     master_record_without_house_cargo,
     parse_consolidation_sea_waybill,
 )
+from upload_audit import audit_store
 
 
 class BlTypeQuery(str, Enum):
@@ -118,6 +119,52 @@ async def root() -> str:
     </body>
     </html>
     """
+
+
+@app.get("/audit/uploads", tags=["Audit"])
+async def list_upload_audit(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Return recent B/L upload audit records."""
+    return {
+        "success": True,
+        "data": audit_store.list_uploads(limit=limit, offset=offset),
+    }
+
+
+@app.get("/audit/uploads/{audit_id}", tags=["Audit"])
+async def get_upload_audit(audit_id: str):
+    """Return one audit record including the stored response payload."""
+    item = audit_store.get_upload(audit_id, include_response=True)
+    if not item:
+        raise HTTPException(status_code=404, detail="Upload log not found")
+    return {"success": True, "data": item}
+
+
+@app.get("/audit/uploads/{audit_id}/file", tags=["Audit"])
+async def download_audit_file(audit_id: str):
+    """Download the original uploaded document saved for this audit record."""
+    item = audit_store.get_upload(audit_id, include_response=False)
+    if not item or not item.get("saved_path"):
+        raise HTTPException(status_code=404, detail="Upload file not found")
+    path = item["saved_path"]
+    return FileResponse(
+        path,
+        filename=item.get("original_filename") or item.get("saved_filename") or "upload.bin",
+        media_type=item.get("content_type") or "application/octet-stream",
+    )
+
+
+@app.websocket("/audit/ws")
+async def upload_audit_socket(websocket: WebSocket):
+    """Realtime stream of B/L upload audit changes."""
+    await audit_store.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        audit_store.disconnect(websocket)
 
 
 @app.get("/test/pdf", response_class=HTMLResponse, include_in_schema=False)
@@ -1104,6 +1151,7 @@ def _direct_spreadsheet_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tags=["Extraction"],
 )
 async def extract_file(
+    request: Request,
     file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
     bl_type: BlTypeQuery = Form(
         BlTypeQuery.master,
@@ -1137,16 +1185,37 @@ async def extract_file(
     except ValueError as exc:
         return ExtractResponse(success=False, error=str(exc))
 
+    audit_id: Optional[str] = None
+    audit_started_at = datetime.now(timezone.utc)
+    try:
+        file_bytes = await file.read()
+        await file.seek(0)
+        audit_id = audit_store.start_upload(
+            request=request,
+            file=file,
+            file_bytes=file_bytes,
+            bl_type=bl_type,
+            post_to_dataverse=post_to_dataverse,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            apply_custom_rules=apply_custom_rules,
+        )
+    except Exception as audit_exc:
+        logger.warning("Upload audit start failed: %s", audit_exc)
+
     try:
         with llm_request_overrides(provider_val, model_val):
-            return await _extract_file_inner(
+            result = await _extract_file_inner(
                 file,
                 bl_type=bl_type,
                 post_to_dataverse=post_to_dataverse,
                 download=download,
                 apply_custom_rules=apply_custom_rules,
             )
+            audit_store.finish_upload(audit_id, result, started_at=audit_started_at)
+            return result
     except Exception as exc:
+        audit_store.fail_upload(audit_id, exc, started_at=audit_started_at)
         return ExtractResponse(success=False, error=str(exc))
 
 
@@ -1820,6 +1889,7 @@ async def extract_text(request: ExtractRequest):
     tags=["Extraction"],
 )
 async def extract_pdf(
+    request: Request,
     file: UploadFile = File(..., description="PDF file to extract"),
     bl_type: BlTypeQuery = Query(
         BlTypeQuery.master,
@@ -1848,6 +1918,7 @@ async def extract_pdf(
     ),
 ):
     return await extract_file(
+        request,
         file,
         bl_type=bl_type,
         llm_provider=llm_provider,
@@ -1871,6 +1942,7 @@ async def extract_pdf(
     tags=["Extraction"],
 )
 async def extract_excel(
+    request: Request,
     file: UploadFile = File(..., description="Excel or CSV file (.xlsx, .xls, .csv)"),
     bl_type: BlTypeQuery = Form(
         BlTypeQuery.master,
@@ -1898,6 +1970,7 @@ async def extract_excel(
     ),
 ):
     return await extract_file(
+        request,
         file,
         bl_type=bl_type,
         llm_provider=llm_provider,
@@ -1919,11 +1992,13 @@ async def extract_excel(
     tags=["Extraction — B/L type"],
 )
 async def extract_as_master(
+    request: Request,
     file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
     post_to_dataverse: bool = Form(True, description="Automatically upload to Dynamics 365 Dataverse"),
     download: bool = Form(False, description="Download CRM JSON instead of JSON response"),
 ):
     return await extract_file(
+        request,
         file,
         bl_type=BlTypeQuery.master,
         post_to_dataverse=post_to_dataverse,
@@ -1942,11 +2017,13 @@ async def extract_as_master(
     tags=["Extraction — B/L type"],
 )
 async def extract_as_house(
+    request: Request,
     file: UploadFile = File(..., description="PDF, XLSX, XLS, or CSV file"),
     post_to_dataverse: bool = Form(True, description="Automatically upload to Dynamics 365 Dataverse"),
     download: bool = Form(False, description="Download CRM JSON instead of JSON response"),
 ):
     return await extract_file(
+        request,
         file,
         bl_type=BlTypeQuery.house,
         post_to_dataverse=post_to_dataverse,

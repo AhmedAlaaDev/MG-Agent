@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 MASTER_BL_TYPE = 886150001
 HOUSE_BL_TYPE = 886150002
@@ -75,6 +75,96 @@ def _um_hint_from_container_type(container_type: Any) -> Optional[str]:
     if "20" in text:
         return "20 FT"
     return None
+
+
+_PACKAGE_UNIT_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "DRUMS": ("DRUM", "DRUMS", "DRM", "DRMS"),
+    "PALLETS": ("PALLET", "PALLETS", "PLT", "PLTS"),
+    "CARTONS": ("CARTON", "CARTONS", "CTN", "CTNS"),
+    "PACKAGES": ("PACKAGE", "PACKAGES", "PKG", "PKGS"),
+    "BOXES": ("BOX", "BOXES"),
+    "BAGS": ("BAG", "BAGS"),
+    "ROLLS": ("ROLL", "ROLLS"),
+    "CASES": ("CASE", "CASES"),
+    "CRATES": ("CRATE", "CRATES"),
+    "BUNDLES": ("BUNDLE", "BUNDLES"),
+    "CANS": ("CAN", "CANS"),
+}
+
+_PACKAGE_UNIT_BY_TOKEN = {
+    alias: label
+    for label, aliases in _PACKAGE_UNIT_ALIASES.items()
+    for alias in aliases
+}
+_PACKAGE_UNIT_PATTERN = re.compile(
+    r"\b(?:(\d{1,7}(?:\.\d+)?)\s*)?(?:\([^)]{1,40}\)\s*)?"
+    r"(DRUMS?|DRMS?|DRM|PALLETS?|PLTS?|PLT|CARTONS?|CTNS?|CTN|"
+    r"PACKAGES?|PKGS?|PKG|BOXES?|BOX|BAGS?|BAG|ROLLS?|ROLL|"
+    r"CASES?|CASE|CRATES?|CRATE|BUNDLES?|BUNDLE|CANS?|CAN)\b",
+    re.I,
+)
+_OUTER_PACKAGE_UNITS = {"PALLETS", "PACKAGES"}
+
+
+def _canonical_package_unit(value: Any) -> Optional[str]:
+    if not _has(value):
+        return None
+    token = re.sub(r"[^A-Z0-9]+", "", str(value).upper())
+    if not token:
+        return None
+    return _PACKAGE_UNIT_BY_TOKEN.get(token)
+
+
+def infer_package_unit_label(*values: Any) -> Optional[str]:
+    """Infer the Dataverse U/M Packages lookup label from cargo text.
+
+    In phrases like ``08 PALLETS STC 80 DRUMS`` the cargo package unit is the
+    contained unit (DRUMS), not the outer pallet count.  The scoring below
+    favours units near STC/contain wording, then larger package counts, while
+    still falling back to direct cargo_type values such as "drums".
+    """
+    best: Optional[Tuple[float, int, str]] = None
+    order = 0
+
+    for value in values:
+        if not _has(value):
+            continue
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        if not text:
+            continue
+        upper = text.upper()
+
+        direct = _canonical_package_unit(upper)
+        if direct:
+            candidate = (75.0, order, direct)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+            order += 1
+
+        for match in _PACKAGE_UNIT_PATTERN.finditer(upper):
+            unit = _canonical_package_unit(match.group(2))
+            if not unit:
+                continue
+            qty = _parse_numeric(match.group(1))
+            before = upper[max(0, match.start() - 90):match.start()]
+            after = upper[match.end():match.end() + 40]
+
+            score = 10.0
+            if qty is not None:
+                score += min(qty, 10000.0)
+            if re.search(r"\b(STC|SAID TO CONTAIN|CONTAIN|CONTAINS|CONTAINING)\b", before):
+                score += 1000.0
+            if unit not in _OUTER_PACKAGE_UNITS:
+                score += 50.0
+            if unit in _OUTER_PACKAGE_UNITS and re.search(r"\bSTC\b", after):
+                score -= 100.0
+
+            candidate = (score, order, unit)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+            order += 1
+
+    return best[2] if best else None
 
 
 def _pick(src: Dict[str, Any], *fields: str) -> Dict[str, Any]:
@@ -582,6 +672,15 @@ def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     _set_numeric_field(cargo, "mesco_noofpackages", line.get("mesco_noofpackages"))
     _set_numeric_field(cargo, "mesco_grosskg", line.get("mesco_grosskg"))
     _set_numeric_field(cargo, "mesco_volcbm", line.get("mesco_volcbm"))
+    package_unit = infer_package_unit_label(
+        line.get("mesco_umpackages"),
+        line.get("package_unit"),
+        line.get("cargo_type"),
+        line.get("mesco_noofpackages"),
+        line.get("mesco_descriptionofgoods"),
+    )
+    if package_unit:
+        cargo["mesco_umpackages"] = package_unit
     _apply_imo_fields_to_cargo(cargo, line)
     return {k: v for k, v in cargo.items() if _has(v)}
 
@@ -674,6 +773,16 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     _set_numeric_field(cargo, "mesco_noofpackages", rec.get("cr401_totalpackages"))
     _set_numeric_field(cargo, "mesco_grosskg", rec.get("cr401_totalgrossweight"))
     _set_numeric_field(cargo, "mesco_volcbm", rec.get("cr401_totalvolume"))
+    package_unit = infer_package_unit_label(
+        rec.get("mesco_umpackages"),
+        rec.get("package_unit"),
+        rec.get("cargo_type"),
+        rec.get("cr401_totalpackages"),
+        rec.get("mesco_cargodescription"),
+        cargo.get("mesco_descriptionofgoods"),
+    )
+    if package_unit:
+        cargo["mesco_umpackages"] = package_unit
     _apply_imo_fields_to_cargo(cargo, rec)
     return {k: v for k, v in cargo.items() if _has(v)}
 
