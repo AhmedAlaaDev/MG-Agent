@@ -1492,12 +1492,15 @@ def _adopt_orphan_houses_for_master(
     client: DataverseClientService,
     master_id: str,
     master_bl: Optional[str],
+    master_shippingline_bind: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Link same-B/L orphan house operations to a master operation."""
     adopted: List[Dict[str, Any]] = []
     if not master_id:
         return adopted
     bind = {_lookup_bind_key("mesco_Operation"): f"/{_ENTITY}({master_id})"}
+    if master_shippingline_bind:
+        bind[_lookup_bind_key("mesco_ShippingLine")] = master_shippingline_bind
     id_field = _id_field(_ENTITY)
     for row in _find_orphan_house_operations(client, master_bl):
         house_id = row.get(id_field)
@@ -1532,6 +1535,70 @@ def _get_operation_parent(
         _OP_PARENT_MASTER_VALUE_FIELD,
     )
     return row.get(_OP_PARENT_MASTER_VALUE_FIELD) if row else None
+
+
+def _present_lookup_value(value: Any) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def _lookup_bind_from_payload(payload: Dict[str, Any], logical_key: str) -> Optional[str]:
+    nav_key = _NAV_PROPERTY_MAP.get(logical_key, logical_key)
+    for key in (
+        _lookup_bind_key(nav_key),
+        _lookup_bind_key(logical_key),
+        f"{nav_key}@odata.bind",
+        f"{logical_key}@odata.bind",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _payload_has_lookup_value(payload: Dict[str, Any], logical_key: str) -> bool:
+    nav_key = _NAV_PROPERTY_MAP.get(logical_key, logical_key)
+    return (
+        _present_lookup_value(payload.get(logical_key))
+        or _lookup_bind_from_payload(payload, logical_key) is not None
+        or _present_lookup_value(payload.get(nav_key))
+    )
+
+
+def _get_operation_lookup_bind(
+    client: DataverseClientService,
+    op_id: Optional[str],
+    logical_key: str,
+) -> Optional[str]:
+    """Read an operation lookup value and return a Dataverse bind string."""
+    if not op_id:
+        return None
+    target_logical = _ENTITY_SCHEMAS[_ENTITY]["lookups"].get(logical_key)
+    if not target_logical:
+        return None
+    value_field = f"_{logical_key}_value"
+    row = _query_first(
+        client,
+        _ENTITY,
+        f"{_id_field(_ENTITY)} eq {op_id}",
+        value_field,
+    )
+    guid = row.get(value_field) if row else None
+    if not guid:
+        return None
+    return f"/{_entity_set_name(target_logical)}({guid})"
+
+
+def _inherit_lookup_bind(
+    target: Dict[str, Any],
+    logical_key: str,
+    inherited_bind: Optional[str],
+) -> bool:
+    """Copy a parent lookup bind to target only when target has no value."""
+    if not inherited_bind or _payload_has_lookup_value(target, logical_key):
+        return False
+    nav_key = _NAV_PROPERTY_MAP.get(logical_key, logical_key)
+    target[_lookup_bind_key(nav_key)] = inherited_bind
+    return True
 
 
 def _find_existing_container(
@@ -2173,6 +2240,21 @@ def upload_crm_json(
                     parent_master_id, link_bl,
                 )
 
+    standalone_had_shippingline = _payload_has_lookup_value(payload, "mesco_shippingline")
+    standalone_parent_shippingline_bind: Optional[str] = None
+    if is_standalone_house and parent_master_id:
+        standalone_parent_shippingline_bind = _get_operation_lookup_bind(
+            client,
+            parent_master_id,
+            "mesco_shippingline",
+        )
+        if standalone_parent_shippingline_bind:
+            _inherit_lookup_bind(
+                payload,
+                "mesco_shippingline",
+                standalone_parent_shippingline_bind,
+            )
+
     # ------------------------------------------------------------------
     # 1. Root operation (master or standalone house) — find-or-create
     # ------------------------------------------------------------------
@@ -2196,6 +2278,22 @@ def upload_crm_json(
     # Read it back so the response reflects the real parent.
     if is_standalone_house and not parent_master_id:
         parent_master_id = _get_operation_parent(client, master_id)
+        if parent_master_id and not standalone_had_shippingline:
+            standalone_parent_shippingline_bind = _get_operation_lookup_bind(
+                client,
+                parent_master_id,
+                "mesco_shippingline",
+            )
+            if standalone_parent_shippingline_bind:
+                _update_entity(
+                    client,
+                    _ENTITY,
+                    master_id,
+                    {
+                        _lookup_bind_key("mesco_ShippingLine"):
+                            standalone_parent_shippingline_bind
+                    },
+                )
     # Clarity for callers: what kind of operation the root record is, and (for a
     # standalone house) which master it is linked to (None ⇒ unlinked).
     result["root_kind"] = "house" if is_standalone_house else "master"
@@ -2209,8 +2307,25 @@ def upload_crm_json(
         f" → master {parent_master_id}" if is_standalone_house and parent_master_id else "",
     )
 
+    master_shippingline_bind = (
+        None
+        if is_standalone_house
+        else _lookup_bind_from_payload(master_fields, "mesco_shippingline")
+    )
+    if not is_standalone_house and not master_shippingline_bind:
+        master_shippingline_bind = _get_operation_lookup_bind(
+            client,
+            master_id,
+            "mesco_shippingline",
+        )
+
     if not is_standalone_house and not houses:
-        adopted_houses = _adopt_orphan_houses_for_master(client, master_id, root_bl)
+        adopted_houses = _adopt_orphan_houses_for_master(
+            client,
+            master_id,
+            root_bl,
+            master_shippingline_bind,
+        )
         if adopted_houses:
             result["houses"].extend(adopted_houses)
             logger.info(
@@ -2247,6 +2362,11 @@ def upload_crm_json(
         # preprocessor passes it straight through (pass 1) without trying to
         # resolve it as a name string.
         house_clean[_lookup_bind_key("mesco_Operation")] = f"/{_ENTITY}({master_id})"
+        _inherit_lookup_bind(
+            house_clean,
+            "mesco_shippingline",
+            master_shippingline_bind,
+        )
 
         house_bl = house.get("mesco_masterblno") or house.get("mesco_houseblno")
         # mesco_houseblno is not a column on mesco_operations — drop it so the
