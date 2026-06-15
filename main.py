@@ -60,6 +60,7 @@ from pdf_consolidated_lcl import (
     parse_consolidated_lcl_multi_hbl,
 )
 from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
+from pdf_house_bl import is_standard_house_bl, parse_standard_house_bl
 from pdf_sea_waybill import (
     build_house_records_for_consolidation_sea_waybill,
     is_consolidation_sea_waybill,
@@ -1575,6 +1576,39 @@ async def _extract_file_inner_impl(
                     "skipped": 0,
                     "policy": "pdf_freight_debit_note",
                     "mode": "single_house_from_debit_note",
+                }
+                house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(
+                    getattr(bl_type, "value", bl_type),
+                )
+                if resolved_bl == "house" and house_output.get("value"):
+                    crm_output = house_output["value"][0]
+                else:
+                    crm_output = records_to_master_json([validated])
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
+        if is_standard_house_bl(raw_text):
+            house_record = parse_standard_house_bl(raw_text)
+            if house_record:
+                # This direct parser reads already-labelled House B/L fields.
+                # The broad PDF validator can over-enrich noisy OCR on this
+                # layout and invent a master link from phone/reference numbers.
+                validated = house_record
+                extraction_quality["document_type_detected"] = "standard_house_bl_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_standard_house_bl",
+                    "mode": "single_house_with_linking_evidence",
                 }
                 house_output = records_to_house_json([validated])
                 resolved_bl = normalize_bl_type(
