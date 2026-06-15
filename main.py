@@ -482,6 +482,9 @@ class PuterFormatRequest(BaseModel):
     raw_text: Optional[str] = ""
     bl_type: BlTypeQuery = BlTypeQuery.master
     post_to_dataverse: bool = True
+    llm_model: Optional[str] = None
+    visual_page_count: Optional[int] = None
+    pdf_page_count: Optional[int] = None
 
 
 class ExtractResponse(BaseModel):
@@ -1867,7 +1870,9 @@ async def puter_config():
         + "\n\nReturn ONLY one valid JSON object matching this schema. "
         + "No markdown fences, no commentary, no extra text after the JSON:\n"
         + schema_hint
-        + "\n\nExtract all Bill(s) of Lading from this document text:\n\n"
+        + "\n\nThe attached PDF page images are the authoritative source. "
+        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
+        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
     )
     return {
         "provider": "puter",
@@ -1875,6 +1880,10 @@ async def puter_config():
         "models": list(GEMINI_MODELS),
         "prompt_prefix": prompt_prefix,
         "max_text_chars": settings.gemini_max_input_chars,
+        "max_visual_pages": 8,
+        "pdf_render_scale": 2.0,
+        "pdf_max_canvas_width": 1800,
+        "pdf_image_quality": 0.86,
     }
 
 
@@ -1911,7 +1920,10 @@ async def puter_format(request: PuterFormatRequest):
         extraction_quality = {
             "source": "puter_js",
             "llm_provider": "puter",
-            "llm_model": settings.puter_model,
+            "llm_model": request.llm_model or settings.puter_model,
+            "visual_input": "pdf_page_images",
+            "visual_page_count": request.visual_page_count,
+            "pdf_page_count": request.pdf_page_count,
             "document_layout": payload.get("document_layout"),
             "record_count": len(validated_records),
         }

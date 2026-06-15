@@ -396,6 +396,11 @@ _PARTY_NOISE_RE = re.compile(
     r"CONTACT|P\.?O\.?\s*BOX|ZIP|POSTAL|VAT|TAX\s*ID)\b\s*[:.\-]?",
     re.I,
 )
+_PARTY_LABEL_LINE_RE = re.compile(
+    r"^\s*(?:CARRIER|SHIPPER|CONSIGNEE|NOTIFY\s+PARTY|EXPORTER\s+REFERENCE|"
+    r"CARRIER\s+REFERENCE|B/?L\.?\s*NO|PAGE|FOR\s+DELIVERY\s+OF\s+GOODS)\b",
+    re.I,
+)
 
 # Lookup-name fields that already arrive as canonical strings and only need to
 # be carried through to the operation payload for the uploader to resolve.
@@ -417,11 +422,29 @@ _INCOTERMS = {
 }
 _INCOTERM_RE = re.compile(r"\b(" + "|".join(sorted(_INCOTERMS)) + r")\b", re.I)
 _MESCO_ACCOUNT_LOOKUP_NAME = "MARINE AND ENGINEERING SERVICES COMPANY (MESCO)"
+_SAME_AS_CONSIGNEE_LOOKUP_NAME = "Same As Consignee"
+_SAME_AS_CONSIGNEE_RE = re.compile(r"\bSAME\s+AS\s+(?:CONSIGNEE|CNEE)\b", re.I)
+_STC_PREFIX_RE = re.compile(r"^\s*S\s*\.?\s*T\s*\.?\s*C\s*\.?\s*[:.\-]?\s*", re.I)
 
 
 def _is_mesco_party(*parts: Any) -> bool:
     upper = " ".join(str(part) for part in parts if _has(part)).upper()
     return "MESCO" in upper
+
+
+def _is_same_as_consignee(value: Any) -> bool:
+    return _has(value) and bool(_SAME_AS_CONSIGNEE_RE.search(str(value)))
+
+
+def ensure_stc_cargo_description(value: Any) -> Optional[str]:
+    """Normalize cargo text so Dynamics descriptions consistently start S.T.C."""
+    if not _has(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = _STC_PREFIX_RE.sub("", text, count=1).strip()
+    return "S.T.C" if not text else f"S.T.C\n{text}"
 
 
 def _canonical_incoterm(value: Any) -> Optional[str]:
@@ -562,9 +585,18 @@ def _clean_company_name(value: Any) -> Optional[str]:
     first_line = None
     for line in text.split("\n"):
         stripped = line.strip(" \t,-:;|")
-        if stripped:
-            first_line = stripped
-            break
+        if not stripped:
+            continue
+        if _PARTY_LABEL_LINE_RE.search(stripped):
+            continue
+        if _PARTY_NOISE_RE.match(stripped):
+            continue
+        if re.match(r"^(?:ID|TD|VAT|TAX\s*ID|TEL|FAX|EMAIL|E-?MAIL)\b", stripped, re.I):
+            continue
+        if re.match(r"^(?:ORIGINAL|COPY|PAGE\s+\d+)$", stripped, re.I):
+            continue
+        first_line = stripped
+        break
     if not first_line:
         return None
     first_line = _PARTY_NOISE_RE.split(first_line)[0]
@@ -603,14 +635,15 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
     if _has(shipper):
         out["mesco_shipper"] = shipper
 
-    notify = _account_lookup_name(
-        src.get("mesco_notify1"),
-        src.get("mesco_notifyaddress"),
-    )
-    if _has(notify):
-        out["mesco_notify1"] = notify
-    elif _has(consignee) and re.match(r"^SAME\s+AS\b", str(src.get("mesco_notify1") or ""), re.I):
-        out["mesco_notify1"] = consignee
+    if _is_same_as_consignee(src.get("mesco_notify1")):
+        out["mesco_notify1"] = _SAME_AS_CONSIGNEE_LOOKUP_NAME
+    else:
+        notify = _account_lookup_name(
+            src.get("mesco_notify1"),
+            src.get("mesco_notifyaddress"),
+        )
+        if _has(notify):
+            out["mesco_notify1"] = notify
 
     for field in _PASS_THROUGH_LOOKUP_FIELDS:
         if _has(src.get(field)):
@@ -694,8 +727,9 @@ def _shipment_signals_lcl(
 def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     if _has(line.get("mesco_descriptionofgoods")):
+        desc = ensure_stc_cargo_description(line["mesco_descriptionofgoods"])
         cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
-            str(line["mesco_descriptionofgoods"]),
+            desc or str(line["mesco_descriptionofgoods"]),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
     _set_numeric_field(cargo, "mesco_noofpackages", line.get("mesco_noofpackages"))
@@ -795,8 +829,9 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
         if ct not in " ".join(desc_parts):
             desc_parts.append(ct)
     if desc_parts:
+        desc = ensure_stc_cargo_description("\n".join(desc_parts))
         cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
-            "\n".join(desc_parts),
+            desc or "\n".join(desc_parts),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
     _set_numeric_field(cargo, "mesco_noofpackages", rec.get("cr401_totalpackages"))
@@ -897,6 +932,10 @@ def _build_container_from_item(c: Dict[str, Any], master_level: bool = True) -> 
         um_hint = _um_hint_from_container_type(c["container_type"])
         if um_hint:
             entry["mesco_um"] = um_hint
+    warehouse = c.get("mesco_warehouse") or c.get("warehouse") or c.get("warehouse_name")
+    if _has(warehouse):
+        entry["mesco_warehouse"] = warehouse
+        entry["mesco_sendtowarehouse"] = True
     _set_numeric_field(entry, "mesco_noofpackages", c.get("packages"))
     _set_numeric_field(entry, "mesco_grosskg", c.get("gross_weight_kg"))
     _set_numeric_field(entry, "mesco_volcbm", c.get("measurement_cbm"))
@@ -917,6 +956,7 @@ def _record_container_items(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             "container_number": rec.get("container_number"),
             "seal_number": rec.get("seal_number"),
             "container_type": rec.get("mesco_containertype"),
+            "warehouse": rec.get("mesco_warehouse") or rec.get("warehouse"),
             "packages": rec.get("cr401_totalpackages"),
             "gross_weight_kg": rec.get("cr401_totalgrossweight"),
             "measurement_cbm": rec.get("cr401_totalvolume"),
