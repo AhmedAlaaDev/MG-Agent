@@ -563,6 +563,7 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "xollsp_unitsofmeasure": ["xollsp_name", "name"],
     "mesco_operation":       ["mesco_code", "mesco_name", "name"],
     "mesco_containerno":     ["mesco_containerno"],
+    "mesco_warehouse":       ["mesco_name", "mesco_warehouse", "mesco_code", "name"],
 }
 
 # Per-upload cache: (entity logical name, normalized label) → GUID or None
@@ -627,6 +628,13 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
         "CRATES": ["CRATE", "CRATES"],
         "BUNDLES": ["BUNDLE", "BUNDLES"],
         "CANS": ["CAN", "CANS"],
+    },
+    "mesco_warehouse": {
+        "MERGHEM": [
+            "MERGHEM",
+            "MERGHEM BONDED WAREHOUSE",
+            "WAREHOUSE MERGHEM",
+        ],
     },
 }
 
@@ -2762,9 +2770,15 @@ def upload_crm_json(
     # passed as unknown fields to the master operation POST.
     houses: List[Dict]     = payload.pop("mesco_Operation_mesco_Operation_mesco_Operation", []) or []
     containers: List[Dict] = payload.pop("mesco_Container_MasterOperation_mesco_Operation", []) or []
+    house_containers: List[Dict] = payload.pop("mesco_Container_mesco_houses", []) or []
     cargo_list: List[Dict] = payload.pop("mesco_Cargo_MasterOperation_mesco_Operation", []) or []
     house_cargo: List[Dict] = payload.pop("mesco_Cargo_HouseOperation_mesco_Operation", []) or []
     is_standalone_house = is_house_bl_type(payload.get("mesco_bltype")) and not houses
+    if house_containers:
+        if is_standalone_house:
+            containers = containers + house_containers
+        elif not containers:
+            containers = house_containers
     if house_cargo:
         if is_standalone_house or is_house_bl_type(payload.get("mesco_bltype")):
             cargo_list = house_cargo

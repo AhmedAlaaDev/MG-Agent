@@ -603,14 +603,15 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
     if _has(shipper):
         out["mesco_shipper"] = shipper
 
-    notify = _account_lookup_name(
-        src.get("mesco_notify1"),
-        src.get("mesco_notifyaddress"),
-    )
-    if _has(notify):
-        out["mesco_notify1"] = notify
-    elif _has(consignee) and re.match(r"^SAME\s+AS\b", str(src.get("mesco_notify1") or ""), re.I):
+    if _has(consignee) and re.match(r"^SAME\s+AS\b", str(src.get("mesco_notify1") or ""), re.I):
         out["mesco_notify1"] = consignee
+    else:
+        notify = _account_lookup_name(
+            src.get("mesco_notify1"),
+            src.get("mesco_notifyaddress"),
+        )
+        if _has(notify):
+            out["mesco_notify1"] = notify
 
     for field in _PASS_THROUGH_LOOKUP_FIELDS:
         if _has(src.get(field)):
@@ -897,6 +898,10 @@ def _build_container_from_item(c: Dict[str, Any], master_level: bool = True) -> 
         um_hint = _um_hint_from_container_type(c["container_type"])
         if um_hint:
             entry["mesco_um"] = um_hint
+    warehouse = c.get("mesco_warehouse") or c.get("warehouse") or c.get("warehouse_name")
+    if _has(warehouse):
+        entry["mesco_warehouse"] = warehouse
+        entry["mesco_sendtowarehouse"] = True
     _set_numeric_field(entry, "mesco_noofpackages", c.get("packages"))
     _set_numeric_field(entry, "mesco_grosskg", c.get("gross_weight_kg"))
     _set_numeric_field(entry, "mesco_volcbm", c.get("measurement_cbm"))
@@ -917,6 +922,7 @@ def _record_container_items(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
             "container_number": rec.get("container_number"),
             "seal_number": rec.get("seal_number"),
             "container_type": rec.get("mesco_containertype"),
+            "warehouse": rec.get("mesco_warehouse") or rec.get("warehouse"),
             "packages": rec.get("cr401_totalpackages"),
             "gross_weight_kg": rec.get("cr401_totalgrossweight"),
             "measurement_cbm": rec.get("cr401_totalvolume"),

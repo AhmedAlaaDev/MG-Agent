@@ -42,6 +42,11 @@ _HS_RE = re.compile(r"\bH\.?S\.?\s*CODE\s*:?\s*([0-9]{6,12})", re.I)
 _EXPORTER_ID_RE = re.compile(r"\bFOREIGN\s+EXPORTER\s+ID\s*:?\s*([A-Z0-9]{6,25})", re.I)
 _EXPORTER_COUNTRY_RE = re.compile(r"\bFOREIGN\s+EXPORTER\s+COUNTRY\s*:?\s*([A-Z][A-Z ]+)", re.I)
 _IMPORTER_TAX_RE = re.compile(r"\bEGYPTIAN\s+IMPORTER\s+TAX\s+ID\s*:?\s*(\d{6,15})", re.I)
+_ATA_POD_RE = re.compile(
+    r"\bATA\s*(?:POD|DESTINATION|DISCHARGE)?\s*:?\s*"
+    r"(\d{1,2}\s+[A-Z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    re.I,
+)
 
 
 def _block_order_section(text: str) -> str:
@@ -150,6 +155,9 @@ def _extract_party_blocks(text: str, hbl: Optional[str]) -> Tuple[Optional[str],
 
 def _extract_mesco_notify(text: str) -> Tuple[Optional[str], Optional[str]]:
     visual = _visual_section(text)
+    if re.search(r"\bSAME\s+AS\s+CONSIGNEE\b", visual, re.I):
+        return "SAME AS CONSIGNEE", None
+
     m = re.search(
         r"(MARINE\s*&\s*ENGINEERING\s+SERVICES\s*COMPANY\s*-\s*MESCO)\s*\n"
         r"(?P<addr>.*?)(?:\nTAXNO|\nSHANGHAI|\nCMA\s+CGM)",
@@ -187,11 +195,39 @@ def _extract_container(text: str) -> Optional[Dict[str, Any]]:
     if not m:
         return None
     container_type = f"{m.group(3)}HQ" if m.group(3) == "40" else f"{m.group(3)}FT"
-    return {
+    container = {
         "container_number": m.group(1).upper(),
         "seal_number": m.group(2).upper(),
         "container_type": container_type,
     }
+    warehouse = _extract_warehouse(text)
+    if warehouse:
+        container["warehouse"] = warehouse
+        container["mesco_warehouse"] = warehouse
+    return container
+
+
+def _extract_warehouse(text: str) -> Optional[str]:
+    upper = (text or "").upper()
+    if "MERGHEM" in upper and "WAREHOUSE" in upper:
+        return "MERGHEM"
+    m = re.search(
+        r"\bWAREHOUSE\s+([A-Z][A-Z0-9 &'-]{2,40})\b",
+        upper,
+        re.I,
+    )
+    if m:
+        name = re.sub(r"\s+", " ", m.group(1)).strip(" ,.;:-")
+        return name[:80] if name else None
+    m = re.search(
+        r"\bTO\s+([A-Z][A-Z0-9 &'-]{2,40})\s+BONDED\s+WAREHOUSE\b",
+        upper,
+        re.I,
+    )
+    if m:
+        name = re.sub(r"\s+", " ", m.group(1)).strip(" ,.;:-")
+        return name[:80] if name else None
+    return None
 
 
 def _extract_totals_and_goods(text: str) -> Tuple[Optional[int], Optional[str], Optional[float], Optional[float], Optional[str]]:
@@ -231,6 +267,13 @@ def _extract_dates(text: str) -> Tuple[Optional[str], Optional[str]]:
     return parsed[-2] if len(parsed) >= 2 else parsed[0], parsed[-1]
 
 
+def _extract_ata_pod(text: str) -> Optional[str]:
+    m = _ATA_POD_RE.search(text or "")
+    if not m:
+        return None
+    return _parse_bl_date(m.group(1))
+
+
 def is_standard_house_bl(text: str) -> bool:
     if not text or not text.strip():
         return False
@@ -254,6 +297,7 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
     container = _extract_container(text)
     packages, package_unit, gross, volume, goods = _extract_totals_and_goods(text)
     shipped_on_board, date_of_issue = _extract_dates(text)
+    ata_pod = _extract_ata_pod(text)
 
     record: Dict[str, Any] = {
         "document_type": "House Bill of Lading",
@@ -280,6 +324,8 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_notify1"] = notify
     if notify_addr:
         record["mesco_notifyaddress"] = notify_addr
+    elif notify and re.match(r"^SAME\s+AS\s+CONSIGNEE$", notify, re.I) and consignee_addr:
+        record["mesco_notifyaddress"] = consignee_addr
     if pol:
         record["mesco_origin"] = pol
     if pod:
@@ -299,6 +345,8 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_shippedonboarddate"] = shipped_on_board
     if date_of_issue:
         record["mesco_dateofissue"] = date_of_issue
+    if ata_pod:
+        record["mesco_atadestination"] = ata_pod
 
     if container:
         if packages is not None:
@@ -336,6 +384,7 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         desc_parts.append(goods)
     if package_unit:
         record["cargo_type"] = package_unit
+        record["mesco_umpackages"] = package_unit
     if hscode:
         desc_parts.append(f"HS CODE: {hscode.group(1)}")
     if container:
@@ -349,6 +398,9 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         cargo["mesco_descriptionofgoods"] = record["mesco_cargodescription"]
     if packages is not None:
         cargo["mesco_noofpackages"] = packages
+    if package_unit:
+        cargo["package_unit"] = package_unit
+        cargo["mesco_umpackages"] = package_unit
     if gross is not None:
         cargo["mesco_grosskg"] = gross
     if volume is not None:
