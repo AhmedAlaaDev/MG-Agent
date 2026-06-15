@@ -1412,7 +1412,25 @@ def _query_first(
         if isinstance(rows, list) and rows:
             return rows[0]
     except Exception as exc:
-        logger.warning("Dataverse dedup query failed (%s): %s", filter_expr, exc)
+        logger.warning(
+            "Dataverse dedup query failed with selected columns (%s): %s",
+            filter_expr,
+            exc,
+        )
+        fallback_query = f"{entity_set}?$filter={filter_expr}&$top=1"
+        try:
+            resp = client.get(fallback_query)
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else None
+            if isinstance(rows, list) and rows:
+                return rows[0]
+            logger.info("Dataverse dedup fallback returned no rows (%s)", filter_expr)
+        except Exception as fallback_exc:
+            logger.warning(
+                "Dataverse dedup fallback query failed (%s): %s",
+                filter_expr,
+                fallback_exc,
+            )
     return None
 
 
@@ -1431,7 +1449,23 @@ def _query_many(
         rows = data.get("value") if isinstance(data, dict) else None
         return list(rows or []) if isinstance(rows, list) else []
     except Exception as exc:
-        logger.warning("Dataverse candidate query failed (%s): %s", filter_expr, exc)
+        logger.warning(
+            "Dataverse candidate query failed with selected columns (%s): %s",
+            filter_expr,
+            exc,
+        )
+        fallback_query = f"{entity_set}?$filter={filter_expr}&$top={top}"
+        try:
+            resp = client.get(fallback_query)
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else None
+            return list(rows or []) if isinstance(rows, list) else []
+        except Exception as fallback_exc:
+            logger.warning(
+                "Dataverse candidate fallback query failed (%s): %s",
+                filter_expr,
+                fallback_exc,
+            )
     return []
 
 
@@ -1496,6 +1530,28 @@ _MASTER_MATCH_SELECT = ",".join(
 )
 
 
+_SHIPMENT_MATCH_SELECT = ",".join(
+    (
+        "mesco_operationid",
+        "mesco_code",
+        "mesco_masterblno",
+        "mesco_masterbllinkno",
+        "mesco_bookingnumber",
+        "mesco_customerreference",
+        "mesco_ponumber",
+        "mesco_voytruckno",
+        "mesco_etdorigin",
+        "mesco_atdorigin",
+        "mesco_shippedonboarddate",
+        "mesco_dateofissue",
+        "_mesco_vessel_value",
+        "_mesco_origin_value",
+        "_mesco_destination_value",
+        _OP_PARENT_MASTER_VALUE_FIELD,
+    )
+)
+
+
 def _norm_match_text(value: Any) -> str:
     text = re.sub(r"[^A-Z0-9]+", " ", str(value or "").upper())
     return re.sub(r"\s+", " ", text).strip()
@@ -1536,6 +1592,27 @@ def _payload_container_numbers(
     return numbers
 
 
+def _payload_seal_numbers(
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    seals: List[str] = []
+
+    def add(value: Any) -> None:
+        normalized = _normalize_container_number(str(value or ""))
+        if normalized and normalized not in seals:
+            seals.append(normalized)
+
+    for key in ("seal_number", "carrier_seal", "mesco_carrierseal", "mesco_sealno"):
+        add(payload.get(key))
+    for item in containers or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("seal_number", "carrier_seal", "mesco_carrierseal", "mesco_sealno"):
+            add(item.get(key))
+    return seals
+
+
 def _payload_match_dates(payload: Dict[str, Any]) -> Set[str]:
     dates: Set[str] = set()
     for key in (
@@ -1553,11 +1630,58 @@ def _payload_match_dates(payload: Dict[str, Any]) -> Set[str]:
 
 def _row_match_dates(row: Dict[str, Any]) -> Set[str]:
     dates: Set[str] = set()
-    for key in ("mesco_etdorigin", "mesco_atdorigin", "mesco_shippedonboarddate"):
+    for key in ("mesco_etdorigin", "mesco_atdorigin", "mesco_shippedonboarddate", "mesco_dateofissue"):
         value = _normalize_date(row.get(key))
         if value:
             dates.add(value)
     return dates
+
+
+def _reference_tokens(src: Dict[str, Any]) -> Set[str]:
+    tokens: Set[str] = set()
+    for key in (
+        "mesco_bookingnumber",
+        "mesco_customerreference",
+        "mesco_ponumber",
+        "mesco_cargodescription",
+    ):
+        text = str(src.get(key) or "").upper()
+        for token in re.findall(r"\b[A-Z]{2,}\d{4,}[A-Z0-9-]*\b|\b[A-Z0-9]{8,}\b", text):
+            token = token.strip("-")
+            if len(token) >= 8:
+                tokens.add(token)
+    return tokens
+
+
+def _candidate_operation_ids_by_container(
+    client: DataverseClientService,
+    container_numbers: List[str],
+) -> Set[str]:
+    return _candidate_master_ids_by_container(client, container_numbers)
+
+
+def _candidate_operation_ids_by_seal(
+    client: DataverseClientService,
+    seal_numbers: List[str],
+) -> Set[str]:
+    ids: Set[str] = set()
+    select = f"{_id_field(_CONTAINER_ENTITY)},{_CONTAINER_MASTER_VALUE_FIELD},mesco_carrierseal"
+    for number in seal_numbers:
+        safe = _odata_escape(number)
+        if not safe:
+            continue
+        rows = _query_many(
+            client,
+            _CONTAINER_ENTITY,
+            f"mesco_carrierseal eq '{safe}' and {_CONTAINER_MASTER_VALUE_FIELD} ne null",
+            select,
+            top=25,
+        )
+        for row in rows:
+            op_id = row.get(_CONTAINER_MASTER_VALUE_FIELD)
+            if op_id:
+                ids.add(str(op_id))
+    return ids
 
 
 def _candidate_master_ids_by_container(
@@ -1651,55 +1775,167 @@ def _score_master_match(
     return score, reasons
 
 
-def _find_master_by_shipment_evidence(
+def _operation_candidate_row(
     client: DataverseClientService,
+    op_id: str,
+    *,
+    bltype: int,
+    orphan_house: bool = False,
+) -> Optional[Dict[str, Any]]:
+    clauses = [f"{_id_field(_ENTITY)} eq {op_id}", f"mesco_bltype eq {bltype}"]
+    if orphan_house:
+        clauses.append(f"{_OP_PARENT_MASTER_VALUE_FIELD} eq null")
+    return _query_first(client, _ENTITY, " and ".join(clauses), _SHIPMENT_MATCH_SELECT)
+
+
+def _candidate_rows_by_voyage(
+    client: DataverseClientService,
+    voyage: Any,
+    *,
+    bltype: int,
+    orphan_house: bool = False,
+) -> List[Dict[str, Any]]:
+    safe = _odata_escape(str(voyage or "").strip())
+    if not safe:
+        return []
+    clauses = [f"mesco_bltype eq {bltype}", f"mesco_voytruckno eq '{safe}'"]
+    if orphan_house:
+        clauses.append(f"{_OP_PARENT_MASTER_VALUE_FIELD} eq null")
+    return _query_many(client, _ENTITY, " and ".join(clauses), _SHIPMENT_MATCH_SELECT, top=50)
+
+
+def _score_shipment_match(
+    row: Dict[str, Any],
     payload: Dict[str, Any],
-    containers: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[str]:
-    """Find an existing master from vessel/voyage + container + route + date evidence."""
-    id_field = _id_field(_ENTITY)
-    container_numbers = _payload_container_numbers(payload, containers)
-    container_master_ids = _candidate_master_ids_by_container(client, container_numbers)
+    container_candidate_ids: Set[str],
+    seal_candidate_ids: Set[str],
+    payload_dates: Set[str],
+    payload_refs: Set[str],
+) -> Tuple[int, List[str]]:
+    score = 0
+    reasons: List[str] = []
+    row_id = str(row.get(_id_field(_ENTITY)) or "")
 
-    candidate_rows: Dict[str, Dict[str, Any]] = {}
-    for row in _master_candidate_rows_by_voyage(client, payload.get("mesco_voytruckno")):
-        if row.get(id_field):
-            candidate_rows[str(row[id_field])] = row
-    for master_id in container_master_ids:
-        row = _get_master_candidate_row(client, master_id)
-        if row and row.get(id_field):
-            candidate_rows[str(row[id_field])] = row
+    payload_vessel = _norm_match_text(payload.get("mesco_vessel"))
+    row_vessel = _norm_match_text(_row_lookup_label(row, "mesco_vessel"))
+    if payload_vessel and row_vessel and payload_vessel == row_vessel:
+        score += 2
+        reasons.append("vessel")
 
-    if not candidate_rows:
+    payload_voyage = _norm_match_text(payload.get("mesco_voytruckno"))
+    row_voyage = _norm_match_text(row.get("mesco_voytruckno"))
+    if payload_voyage and row_voyage and payload_voyage == row_voyage:
+        score += 3
+        reasons.append("voyage")
+
+    if row_id and row_id in container_candidate_ids:
+        score += 4
+        reasons.append("container")
+
+    if row_id and row_id in seal_candidate_ids:
+        score += 4
+        reasons.append("seal")
+
+    for logical_key, reason in (("mesco_origin", "origin"), ("mesco_destination", "destination")):
+        payload_port = _norm_match_text(payload.get(logical_key))
+        row_port = _norm_match_text(_row_lookup_label(row, logical_key))
+        if payload_port and row_port and (
+            payload_port == row_port or payload_port in row_port or row_port in payload_port
+        ):
+            score += 1
+            reasons.append(reason)
+
+    if payload_dates and (_row_match_dates(row) & payload_dates):
+        score += 2
+        reasons.append("date")
+
+    row_refs = _reference_tokens(row)
+    if payload_refs and row_refs and (payload_refs & row_refs):
+        score += 2
+        reasons.append("reference")
+
+    return score, reasons
+
+
+def _best_shipment_match(
+    candidates: Dict[str, Dict[str, Any]],
+    payload: Dict[str, Any],
+    container_candidate_ids: Set[str],
+    seal_candidate_ids: Set[str],
+) -> Optional[Tuple[str, int, List[str]]]:
+    if not candidates:
         return None
-
-    house_dates = _payload_match_dates(payload)
+    payload_dates = _payload_match_dates(payload)
+    payload_refs = _reference_tokens(payload)
     scored: List[Tuple[int, str, List[str]]] = []
-    for master_id, row in candidate_rows.items():
-        score, reasons = _score_master_match(row, payload, container_master_ids, house_dates)
-        scored.append((score, master_id, reasons))
+    for op_id, row in candidates.items():
+        score, reasons = _score_shipment_match(
+            row,
+            payload,
+            container_candidate_ids,
+            seal_candidate_ids,
+            payload_dates,
+            payload_refs,
+        )
+        scored.append((score, op_id, reasons))
     scored.sort(reverse=True, key=lambda item: item[0])
     best_score, best_id, best_reasons = scored[0]
     tied = [item for item in scored if item[0] == best_score]
     if len(tied) > 1:
         logger.warning(
-            "Shipment-evidence master match is ambiguous: score=%s ids=%s",
+            "Shipment-evidence match is ambiguous: score=%s ids=%s",
             best_score,
             [item[1] for item in tied],
         )
         return None
-    strong_anchor = "container" in best_reasons or (
+    strong_anchor = "container" in best_reasons or "seal" in best_reasons or (
         "vessel" in best_reasons and "voyage" in best_reasons
     )
     if strong_anchor and best_score >= 6:
-        logger.info(
-            "Linked standalone house to master %s by shipment evidence (%s, score=%s)",
-            best_id,
-            ", ".join(best_reasons),
-            best_score,
-        )
-        return best_id
+        return best_id, best_score, best_reasons
     return None
+
+
+def _find_master_by_shipment_evidence(
+    client: DataverseClientService,
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Find an existing master when the HBL omits the MBL number.
+
+    Evidence rules are conservative:
+    - explicit MBL still wins before this function is called;
+    - shared container or carrier seal is a strong anchor;
+    - vessel+voyage is a strong anchor;
+    - route, ETD/laden date, and booking/reference tokens add confidence;
+    - tied candidates are rejected to avoid linking to the wrong master.
+    """
+    id_field = _id_field(_ENTITY)
+    container_numbers = _payload_container_numbers(payload, containers)
+    seal_numbers = _payload_seal_numbers(payload, containers)
+    container_candidate_ids = _candidate_operation_ids_by_container(client, container_numbers)
+    seal_candidate_ids = _candidate_operation_ids_by_seal(client, seal_numbers)
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    for row in _candidate_rows_by_voyage(client, payload.get("mesco_voytruckno"), bltype=_MASTER_BL_TYPE):
+        if row.get(id_field):
+            candidates[str(row[id_field])] = row
+    for op_id in container_candidate_ids | seal_candidate_ids:
+        row = _operation_candidate_row(client, op_id, bltype=_MASTER_BL_TYPE)
+        if row and row.get(id_field):
+            candidates[str(row[id_field])] = row
+
+    best = _best_shipment_match(candidates, payload, container_candidate_ids, seal_candidate_ids)
+    if not best:
+        return None
+    master_id, score, reasons = best
+    logger.info(
+        "Linked standalone house to master %s by shipment evidence (%s, score=%s)",
+        master_id,
+        ", ".join(reasons),
+        score,
+    )
+    return master_id
 
 
 def _find_orphan_house_operations(
@@ -1758,6 +1994,87 @@ def _adopt_orphan_houses_for_master(
                 "adopted": True,
                 "code": row.get("mesco_code"),
             }
+        )
+    return adopted
+
+
+def _adopt_orphan_houses_by_shipment_evidence(
+    client: DataverseClientService,
+    master_id: str,
+    master_payload: Dict[str, Any],
+    master_containers: Optional[List[Dict[str, Any]]] = None,
+    master_shippingline_bind: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Link orphan houses to this master by container/seal/vessel/voyage/route/date evidence."""
+    adopted: List[Dict[str, Any]] = []
+    if not master_id:
+        return adopted
+
+    id_field = _id_field(_ENTITY)
+    container_numbers = _payload_container_numbers(master_payload, master_containers)
+    seal_numbers = _payload_seal_numbers(master_payload, master_containers)
+    container_candidate_ids = _candidate_operation_ids_by_container(client, container_numbers)
+    seal_candidate_ids = _candidate_operation_ids_by_seal(client, seal_numbers)
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    for row in _candidate_rows_by_voyage(
+        client,
+        master_payload.get("mesco_voytruckno"),
+        bltype=_HOUSE_BL_TYPE,
+        orphan_house=True,
+    ):
+        if row.get(id_field):
+            candidates[str(row[id_field])] = row
+    for op_id in container_candidate_ids | seal_candidate_ids:
+        if op_id == master_id:
+            continue
+        row = _operation_candidate_row(
+            client,
+            op_id,
+            bltype=_HOUSE_BL_TYPE,
+            orphan_house=True,
+        )
+        if row and row.get(id_field):
+            candidates[str(row[id_field])] = row
+
+    bind = {_lookup_bind_key("mesco_Operation"): f"/{_ENTITY}({master_id})"}
+    if master_shippingline_bind:
+        bind[_lookup_bind_key("mesco_ShippingLine")] = master_shippingline_bind
+
+    payload_dates = _payload_match_dates(master_payload)
+    payload_refs = _reference_tokens(master_payload)
+    for house_id, row in candidates.items():
+        score, reasons = _score_shipment_match(
+            row,
+            master_payload,
+            container_candidate_ids,
+            seal_candidate_ids,
+            payload_dates,
+            payload_refs,
+        )
+        strong_anchor = "container" in reasons or "seal" in reasons or ("vessel" in reasons and "voyage" in reasons)
+        if not strong_anchor or score < 6:
+            continue
+        _update_entity(client, _ENTITY, house_id, bind)
+        adopted.append(
+            {
+                "index": len(adopted),
+                "id": house_id,
+                "hbl": row.get("mesco_masterblno"),
+                "mbl": master_payload.get("mesco_masterblno"),
+                "reused": True,
+                "adopted": True,
+                "match_score": score,
+                "match_reasons": reasons,
+                "code": row.get("mesco_code"),
+            }
+        )
+        logger.info(
+            "Linked orphan house %s to master %s by shipment evidence (%s, score=%s)",
+            house_id,
+            master_id,
+            ", ".join(reasons),
+            score,
         )
     return adopted
 
@@ -2438,6 +2755,7 @@ def upload_crm_json(
         "cargo":         [],
         "deduplicated":  bool(deduplicate),
         "skipped_cargo": 0,
+        "house_linking": None,
     }
 
     # Extract nested arrays BEFORE building the master payload so they are not
@@ -2524,6 +2842,57 @@ def upload_crm_json(
     )
     result["master_id"] = master_id
     result["master_reused"] = master_reused
+
+    if is_standalone_house and deduplicate:
+        current_parent_id = _get_operation_parent(client, master_id)
+        if current_parent_id:
+            parent_master_id = current_parent_id
+            result["house_linking"] = {
+                "status": "already_linked",
+                "parent_master_id": parent_master_id,
+            }
+        else:
+            if not parent_master_id:
+                parent_master_id = _find_master_by_shipment_evidence(
+                    client,
+                    payload,
+                    containers,
+                )
+            if parent_master_id:
+                if not standalone_parent_shippingline_bind and not standalone_had_shippingline:
+                    standalone_parent_shippingline_bind = _get_operation_lookup_bind(
+                        client,
+                        parent_master_id,
+                        "mesco_shippingline",
+                    )
+                patch = {
+                    _lookup_bind_key("mesco_Operation"): f"/{_ENTITY}({parent_master_id})"
+                }
+                if standalone_parent_shippingline_bind:
+                    patch[_lookup_bind_key("mesco_ShippingLine")] = standalone_parent_shippingline_bind
+                _update_entity(client, _ENTITY, master_id, patch)
+                result["house_linking"] = {
+                    "status": "linked_after_reuse" if master_reused else "linked_after_create",
+                    "parent_master_id": parent_master_id,
+                }
+                logger.info(
+                    "Patched standalone house %s to parent master %s after upsert",
+                    master_id,
+                    parent_master_id,
+                )
+            else:
+                result["house_linking"] = {
+                    "status": "unlinked_no_match",
+                    "parent_master_id": None,
+                    "container_numbers": _payload_container_numbers(payload, containers),
+                    "seal_numbers": _payload_seal_numbers(payload, containers),
+                    "vessel": payload.get("mesco_vessel"),
+                    "voyage": payload.get("mesco_voytruckno"),
+                    "origin": payload.get("mesco_origin"),
+                    "destination": payload.get("mesco_destination"),
+                    "dates": sorted(_payload_match_dates(payload)),
+                }
+
     # For a standalone house that we did not explicitly link, the record may
     # already be linked to a master from a previous (e.g. Excel manifest) upload.
     # Read it back so the response reflects the real parent.
@@ -2700,6 +3069,21 @@ def upload_crm_json(
             "Reused" if ctn_reused else "Created",
             idx, container_no, ctn_id,
         )
+
+    if not is_standalone_house and deduplicate:
+        evidence_adopted = _adopt_orphan_houses_by_shipment_evidence(
+            client,
+            master_id,
+            payload,
+            containers,
+            master_shippingline_bind,
+        )
+        if evidence_adopted:
+            existing_house_ids = {h.get("id") for h in result["houses"]}
+            for item in evidence_adopted:
+                if item.get("id") not in existing_house_ids:
+                    result["houses"].append(item)
+                    existing_house_ids.add(item.get("id"))
 
     # Standalone house: associate containers on the house operation (N:N).
     if is_standalone_house and result["containers"]:

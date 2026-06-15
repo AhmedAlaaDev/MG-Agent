@@ -287,6 +287,14 @@ suffix noise. Use null when not confidently present.
   origin — as one coherent mesco_cargodescription (dedupe repeated lines).
 - Weights/CBM: from the goods table on the same page (or continuation pages for one B/L).
 - Vessel/voyage: split correctly. Port of loading -> mesco_origin; discharge -> mesco_destination.
+- House/Master linking evidence: if a House B/L does NOT print the Master B/L
+  number, do not invent one. Instead preserve every shared join key visible:
+  container_number, seal_number, containers[], mesco_vessel, mesco_voytruckno,
+  mesco_origin, mesco_destination, mesco_etdorigin / shipped-on-board / laden
+  date, booking number, PO/customer reference. Example: a COSCO master and TP
+  Cargo house can be linked by CSNU6873347/CW794147 + CMA CGM SAO PAULO /
+  0BEN9W1MA + Shanghai -> Alexandria + 16 Mar 2026 even when the HBL omits
+  COSU6446151350.
 - Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
   Downstream rules map Prepaid→Freehand booking + Origin payable; Collect→Nomination + Destination.
 - mesco_loadtype: choose FCL (300000000) vs LCL (300000001) by shipment meaning — LCL for
