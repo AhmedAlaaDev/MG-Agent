@@ -3,7 +3,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from config import normalize_azure_openai_endpoint, settings
-from llm_context import effective_llm_model, uses_gemini
+from llm_context import effective_llm_model, uses_gemini, uses_puter
 from pdf_extractor import normalize_text
 
 
@@ -555,6 +555,12 @@ def _call_llm_json(
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if uses_puter():
+        raise RuntimeError(
+            "Puter is a browser-side AI provider. Open /puter and use the "
+            "Puter.js extractor, or choose llm_provider=azure/gemini for "
+            "server-side API extraction."
+        )
     if uses_gemini():
         return _call_gemini_json(
             system, user, schema, file_bytes=file_bytes, filename=filename
@@ -563,12 +569,16 @@ def _call_llm_json(
 
 
 def _llm_label() -> str:
+    if uses_puter():
+        return "Puter.js Gemini"
     return "Gemini" if uses_gemini() else "Azure OpenAI"
 
 
 def _input_char_budget() -> int:
     """Per-call input budget; Gemini's large context allows far more than Azure."""
     if uses_gemini():
+        return max(settings.gemini_max_input_chars, settings.max_input_chars)
+    if uses_puter():
         return max(settings.gemini_max_input_chars, settings.max_input_chars)
     return settings.max_input_chars
 

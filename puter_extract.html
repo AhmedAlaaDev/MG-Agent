@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Puter Gemini B/L Extractor</title>
+  <script src="https://js.puter.com/v2/"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #dbe3ef;
+      --text: #172033;
+      --muted: #65758b;
+      --primary: #1463ff;
+      --primary-dark: #0f4dcc;
+      --good: #07855b;
+      --bad: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 20px; }
+    main {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 18px;
+      padding: 18px;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    label {
+      display: block;
+      margin: 14px 0 6px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    input, select, button {
+      width: 100%;
+      font: inherit;
+      border-radius: 6px;
+    }
+    input, select {
+      border: 1px solid var(--line);
+      padding: 10px;
+      background: #fff;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 14px 0;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .check input { width: auto; }
+    button {
+      border: 0;
+      background: var(--primary);
+      color: white;
+      padding: 11px 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover { background: var(--primary-dark); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .secondary { background: #eef3fb; color: var(--text); border: 1px solid var(--line); }
+    .secondary:hover { background: #e3ebf7; }
+    .status {
+      margin-top: 14px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #eef3fb;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .status.good { color: var(--good); background: #eaf8f2; }
+    .status.bad { color: var(--bad); background: #fff0ed; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    pre {
+      margin: 0;
+      max-height: calc(100vh - 210px);
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #101828;
+      color: #e6edf7;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .actions { display: grid; gap: 10px; margin-top: 12px; }
+    .meta { color: var(--muted); font-size: 13px; }
+    a { color: var(--primary); font-weight: 700; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Puter Gemini B/L Extractor</h1>
+      <div class="meta">Default AI: Puter.js + Gemini in the browser. No Gemini API key is sent to the backend.</div>
+    </div>
+    <a href="/audit">Audit</a>
+  </header>
+
+  <main>
+    <section>
+      <label for="fileInput">PDF document</label>
+      <input id="fileInput" type="file" accept="application/pdf,.pdf">
+
+      <label for="modelSelect">Puter Gemini model</label>
+      <select id="modelSelect"></select>
+
+      <label class="check">
+        <input id="postToggle" type="checkbox" checked>
+        Post mapped result to Dataverse
+      </label>
+
+      <label class="check">
+        <input id="houseToggle" type="checkbox">
+        Treat upload as House B/L
+      </label>
+
+      <div class="actions">
+        <button id="runBtn">Extract with Puter</button>
+        <button id="copyBtn" class="secondary" disabled>Copy CRM JSON</button>
+      </div>
+
+      <div id="status" class="status">Choose a PDF, then run extraction.</div>
+      <div id="links" class="status" style="display:none"></div>
+    </section>
+
+    <section>
+      <div class="grid">
+        <div>
+          <label>Mapped CRM response</label>
+          <pre id="crmOutput">{}</pre>
+        </div>
+        <div>
+          <label>Puter raw extraction</label>
+          <pre id="puterOutput">{}</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let puterConfig = null;
+    let lastCrmJson = null;
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+    function setStatus(text, kind) {
+      $("status").textContent = text;
+      $("status").className = "status" + (kind ? " " + kind : "");
+    }
+
+    function pretty(value) {
+      return JSON.stringify(value || {}, null, 2);
+    }
+
+    function puterText(response) {
+      if (typeof response === "string") return response;
+      if (response && typeof response.text === "string") return response.text;
+      if (response && response.message && typeof response.message.content === "string") {
+        return response.message.content;
+      }
+      if (response && Array.isArray(response.message?.content)) {
+        return response.message.content.map((p) => p.text || "").join("\n");
+      }
+      return JSON.stringify(response);
+    }
+
+    function parseJsonLoose(value) {
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+      const text = String(value || "").trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+      try {
+        return JSON.parse(text);
+      } catch (_err) {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
+        throw new Error("Puter returned text, but it was not valid JSON.");
+      }
+    }
+
+    async function loadConfig() {
+      const response = await fetch("/puter/config", { headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error("Could not load Puter configuration.");
+      puterConfig = await response.json();
+      const select = $("modelSelect");
+      select.innerHTML = "";
+      (puterConfig.models || []).forEach((model) => {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model;
+        if (model === puterConfig.default_model) option.selected = true;
+        select.appendChild(option);
+      });
+    }
+
+    async function extractPdfText(file) {
+      const data = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data }).promise;
+      const pages = [];
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        const page = await pdf.getPage(pageNo);
+        const content = await page.getTextContent();
+        const text = content.items.map((item) => item.str || "").join(" ");
+        pages.push("--- PAGE " + pageNo + " ---\n" + text);
+      }
+      return pages.join("\n\n");
+    }
+
+    async function runExtraction() {
+      const file = $("fileInput").files[0];
+      if (!file) {
+        setStatus("Please choose a PDF first.", "bad");
+        return;
+      }
+      if (!window.puter || !puter.ai || !puter.ai.chat) {
+        setStatus("Puter.js did not load. Check internet access and reload the page.", "bad");
+        return;
+      }
+
+      $("runBtn").disabled = true;
+      $("copyBtn").disabled = true;
+      $("links").style.display = "none";
+      lastCrmJson = null;
+
+      try {
+        setStatus("Reading PDF text in the browser...");
+        const rawText = await extractPdfText(file);
+        if (!rawText.trim()) throw new Error("No text could be read from this PDF.");
+
+        const limit = puterConfig.max_text_chars || 900000;
+        const prompt = puterConfig.prompt_prefix + rawText.slice(0, limit);
+        const model = $("modelSelect").value || puterConfig.default_model;
+
+        setStatus("Calling Puter Gemini (" + model + ")...");
+        const puterResponse = await puter.ai.chat(prompt, { model });
+        const puterPayload = parseJsonLoose(puterText(puterResponse));
+        $("puterOutput").textContent = pretty(puterPayload);
+
+        setStatus("Validating and mapping to Dataverse CRM JSON...");
+        const formatResponse = await fetch("/puter/format", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            puter_payload: puterPayload,
+            raw_text: rawText,
+            bl_type: $("houseToggle").checked ? "house" : "master",
+            post_to_dataverse: $("postToggle").checked
+          })
+        });
+        const formatted = await formatResponse.json();
+        if (!formatResponse.ok || !formatted.success) {
+          throw new Error(formatted.error || "The Puter result could not be mapped.");
+        }
+
+        lastCrmJson = formatted.data;
+        $("crmOutput").textContent = pretty(formatted);
+        $("copyBtn").disabled = false;
+
+        const masterId = formatted.dataverse_result && formatted.dataverse_result.master_id;
+        if (masterId) {
+          $("links").innerHTML =
+            "Dataverse upload complete. <a href=\"/dynamics/operation/" +
+            encodeURIComponent(masterId) +
+            "\" target=\"_blank\">Open operation JSON</a>";
+          $("links").style.display = "block";
+        }
+        setStatus("Done. Puter extraction mapped successfully.", "good");
+      } catch (err) {
+        setStatus(err.message || String(err), "bad");
+      } finally {
+        $("runBtn").disabled = false;
+      }
+    }
+
+    $("runBtn").addEventListener("click", runExtraction);
+    $("copyBtn").addEventListener("click", async () => {
+      if (!lastCrmJson) return;
+      await navigator.clipboard.writeText(pretty(lastCrmJson));
+      setStatus("CRM JSON copied.", "good");
+    });
+
+    loadConfig().catch((err) => setStatus(err.message || String(err), "bad"));
+  </script>
+</body>
+</html>

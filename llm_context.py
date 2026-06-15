@@ -14,6 +14,8 @@ _llm_model: ContextVar[Optional[str]] = ContextVar("llm_model", default=None)
 
 def normalize_llm_provider(provider: Optional[str]) -> str:
     normalized = (provider or settings.llm_provider or "azure").strip().lower()
+    if normalized in ("puter", "puterjs", "puter.js"):
+        return "puter"
     if normalized in ("gemini", "google"):
         return "gemini"
     return "azure"
@@ -30,6 +32,8 @@ def effective_llm_model() -> str:
     override = _llm_model.get()
     if override and override.strip():
         return override.strip()
+    if effective_llm_provider() == "puter":
+        return settings.puter_model
     if effective_llm_provider() == "gemini":
         return settings.gemini_model
     return settings.azure_openai_deployment
@@ -37,6 +41,10 @@ def effective_llm_model() -> str:
 
 def uses_gemini() -> bool:
     return effective_llm_provider() == "gemini"
+
+
+def uses_puter() -> bool:
+    return effective_llm_provider() == "puter"
 
 
 def llm_meta() -> dict[str, str]:
@@ -48,6 +56,8 @@ def llm_meta() -> dict[str, str]:
 
 
 def llm_extraction_prefix() -> str:
+    if uses_puter():
+        return "puter"
     return "gemini" if uses_gemini() else "azure"
 
 
@@ -56,11 +66,11 @@ def validate_llm_request(provider: Optional[str], model: Optional[str]) -> None:
     effective = normalize_llm_provider(provider) if provider else effective_llm_provider()
     if model:
         model = model.strip()
-        if model.startswith("gemini-") and effective != "gemini":
+        if model.startswith("gemini-") and effective not in ("gemini", "puter"):
             raise ValueError(
-                f"Model '{model}' is a Gemini model. Set llm_provider=gemini to use it."
+                f"Model '{model}' is a Gemini model. Set llm_provider=puter or gemini to use it."
             )
-        if effective == "gemini" and not is_valid_gemini_model(model):
+        if effective in ("gemini", "puter") and not is_valid_gemini_model(model):
             from config import GEMINI_MODELS
 
             raise ValueError(
