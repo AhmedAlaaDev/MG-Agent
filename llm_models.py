@@ -6,6 +6,7 @@ from config import GEMINI_MODELS
 
 
 class LlmProviderQuery(str, Enum):
+    puter = "puter"
     azure = "azure"
     gemini = "gemini"
 

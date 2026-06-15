@@ -64,10 +64,12 @@ class Settings(BaseSettings):
     excel_max_cols_per_sheet: int = Field(default=80, alias="EXCEL_MAX_COLS_PER_SHEET")
     excel_max_cell_chars: int = Field(default=500, alias="EXCEL_MAX_CELL_CHARS")
 
-    # LLM backend: "azure" or "gemini"
-    llm_provider: str = Field(default="gemini", alias="LLM_PROVIDER")
+    # Default AI extractor. "puter" runs in the browser through Puter.js (/puter).
+    # Server-side API extraction can still use "azure" or explicit "gemini".
+    llm_provider: str = Field(default="puter", alias="LLM_PROVIDER")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-3.1-flash-lite", alias="GEMINI_MODEL")
+    puter_model: str = Field(default="gemini-3.1-flash-lite", alias="PUTER_MODEL")
 
     # Post-extraction CRM business rules (freight→booking, load type, TEUs, totals).
     custom_business_rules_enabled: bool = Field(
