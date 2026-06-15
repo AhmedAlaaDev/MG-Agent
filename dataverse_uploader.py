@@ -2616,16 +2616,17 @@ def _update_entity(
     entity_set: str,
     guid: str,
     fields: Dict[str, Any],
-) -> None:
+) -> bool:
     """PATCH an existing record (best-effort; logs but does not raise)."""
     if not fields:
-        return
+        return True
     from dataverse_field_limits import cap_record
 
     entity_key = entity_set if entity_set in {"mesco_operations", "mesco_cargos", "mesco_containers"} else "mesco_operations"
     payload = cap_record(entity_key, dict(fields))
     try:
         client.patch(f"{entity_set}({guid})", json=payload)
+        return True
     except Exception as exc:
         body = ""
         if hasattr(exc, "response") and exc.response is not None:
@@ -2642,7 +2643,7 @@ def _update_entity(
                     entity_set,
                     guid,
                 )
-                return
+                return True
             except Exception as retry_exc:
                 logger.warning(
                     "Dataverse PATCH %s(%s) retry failed: %s",
@@ -2654,6 +2655,110 @@ def _update_entity(
             "Dataverse PATCH %s(%s) failed: %s%s",
             entity_set, guid, exc, f"\nResponse: {body}" if body else "",
         )
+    return False
+
+
+_OPERATION_DISPLAY_REFRESH_FIELDS: Set[str] = {
+    "mesco_masterblno",
+    "mesco_masterbllinkno",
+    "mesco_bookingnumber",
+    "mesco_customerreference",
+    "mesco_ponumber",
+    "mesco_voytruckno",
+    "mesco_shippernamecontactno",
+    "mesco_shipperaddress",
+    "mesco_shippercontactname",
+    "mesco_shippercontactnumber",
+    "mesco_consigneenamecontactno",
+    "mesco_consigneeaddress",
+    "mesco_notifyaddress",
+    "mesco_notifypartyaddress",
+    "mesco_deliveryaddress",
+    "mesco_pickupaddress",
+    "mesco_descriptionofgoods",
+    "mesco_cargodescription",
+    "mesco_containertype",
+    "mesco_carrierseal",
+    "mesco_handlinginformation",
+    "mesco_direction",
+    "mesco_loadtype",
+    "mesco_transporttype",
+    "mesco_bltype",
+    "mesco_consolidation",
+    "mesco_etdorigin",
+    "mesco_etadestination",
+    "mesco_atdorigin",
+    "mesco_atadestination",
+    "mesco_shippedonboarddate",
+    "mesco_dateofissue",
+    "cr401_totalpackages",
+    "cr401_totalgrossweight",
+    "cr401_totalvolume",
+    "cr401_totalteus",
+}
+
+
+def _split_lookup_bind_fields(fields: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Separate scalar/display fields from Dataverse lookup bind fields."""
+    scalar: Dict[str, Any] = {}
+    binds: Dict[str, Any] = {}
+    for key, value in fields.items():
+        if key.endswith("@odata.bind"):
+            binds[key] = value
+        else:
+            scalar[key] = value
+    return scalar, binds
+
+
+def _operation_display_refresh_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the user-visible operation fields that must refresh on re-upload."""
+    return {
+        key: value
+        for key, value in fields.items()
+        if key in _OPERATION_DISPLAY_REFRESH_FIELDS and not key.endswith("@odata.bind")
+    }
+
+
+def _update_operation_lookup_binds(
+    client: DataverseClientService,
+    guid: str,
+    lookup_binds: Dict[str, Any],
+) -> bool:
+    """Patch lookup binds individually so one bad lookup cannot block the rest."""
+    if not lookup_binds:
+        return True
+    parent_key = _lookup_bind_key("mesco_Operation")
+    ordered_keys = []
+    if parent_key in lookup_binds:
+        ordered_keys.append(parent_key)
+    ordered_keys.extend(key for key in lookup_binds if key != parent_key)
+
+    ok = True
+    for key in ordered_keys:
+        ok = _update_entity(client, _ENTITY, guid, {key: lookup_binds[key]}) and ok
+    return ok
+
+
+def _update_existing_operation(
+    client: DataverseClientService,
+    guid: str,
+    fields: Dict[str, Any],
+) -> bool:
+    """Refresh a reused operation without letting lookup failures block text fields.
+
+    Existing house rows are commonly re-uploaded after a better OCR/LLM pass.
+    If one lookup bind is invalid, a single combined PATCH can fail and leave
+    visible fields such as consignee/shipper stuck with old values.  Patch
+    scalar display data first, then lookup relationships independently.
+    """
+    scalar_fields, lookup_binds = _split_lookup_bind_fields(fields)
+    scalar_ok = _update_entity(client, _ENTITY, guid, scalar_fields)
+    if not scalar_ok:
+        fallback = _operation_display_refresh_fields(fields)
+        if fallback and fallback != scalar_fields:
+            scalar_ok = _update_entity(client, _ENTITY, guid, fallback)
+    lookup_ok = _update_operation_lookup_binds(client, guid, lookup_binds)
+    return scalar_ok and lookup_ok
 
 
 def _upsert_operation(
@@ -2671,7 +2776,7 @@ def _upsert_operation(
             client, bl_no, is_house=is_house, master_id=master_id,
         )
         if existing:
-            _update_entity(client, _ENTITY, existing, fields)
+            _update_existing_operation(client, existing, fields)
             return existing, True
     return _create_entity(client, _ENTITY, fields), False
 

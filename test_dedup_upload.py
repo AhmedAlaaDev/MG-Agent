@@ -181,6 +181,8 @@ class FakeClient:
             guid = m.group(1)
             for o in self.operations:
                 if o.get("mesco_operationid") == guid:
+                    if "mesco_Operation@odata.bind" in json:
+                        o["_mesco_operation_value"] = _bind_id(json["mesco_Operation@odata.bind"])
                     o.update(json)
                     break
         return _FakeResponse(status_code=204)
@@ -192,6 +194,16 @@ class FakeClient:
             guid = m.group(1)
             self.cargos = [c for c in self.cargos if c.get("mesco_cargoid") != guid]
         return _FakeResponse(status_code=204)
+
+
+class LookupFailingPatchClient(FakeClient):
+    """Fake client that rejects one party lookup PATCH like Dataverse can."""
+
+    def patch(self, url, json=None, **kwargs):
+        if json and "mesco_Consignee@odata.bind" in json:
+            self.patches.append((url, json))
+            raise RuntimeError("lookup bind rejected")
+        return super().patch(url, json=json, **kwargs)
 
 
 def _bind_id(bind):
@@ -228,6 +240,50 @@ def _master_crm():
 def _patch_client(monkeypatch, fake):
     monkeypatch.setattr(du.DataverseClientService, "get_instance", staticmethod(lambda *a, **k: fake))
     monkeypatch.setattr(du, "clear_lookup_cache", lambda: None)
+
+
+def test_reused_house_refreshes_display_fields_when_lookup_patch_fails():
+    """A failed lookup bind must not leave a reused house with stale parties."""
+    fake = LookupFailingPatchClient()
+    master_id = "11111111-1111-1111-1111-111111111111"
+    house_id = "22222222-2222-2222-2222-222222222222"
+    fake.operations.append({
+        "mesco_operationid": house_id,
+        "mesco_masterblno": "TPALX2603001",
+        "mesco_bltype": du._HOUSE_BL_TYPE,
+        "_mesco_operation_value": None,
+        "mesco_consigneenamecontactno": "",
+        "mesco_shippernamecontactno": "CARRIER: TRANS",
+    })
+
+    op_id, reused = du._upsert_operation(
+        fake,
+        {
+            "mesco_masterblno": "TPALX2603001",
+            "mesco_consigneenamecontactno": "NILE TRADING COMPANY",
+            "mesco_consigneeaddress": "26 NAGYB EL REHANY ST CAIRO, EGYPT",
+            "mesco_shippernamecontactno": "LANBO TONGCHUANG APPLIANCE CO.,LTD",
+            "mesco_Consignee@odata.bind": "/accounts(33333333-3333-3333-3333-333333333333)",
+            "mesco_Operation@odata.bind": f"/mesco_operations({master_id})",
+        },
+        bl_no="TPALX2603001",
+        is_house=True,
+        master_id=master_id,
+    )
+
+    assert reused is True
+    assert op_id == house_id
+    refreshed = fake.operations[0]
+    assert refreshed["mesco_consigneenamecontactno"] == "NILE TRADING COMPANY"
+    assert refreshed["mesco_shippernamecontactno"] == "LANBO TONGCHUANG APPLIANCE CO.,LTD"
+    assert refreshed["_mesco_operation_value"] == master_id
+    scalar_patches = [payload for _, payload in fake.patches if payload and not any(k.endswith("@odata.bind") for k in payload)]
+    assert scalar_patches
+    assert scalar_patches[0]["mesco_consigneenamecontactno"] == "NILE TRADING COMPANY"
+    assert any(
+        payload == {"mesco_Consignee@odata.bind": "/accounts(33333333-3333-3333-3333-333333333333)"}
+        for _, payload in fake.patches
+    )
 
 
 def test_first_upload_creates_then_second_reuses(monkeypatch):
