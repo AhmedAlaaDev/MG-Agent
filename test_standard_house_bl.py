@@ -66,6 +66,89 @@ ATA POD: 17 MAR 2026
 """
 
 
+TPALX_OCR_LABELLED_SAMPLE = """
+--- PAGE 1 ---
+[OCR HEADER PSM6]
+ORIGINAL
+CARRIER: TRANS PACIFIC CARGO LIMITED (SHENZHEN BILL OF LADING For Multimodal Transport or Port to Port Shipments
+SHIPPER (COMPLETE NAME / STREET ADDRESS)
+LANBO TONGCHUANG APPLIANCE CO.,LTD
+TD: 913204120710940674 TP CARGO
+LUOYANG INDUSTRIAL PARK WUJIN DISTRICT
+CHANGZHOU JIANGSU CHINA
+CARRIER REFERENCE B/L. NO. PAGE
+TPALX2603001 1/1
+CONSIGNEE (NOT NEGOTIABLE UNLESS CONSIGNED TO ORDER) EXPORTER REFERENCE
+NILE TRADING COMPANY
+26 NAGYB EL REHANY ST CAIRO, EGYPT
+TEL :+201227548280
+TAX ID.200522469 CONSIGNEE REFERENCE
+
+[OCR BODY PSM4]
+NOTIFY PARTY (COMPLETE NAME / STREET ADDRESS) FOR DELIVERY OF GOODS PLEASE APPLY TO
+SAME AS CONSIGNEE MARINE &ENGINEERING SERVICESCOMPANY -MESCO
+8 PATRIC LUMUMBA ST.BAB SHARQ
+ALEXANDRIA -EGYPT
+TEL.+2(03)3991000 FAX.+2(03)3991001
+PRE-CARRIAGE BY (MODE) PLACE OF RECEIPT ROUTING & INSTRUCTIONS
+SHANGHAI, CHINA
+OCEAN VESSEL / VOYAGE PORT OF LOADING PORT OF DISCHARGING PLACE OF DELIVERY
+CMA CGM SAO PAULO
+OBENSW1MA SHANGHAI , CHINA ALEXANDRIA, EGYPT ALEXANDRIA, EGYPT
+BELOW PARTICULARS OF THE GOODS DECLARED BY THE SHIPPER AND UNKNOWN TO THE CARRIER
+Container Nos., Seal Nos., Marks, and Nos. Numbers and Kind of Packages, Description of Goods Gross Weight Measurements
+N/M SAID TO CONTAINE: 10 PALLETS IN TOTAL 5793 21
+MOTOR
+HS CODE: 8501409090
+ACID :2005224691002910019
+EGYPTIAN IMPORTER TAX ID: 200522469
+FOREIGN EXPORTER REGISTRATION TYPE: VAT NUMBER
+FOREIGN EXPORTER ID: 913204120710940674
+FOREIGN EXPORTER COUNTRY: CHINA
+FOREIGN EXPORTER COUNTRY CODE: CN
+CSNU6873347/CW794147/40HO
+21CBM ONLY CFS/CFS
+CHARGE PREPAID | COLLECT
+ASIARRANGED
+FREIGHT PAYABLE AT
+COLLECT
+PLACE AND DATE OF ISSUE
+SHENZHEN, CHINA
+LADEN ON BOARD DATE
+16 MAR 2026
+16 MAR 2026
+AS AGENT TO CARRIER
+
+[OCR FULL PAGE BEST]
+ORIGINAL
+SHIPPER (COMPLETE NAME / STREET ADDRESS)
+LANBO TONGCHUANG APPLIANCE CO.,LTD
+ID: 913204120710940674 TP CARGO
+LUOYANG INDUSTRIAL PARK WUJIN DISTRICT
+CHANGZHOU JIANGSU CHINA
+B/L. NO.
+TPALX2603001
+CONSIGNEE (NOT NEGOTIABLE UNLESS CONSIGNED TO ORDER) REFERENCE
+NILE TRADING COMPANY
+26 NAGYB EL REHANY ST CAIRO, EGYPT
+TEL :+201227548280
+NOTIFY PARTY (COMPLETE NAME / STREET ADDRESS) FOR DELIVERY OF GOODS PLEASE APPLY TO
+SAME AS CONSIGNEE MARINE &ENGINEERING SERVICESCOMPANY -MESCO
+SHANGHAI, CHINA
+OCEAN VESSEL / VOYAGE PORT OF LOADING PORT OF DISCHARGING PLACE OF DELIVERY
+CMA CGM SAO PAULO
+OBENOW1MA SHANGHAT , CHINA ALEXANDRIA, EGYPT
+ALEXANDRIA, EGYPT
+N/M SAID TO CONTAINE: 10 PALLETS IN TOTAL 5793 21
+MOTOR
+HS CODE: 8501409090
+CSNU6873347/CW794147/40HO
+LADEN ON BOARD DATE
+16 MAR 2026
+16 MAR 2026
+"""
+
+
 def test_detects_standard_tpalx_house_bl():
     assert is_standard_house_bl(TPALX_SAMPLE)
 
@@ -110,3 +193,35 @@ def test_house_json_does_not_invent_master_link_for_standard_house():
     assert house["mesco_atadestination"] == "2026-03-17"
     cargo = house["mesco_Cargo_HouseOperation_mesco_Operation"][0]
     assert cargo["mesco_umpackages"] == "PACKAGES"
+
+
+def test_parses_ocr_labelled_tpalx_house_bl_for_master_linking():
+    rec = parse_standard_house_bl(TPALX_OCR_LABELLED_SAMPLE)
+    assert rec
+    assert rec["mesco_houseblno"] == "TPALX2603001"
+    assert rec["mesco_shippernamecontactno"] == "LANBO TONGCHUANG APPLIANCE CO.,LTD"
+    assert rec["mesco_shipper"] == "LANBO TONGCHUANG APPLIANCE CO.,LTD"
+    assert rec["mesco_consigneenamecontactno"] == "NILE TRADING COMPANY"
+    assert rec["mesco_consignee"] == "NILE TRADING COMPANY"
+    assert rec["mesco_consigneeaddress"] == "26 NAGYB EL REHANY ST CAIRO, EGYPT"
+    assert rec["mesco_notify1"] == "SAME AS CONSIGNEE"
+    assert rec["mesco_notifyaddress"] == "26 NAGYB EL REHANY ST CAIRO, EGYPT"
+    assert rec["mesco_vessel"] == "CMA CGM SAO PAULO"
+    assert rec["mesco_voytruckno"] == "0BEN9W1MA"
+    assert rec["mesco_origin"] == "SHANGHAI, CHINA"
+    assert rec["mesco_destination"] == "ALEXANDRIA, EGYPT"
+    assert rec["container_number"] == "CSNU6873347"
+    assert rec["seal_number"] == "CW794147"
+    assert rec["mesco_containertype"] == "40HQ"
+    assert rec["cr401_totalpackages"] == 10
+    assert rec["cr401_totalgrossweight"] == 5793.0
+    assert rec["cr401_totalvolume"] == 21.0
+    assert rec["mesco_umpackages"] == "PALLETS"
+    assert "MOTOR" in rec["mesco_cargodescription"]
+
+    house = records_to_house_json([rec])["value"][0]
+    assert house["mesco_consignee"] == "NILE TRADING COMPANY"
+    assert house["mesco_notify1"] == "NILE TRADING COMPANY"
+    assert house["mesco_Container_mesco_houses"][0]["mesco_containernumber"] == "CSNU6873347"
+    assert house["mesco_Container_mesco_houses"][0]["mesco_carrierseal"] == "CW794147"
+    assert house["mesco_Cargo_HouseOperation_mesco_Operation"][0]["mesco_umpackages"] == "PALLETS"

@@ -396,6 +396,11 @@ _PARTY_NOISE_RE = re.compile(
     r"CONTACT|P\.?O\.?\s*BOX|ZIP|POSTAL|VAT|TAX\s*ID)\b\s*[:.\-]?",
     re.I,
 )
+_PARTY_LABEL_LINE_RE = re.compile(
+    r"^\s*(?:CARRIER|SHIPPER|CONSIGNEE|NOTIFY\s+PARTY|EXPORTER\s+REFERENCE|"
+    r"CARRIER\s+REFERENCE|B/?L\.?\s*NO|PAGE|FOR\s+DELIVERY\s+OF\s+GOODS)\b",
+    re.I,
+)
 
 # Lookup-name fields that already arrive as canonical strings and only need to
 # be carried through to the operation payload for the uploader to resolve.
@@ -562,9 +567,18 @@ def _clean_company_name(value: Any) -> Optional[str]:
     first_line = None
     for line in text.split("\n"):
         stripped = line.strip(" \t,-:;|")
-        if stripped:
-            first_line = stripped
-            break
+        if not stripped:
+            continue
+        if _PARTY_LABEL_LINE_RE.search(stripped):
+            continue
+        if _PARTY_NOISE_RE.match(stripped):
+            continue
+        if re.match(r"^(?:ID|TD|VAT|TAX\s*ID|TEL|FAX|EMAIL|E-?MAIL)\b", stripped, re.I):
+            continue
+        if re.match(r"^(?:ORIGINAL|COPY|PAGE\s+\d+)$", stripped, re.I):
+            continue
+        first_line = stripped
+        break
     if not first_line:
         return None
     first_line = _PARTY_NOISE_RE.split(first_line)[0]

@@ -590,6 +590,10 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "AL KAYAN",
             "AL KAYAN FOR IMPORT",
         ],
+        "NILE TRADING COMPANY": [
+            "NILE TRADING",
+            "NILE TRADING CO",
+        ],
     },
     "mesco_shippingline": {
         "EVERGREEN MARINE (ASIA) PTE. LTD.": [
@@ -848,6 +852,15 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
 
     if logical_name == "account":
         tokens = [t for t in re.split(r"\W+", base) if len(t) >= 3]
+        suffix_re = re.compile(
+            r"\b(?:COMPANY|CO|CO\.|LTD|LTD\.|LIMITED|LLC|L\.L\.C|INC|"
+            r"CORPORATION|CORP|PRIVATE|PVT|S\.A\.E|S\.A|S\.P\.A)\b\.?",
+            re.I,
+        )
+        without_suffix = suffix_re.sub(" ", base)
+        without_suffix = re.sub(r"\s+", " ", without_suffix).strip(" ,.-")
+        if without_suffix and _normalize_lookup_label(without_suffix) != _normalize_lookup_label(base):
+            add(without_suffix)
         if len(tokens) >= 2:
             add(" ".join(tokens[:3]))
             add(" ".join(tokens[:2]))
@@ -1946,6 +1959,30 @@ def _find_master_by_shipment_evidence(
     return master_id
 
 
+def _house_linking_checks(
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Expose the evidence used for automatic House -> Master linking."""
+    return {
+        "container_numbers": _payload_container_numbers(payload, containers),
+        "seal_numbers": _payload_seal_numbers(payload, containers),
+        "vessel": payload.get("mesco_vessel"),
+        "voyage": payload.get("mesco_voytruckno"),
+        "origin": payload.get("mesco_origin"),
+        "destination": payload.get("mesco_destination"),
+        "dates": sorted(_payload_match_dates(payload)),
+        "matching_rules": [
+            "explicit mesco_masterbllinkno -> master mesco_masterblno",
+            "shared container number",
+            "shared carrier seal",
+            "vessel + voyage",
+            "POL/POD route",
+            "ETD / ATD / laden / issue date",
+        ],
+    }
+
+
 def _find_orphan_house_operations(
     client: DataverseClientService,
     bl_no: Optional[str],
@@ -2792,6 +2829,8 @@ def upload_crm_json(
         parent_match = re.search(r"\(([^)]+)\)", parent_master_bind)
         if parent_match:
             parent_master_id = parent_match.group(1)
+    if is_standalone_house:
+        result["house_linking_checks"] = _house_linking_checks(payload, containers)
 
     # A standalone house must hang off a master operation. The house PDF rarely
     # carries an explicit parent GUID, so when none was supplied try to find the
