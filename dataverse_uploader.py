@@ -64,12 +64,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_field_limits import limit_for as _registry_limit_for
 from dataverse_metadata import is_option_set_field, resolve_option_value
 from crm_output_formatter import (
+    ensure_stc_cargo_description,
     infer_package_unit_label,
     is_house_bl_type,
     prepare_standalone_house_upload,
@@ -84,6 +85,8 @@ _CARGO_ENTITY     = "mesco_cargos"
 # mesco_bltype option-set values (master vs house operation).
 _MASTER_BL_TYPE = 886150001
 _HOUSE_BL_TYPE  = 886150002
+_SAME_AS_CONSIGNEE_LOOKUP_NAME = "Same As Consignee"
+_SAME_AS_CONSIGNEE_RE = re.compile(r"\bSAME\s+AS\s+(?:CONSIGNEE|CNEE)\b", re.I)
 
 # Lookup *value* columns used by duplicate-detection $filter queries.
 _OP_PARENT_MASTER_VALUE_FIELD = "_mesco_operation_value"
@@ -1227,6 +1230,8 @@ def _preprocess_payload(
         # --- Lookup field ---
         if key in lookups and isinstance(value, str):
             target_logical = lookups[key]
+            if key == "mesco_notify1" and _SAME_AS_CONSIGNEE_RE.search(value):
+                value = _SAME_AS_CONSIGNEE_LOOKUP_NAME
             if client:
                 if target_logical == "mesco_containerno":
                     guid = _resolve_containerno_lookup(
@@ -2204,6 +2209,93 @@ def _inherit_lookup_bind(
     return True
 
 
+_HOUSE_INHERITED_MASTER_DATE_FIELDS: Tuple[str, ...] = ("mesco_atadestination",)
+
+
+def _inherited_master_date_fields(source: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: source.get(key)
+        for key in _HOUSE_INHERITED_MASTER_DATE_FIELDS
+        if _present_lookup_value(source.get(key))
+    }
+
+
+def _inherit_master_date_fields(
+    target: Dict[str, Any],
+    master_source: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Copy master date fields to a house payload only when the house is blank."""
+    inherited: Dict[str, Any] = {}
+    for key, value in _inherited_master_date_fields(master_source).items():
+        if not _present_lookup_value(target.get(key)):
+            target[key] = value
+            inherited[key] = value
+    return inherited
+
+
+def _get_operation_fields(
+    client: DataverseClientService,
+    op_id: Optional[str],
+    fields: Iterable[str],
+) -> Dict[str, Any]:
+    if not op_id:
+        return {}
+    selected = [field for field in fields if field]
+    if not selected:
+        return {}
+    row = _query_first(
+        client,
+        _ENTITY,
+        f"{_id_field(_ENTITY)} eq {op_id}",
+        ",".join(selected),
+    )
+    return {
+        field: row.get(field)
+        for field in selected
+        if row and _present_lookup_value(row.get(field))
+    }
+
+
+def _related_house_rows_for_master(
+    client: DataverseClientService,
+    master_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not master_id:
+        return []
+    select = f"{_id_field(_ENTITY)},mesco_masterblno,mesco_code"
+    return _query_many(
+        client,
+        _ENTITY,
+        f"{_OP_PARENT_MASTER_VALUE_FIELD} eq {master_id} and mesco_bltype eq {_HOUSE_BL_TYPE}",
+        select,
+        top=500,
+    )
+
+
+def _propagate_master_dates_to_houses(
+    client: DataverseClientService,
+    master_id: Optional[str],
+    master_dates: Dict[str, Any],
+) -> int:
+    """Patch inherited master dates onto every house linked to the master."""
+    patch = _preprocess_payload(
+        _inherited_master_date_fields(master_dates),
+        _ENTITY,
+        client,
+    )
+    if not master_id or not patch:
+        return 0
+    count = 0
+    id_field = _id_field(_ENTITY)
+    for row in _related_house_rows_for_master(client, master_id):
+        house_id = row.get(id_field)
+        if not house_id:
+            continue
+        if _update_entity(client, _ENTITY, house_id, patch):
+            count += 1
+    return count
+
+
 def _find_existing_container(
     client: DataverseClientService,
     master_id: Optional[str],
@@ -2436,6 +2528,10 @@ def _cargo_fields_for_update(
     number, IMO class, reefer flags, product lookups, and lookup binds are
     extracted correctly but silently omitted from the Dataverse PATCH.
     """
+    stc_desc = ensure_stc_cargo_description(cargo_clean.get("mesco_descriptionofgoods"))
+    if stc_desc:
+        cargo_clean = dict(cargo_clean)
+        cargo_clean["mesco_descriptionofgoods"] = stc_desc
     prepared = _preprocess_payload(cargo_clean, _CARGO_ENTITY, client)
     out: Dict[str, Any] = {}
     for key, value in prepared.items():
@@ -2981,6 +3077,14 @@ def upload_crm_json(
                 "mesco_shippingline",
                 standalone_parent_shippingline_bind,
             )
+        _inherit_master_date_fields(
+            payload,
+            _get_operation_fields(
+                client,
+                parent_master_id,
+                _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # 1. Root operation (master or standalone house) — find-or-create
@@ -2990,6 +3094,7 @@ def upload_crm_json(
     root_bl = payload.get("mesco_masterblno") or payload.get("mesco_houseblno")
 
     master_fields = _preprocess_payload(payload, _ENTITY, client)
+    master_inherited_dates = _inherited_master_date_fields(master_fields)
     master_id, master_reused = _upsert_operation(
         client,
         master_fields,
@@ -3028,6 +3133,16 @@ def upload_crm_json(
                 }
                 if standalone_parent_shippingline_bind:
                     patch[_lookup_bind_key("mesco_ShippingLine")] = standalone_parent_shippingline_bind
+                inherited_dates = _inherit_master_date_fields(
+                    payload,
+                    _get_operation_fields(
+                        client,
+                        parent_master_id,
+                        _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+                    ),
+                )
+                if inherited_dates:
+                    patch.update(_preprocess_payload(inherited_dates, _ENTITY, client))
                 _update_entity(client, _ENTITY, master_id, patch)
                 result["house_linking"] = {
                     "status": "linked_after_reuse" if master_reused else "linked_after_create",
@@ -3072,6 +3187,24 @@ def upload_crm_json(
                             standalone_parent_shippingline_bind
                     },
                 )
+
+    if is_standalone_house and parent_master_id:
+        inherited_dates = _inherit_master_date_fields(
+            payload,
+            _get_operation_fields(
+                client,
+                parent_master_id,
+                _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+            ),
+        )
+        if inherited_dates:
+            _update_entity(
+                client,
+                _ENTITY,
+                master_id,
+                _preprocess_payload(inherited_dates, _ENTITY, client),
+            )
+
     # Clarity for callers: what kind of operation the root record is, and (for a
     # standalone house) which master it is linked to (None ⇒ unlinked).
     result["root_kind"] = "house" if is_standalone_house else "master"
@@ -3145,6 +3278,7 @@ def upload_crm_json(
             "mesco_shippingline",
             master_shippingline_bind,
         )
+        _inherit_master_date_fields(house_clean, master_inherited_dates)
 
         house_bl = house.get("mesco_masterblno") or house.get("mesco_houseblno")
         # mesco_houseblno is not a column on mesco_operations — drop it so the
@@ -3243,6 +3377,18 @@ def upload_crm_json(
                     result["houses"].append(item)
                     existing_house_ids.add(item.get("id"))
 
+    if not is_standalone_house and master_inherited_dates:
+        propagated = _propagate_master_dates_to_houses(
+            client,
+            master_id,
+            master_inherited_dates,
+        )
+        if propagated:
+            logger.info(
+                "Inherited master ATA POD/date fields to %d linked house(s)",
+                propagated,
+            )
+
     # Standalone house: associate containers on the house operation (N:N).
     if is_standalone_house and result["containers"]:
         for ctn_info in result["containers"]:
@@ -3302,6 +3448,9 @@ def upload_crm_json(
     for idx, cargo in enumerate(cargo_list):
         cargo_clean = _clean_odata_meta(cargo)
         cargo_clean = _strip_null(cargo_clean)
+        stc_desc = ensure_stc_cargo_description(cargo_clean.get("mesco_descriptionofgoods"))
+        if stc_desc:
+            cargo_clean["mesco_descriptionofgoods"] = stc_desc
         _apply_cargo_package_unit_hint(cargo_clean)
         cargo_hbl = (
             cargo_clean.pop("_house_hbl", None)

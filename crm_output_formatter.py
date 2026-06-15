@@ -422,11 +422,29 @@ _INCOTERMS = {
 }
 _INCOTERM_RE = re.compile(r"\b(" + "|".join(sorted(_INCOTERMS)) + r")\b", re.I)
 _MESCO_ACCOUNT_LOOKUP_NAME = "MARINE AND ENGINEERING SERVICES COMPANY (MESCO)"
+_SAME_AS_CONSIGNEE_LOOKUP_NAME = "Same As Consignee"
+_SAME_AS_CONSIGNEE_RE = re.compile(r"\bSAME\s+AS\s+(?:CONSIGNEE|CNEE)\b", re.I)
+_STC_PREFIX_RE = re.compile(r"^\s*S\s*\.?\s*T\s*\.?\s*C\s*\.?\s*[:.\-]?\s*", re.I)
 
 
 def _is_mesco_party(*parts: Any) -> bool:
     upper = " ".join(str(part) for part in parts if _has(part)).upper()
     return "MESCO" in upper
+
+
+def _is_same_as_consignee(value: Any) -> bool:
+    return _has(value) and bool(_SAME_AS_CONSIGNEE_RE.search(str(value)))
+
+
+def ensure_stc_cargo_description(value: Any) -> Optional[str]:
+    """Normalize cargo text so Dynamics descriptions consistently start S.T.C."""
+    if not _has(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = _STC_PREFIX_RE.sub("", text, count=1).strip()
+    return "S.T.C" if not text else f"S.T.C\n{text}"
 
 
 def _canonical_incoterm(value: Any) -> Optional[str]:
@@ -617,8 +635,8 @@ def _derive_operation_lookups(src: Dict[str, Any]) -> Dict[str, Any]:
     if _has(shipper):
         out["mesco_shipper"] = shipper
 
-    if _has(consignee) and re.match(r"^SAME\s+AS\b", str(src.get("mesco_notify1") or ""), re.I):
-        out["mesco_notify1"] = consignee
+    if _is_same_as_consignee(src.get("mesco_notify1")):
+        out["mesco_notify1"] = _SAME_AS_CONSIGNEE_LOOKUP_NAME
     else:
         notify = _account_lookup_name(
             src.get("mesco_notify1"),
@@ -709,8 +727,9 @@ def _shipment_signals_lcl(
 def _build_cargo_from_line(line: Dict[str, Any]) -> Dict[str, Any]:
     cargo = _project_to_template(_first_cargo_template(master_level=True), {})
     if _has(line.get("mesco_descriptionofgoods")):
+        desc = ensure_stc_cargo_description(line["mesco_descriptionofgoods"])
         cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
-            str(line["mesco_descriptionofgoods"]),
+            desc or str(line["mesco_descriptionofgoods"]),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
     _set_numeric_field(cargo, "mesco_noofpackages", line.get("mesco_noofpackages"))
@@ -810,8 +829,9 @@ def _build_cargo_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
         if ct not in " ".join(desc_parts):
             desc_parts.append(ct)
     if desc_parts:
+        desc = ensure_stc_cargo_description("\n".join(desc_parts))
         cargo["mesco_descriptionofgoods"] = _truncate_to_limit(
-            "\n".join(desc_parts),
+            desc or "\n".join(desc_parts),
             _DATAVERSE_DESC_OF_GOODS_MAX,
         )
     _set_numeric_field(cargo, "mesco_noofpackages", rec.get("cr401_totalpackages"))

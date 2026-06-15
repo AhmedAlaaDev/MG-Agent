@@ -84,10 +84,7 @@ class FakeClient:
                     continue
                 if parent is not None and op.get("_mesco_operation_value") != parent:
                     continue
-                rows.append({
-                    "mesco_operationid": op["mesco_operationid"],
-                    "_mesco_operation_value": op.get("_mesco_operation_value"),
-                })
+                rows.append(dict(op))
             return _FakeResponse(body={"value": rows[:1]})
 
         if set_name == "mesco_containers":
@@ -132,13 +129,14 @@ class FakeClient:
         set_name = url.split("?", 1)[0].split("(", 1)[0]
         if set_name == "mesco_operations":
             guid = self._new_id()
-            rec = {
+            rec = dict(json)
+            rec.update({
                 "mesco_operationid": guid,
                 "mesco_masterblno": json.get("mesco_masterblno"),
                 "mesco_houseblno": json.get("mesco_houseblno"),
                 "mesco_bltype": json.get("mesco_bltype"),
                 "_mesco_operation_value": _bind_id(json.get("mesco_Operation@odata.bind")),
-            }
+            })
             self.operations.append(rec)
             return _FakeResponse(status_code=204, location=f"/mesco_operations({guid})")
 
@@ -284,6 +282,60 @@ def test_reused_house_refreshes_display_fields_when_lookup_patch_fails():
         payload == {"mesco_Consignee@odata.bind": "/accounts(33333333-3333-3333-3333-333333333333)"}
         for _, payload in fake.patches
     )
+
+
+def test_master_ata_pod_propagates_to_existing_linked_house(monkeypatch):
+    fake = FakeClient()
+    _patch_client(monkeypatch, fake)
+    master_id = "11111111-1111-1111-1111-111111111111"
+    house_id = "22222222-2222-2222-2222-222222222222"
+    fake.operations.extend([
+        {
+            "mesco_operationid": master_id,
+            "mesco_masterblno": "MBL-ATA-1",
+            "mesco_bltype": du._MASTER_BL_TYPE,
+            "_mesco_operation_value": None,
+        },
+        {
+            "mesco_operationid": house_id,
+            "mesco_masterblno": "HBL-ATA-1",
+            "mesco_bltype": du._HOUSE_BL_TYPE,
+            "_mesco_operation_value": master_id,
+        },
+    ])
+
+    du.upload_crm_json({
+        "mesco_bltype": du._MASTER_BL_TYPE,
+        "mesco_masterblno": "MBL-ATA-1",
+        "mesco_atadestination": "18/04/2026",
+    })
+
+    house = next(op for op in fake.operations if op["mesco_operationid"] == house_id)
+    assert house["mesco_atadestination"] == "2026-04-18"
+
+
+def test_standalone_house_inherits_ata_pod_from_matched_master(monkeypatch):
+    fake = FakeClient()
+    _patch_client(monkeypatch, fake)
+    master_id = "11111111-1111-1111-1111-111111111111"
+    fake.operations.append({
+        "mesco_operationid": master_id,
+        "mesco_masterblno": "MBL-ATA-2",
+        "mesco_bltype": du._MASTER_BL_TYPE,
+        "_mesco_operation_value": None,
+        "mesco_atadestination": "2026-04-18",
+    })
+
+    result = du.upload_crm_json({
+        "mesco_bltype": du._HOUSE_BL_TYPE,
+        "mesco_masterblno": "HBL-ATA-2",
+        "mesco_masterbllinkno": "MBL-ATA-2",
+    })
+
+    house_id = result["master_id"]
+    house = next(op for op in fake.operations if op["mesco_operationid"] == house_id)
+    assert house["_mesco_operation_value"] == master_id
+    assert house["mesco_atadestination"] == "2026-04-18"
 
 
 def test_first_upload_creates_then_second_reuses(monkeypatch):

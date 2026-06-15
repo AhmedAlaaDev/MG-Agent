@@ -189,10 +189,11 @@ def test_house_json_does_not_invent_master_link_for_standard_house():
     assert containers[0]["mesco_carrierseal"] == "CW794147"
     assert containers[0]["mesco_warehouse"] == "MERGHEM"
     assert containers[0]["mesco_sendtowarehouse"] is True
-    assert house["mesco_notify1"] == "AL SAAD FOR ORGANIC FERTILIZERS MANUFACTURING"
+    assert house["mesco_notify1"] == "Same As Consignee"
     assert house["mesco_atadestination"] == "2026-03-17"
     cargo = house["mesco_Cargo_HouseOperation_mesco_Operation"][0]
     assert cargo["mesco_umpackages"] == "PACKAGES"
+    assert cargo["mesco_descriptionofgoods"].startswith("S.T.C")
 
 
 def test_parses_ocr_labelled_tpalx_house_bl_for_master_linking():
@@ -221,7 +222,8 @@ def test_parses_ocr_labelled_tpalx_house_bl_for_master_linking():
 
     house = records_to_house_json([rec])["value"][0]
     assert house["mesco_consignee"] == "NILE TRADING COMPANY"
-    assert house["mesco_notify1"] == "NILE TRADING COMPANY"
+    assert house["mesco_notify1"] == "Same As Consignee"
     assert house["mesco_Container_mesco_houses"][0]["mesco_containernumber"] == "CSNU6873347"
     assert house["mesco_Container_mesco_houses"][0]["mesco_carrierseal"] == "CW794147"
     assert house["mesco_Cargo_HouseOperation_mesco_Operation"][0]["mesco_umpackages"] == "PALLETS"
+    assert house["mesco_Cargo_HouseOperation_mesco_Operation"][0]["mesco_descriptionofgoods"].startswith("S.T.C")
