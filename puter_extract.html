@@ -233,17 +233,60 @@
       });
     }
 
-    async function extractPdfText(file) {
+    async function readPdfForGemini(file) {
       const data = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data }).promise;
       const pages = [];
+      const pageImages = [];
+      const maxVisualPages = puterConfig.max_visual_pages || 8;
+      const baseScale = puterConfig.pdf_render_scale || 2;
+      const maxCanvasWidth = puterConfig.pdf_max_canvas_width || 1800;
+      const imageQuality = puterConfig.pdf_image_quality || 0.86;
+
       for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
         const page = await pdf.getPage(pageNo);
         const content = await page.getTextContent();
         const text = content.items.map((item) => item.str || "").join(" ");
         pages.push("--- PAGE " + pageNo + " ---\n" + text);
+
+        if (pageNo <= maxVisualPages) {
+          setStatus("Rendering PDF page " + pageNo + " for Gemini vision/OCR...");
+          const initialViewport = page.getViewport({ scale: baseScale });
+          const widthRatio = initialViewport.width > maxCanvasWidth
+            ? maxCanvasWidth / initialViewport.width
+            : 1;
+          const viewport = page.getViewport({ scale: baseScale * widthRatio });
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d", { alpha: false });
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          await page.render({ canvasContext: context, viewport }).promise;
+          pageImages.push(canvas.toDataURL("image/jpeg", imageQuality));
+          canvas.width = 0;
+          canvas.height = 0;
+        }
       }
-      return pages.join("\n\n");
+      return {
+        rawText: pages.join("\n\n"),
+        pageImages,
+        pageCount: pdf.numPages
+      };
+    }
+
+    async function callPuterGemini(prompt, pageImages, model) {
+      const options = { model, temperature: 0 };
+      if (pageImages && pageImages.length) {
+        try {
+          return await puter.ai.chat(prompt, pageImages, options);
+        } catch (err) {
+          if (pageImages.length > 2) {
+            setStatus("Gemini visual call was too large. Retrying with the first 2 pages...");
+            return await puter.ai.chat(prompt, pageImages.slice(0, 2), options);
+          }
+          throw err;
+        }
+      }
+      return await puter.ai.chat(prompt, options);
     }
 
     async function runExtraction() {
@@ -263,16 +306,29 @@
       lastCrmJson = null;
 
       try {
-        setStatus("Reading PDF text in the browser...");
-        const rawText = await extractPdfText(file);
-        if (!rawText.trim()) throw new Error("No text could be read from this PDF.");
+        setStatus("Preparing PDF for Gemini vision/OCR...");
+        const pdfInput = await readPdfForGemini(file);
+        const rawText = pdfInput.rawText || "";
+        if (!rawText.trim() && !pdfInput.pageImages.length) {
+          throw new Error("No PDF pages could be read for Gemini extraction.");
+        }
 
         const limit = puterConfig.max_text_chars || 900000;
-        const prompt = puterConfig.prompt_prefix + rawText.slice(0, limit);
+        const prompt =
+          puterConfig.prompt_prefix +
+          "[Browser text hint begins]\n" +
+          (rawText.trim() ? rawText.slice(0, limit) : "No browser text layer was found; use the attached page images only.") +
+          "\n[Browser text hint ends]";
         const model = $("modelSelect").value || puterConfig.default_model;
 
-        setStatus("Calling Puter Gemini (" + model + ")...");
-        const puterResponse = await puter.ai.chat(prompt, { model });
+        setStatus(
+          "Calling Puter Gemini vision/OCR (" +
+          model +
+          ") with " +
+          pdfInput.pageImages.length +
+          " rendered page image(s)..."
+        );
+        const puterResponse = await callPuterGemini(prompt, pdfInput.pageImages, model);
         const puterPayload = parseJsonLoose(puterText(puterResponse));
         $("puterOutput").textContent = pretty(puterPayload);
 
@@ -284,7 +340,10 @@
             puter_payload: puterPayload,
             raw_text: rawText,
             bl_type: $("houseToggle").checked ? "house" : "master",
-            post_to_dataverse: $("postToggle").checked
+            post_to_dataverse: $("postToggle").checked,
+            llm_model: model,
+            visual_page_count: pdfInput.pageImages.length,
+            pdf_page_count: pdfInput.pageCount
           })
         });
         const formatted = await formatResponse.json();
