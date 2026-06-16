@@ -269,6 +269,10 @@ suffix noise. Use null when not confidently present.
   bottom. NEVER the destination delivery agent (MESCO / "MARINE & ENGINEERING SERVICES
   COMPANY" at "Destination Agent Address"), NEVER the shipper, consignee, or notify party,
   and NEVER the ocean vessel operator unless they are clearly the document issuer.
+  On TP Cargo / TPALX house B/L forms, "CARRIER: TRANS PACIFIC CARGO LIMITED
+  (SHENZHEN)" and the TP CARGO logo identify the issuing NVOCC/agent. Set
+  mesco_agent = "TRANS PACIFIC CARGO LIMITED (SHENZHEN)" for those forms, not MESCO
+  and not the ocean shipping line.
 - mesco_incoterm: the 3-letter Incoterm code only (CIF, CFR, FOB, EXW, FCA, DAP, DDP,
   CPT, CIP). Strip any trailing place ("CIF ALEXANDRIA" -> "CIF").
 - Container number: 4 letters + 6 digits + check digit. Preserve full form; OCR slash
@@ -542,17 +546,38 @@ def _call_gemini_json(
         except Exception:
             contents = user
 
-    response = client.models.generate_content(
-        model=effective_llm_model(),
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=combined_system,
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-    )
+    def _generate(payload: Any):
+        return client.models.generate_content(
+            model=effective_llm_model(),
+            contents=payload,
+            config=types.GenerateContentConfig(
+                system_instruction=combined_system,
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+        )
+
+    response = _generate(contents)
     content = (response.text or "").strip()
-    return _parse_json_response(content, "Gemini")
+    try:
+        return _parse_json_response(content, "Gemini")
+    except ValueError:
+        retry_note = (
+            "\n\nSTRICT RETRY: return exactly one JSON object matching the schema. "
+            "Do not include markdown, explanations, duplicate JSON objects, or trailing text."
+        )
+        retry_contents = contents
+        if isinstance(contents, list) and contents:
+            retry_contents = list(contents)
+            if isinstance(retry_contents[-1], str):
+                retry_contents[-1] = retry_contents[-1] + retry_note
+            else:
+                retry_contents.append(retry_note)
+        elif isinstance(contents, str):
+            retry_contents = contents + retry_note
+        response = _generate(retry_contents)
+        content = (response.text or "").strip()
+        return _parse_json_response(content, "Gemini")
 
 
 def _call_llm_json(

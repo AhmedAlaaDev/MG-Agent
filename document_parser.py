@@ -25,6 +25,7 @@ from pdf_multi_bl import (
     detect_multi_bl_candidate,
     split_pdf_pages,
 )
+from pdf_deterministic_registry import best_deterministic_parse
 from record_reconciliation import dedupe_records_by_bl, merge_record_fields
 from validator import validate_and_correct
 
@@ -47,6 +48,33 @@ _CANONICAL_FORCE_KEYS = {
     "container_number",
     "seal_number",
     "containers",
+}
+
+_TRUSTED_FALLBACK_FORCE_KEYS = _CANONICAL_FORCE_KEYS | {
+    "mesco_houseblno",
+    "mesco_masterbllinkno",
+    "mesco_bltype",
+    "mesco_transporttype",
+    "mesco_loadtype",
+    "mesco_direction",
+    "mesco_pcfreightterm",
+    "mesco_bookingterm",
+    "mesco_blstatus",
+    "mesco_telexrelease",
+    "mesco_consolidation",
+    "mesco_shippingline",
+    "mesco_shipper",
+    "mesco_consignee",
+    "mesco_country",
+    "mesco_countryoforigin",
+    "mesco_importerstaxno",
+    "mesco_foreignsupplierregistrationnumber",
+    "mesco_hscode",
+    "mesco_containertype",
+    "mesco_dateofissue",
+    "mesco_shippedonboarddate",
+    "mesco_placeofissue",
+    "cargo_lines",
 }
 
 
@@ -157,6 +185,8 @@ def _validate_records(
             page_no=item.get("source_page") or item.get("_page_number"),
         )
         item = validate_and_correct(item, ctx, enrichment_text=enrich_ctx)
+        if rec.get("_deterministic_role") == "master" and not rec.get("mesco_houseblno"):
+            item.pop("mesco_houseblno", None)
         item["extraction_method"] = item.get("extraction_method") or extraction_method
         item["_routing"] = {
             "route": "azure_intelligent",
@@ -308,31 +338,17 @@ def parse_document_intelligently(
             azure_warnings.append(f"azure_whole_document_error: {exc}")
             quality["azure_error"] = str(exc)
 
-        from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
-        from pdf_sea_waybill import is_consolidation_sea_waybill, parse_consolidation_sea_waybill
+        deterministic = best_deterministic_parse(raw_text, filename=filename)
+        fallback_records = deterministic.reconciliation_records() if deterministic else []
+        force_special_fallback = bool(deterministic)
+        if deterministic:
+            quality["deterministic_parser"] = deterministic.parser
+            quality["deterministic_confidence"] = deterministic.confidence
+            quality["deterministic_record_count"] = len(fallback_records)
+            quality["deterministic_layout"] = deterministic.layout
+            if deterministic.document_type:
+                quality["deterministic_document_type"] = deterministic.document_type
 
-        debit_fallback: List[Dict[str, Any]] = []
-        if is_freight_debit_note(raw_text):
-            dn = parse_freight_debit_note(raw_text)
-            if dn:
-                debit_fallback = [dn]
-                quality["debit_note_fallback"] = True
-
-        sea_waybill_fallback: List[Dict[str, Any]] = []
-        if is_consolidation_sea_waybill(raw_text):
-            sw = parse_consolidation_sea_waybill(raw_text)
-            if sw:
-                sea_waybill_fallback = [sw]
-                quality["sea_waybill_fallback"] = True
-
-        fallback_records = (
-            debit_fallback
-            or sea_waybill_fallback
-            or extract_isaly_draft_records(raw_text)
-            or detect_and_extract_multi_bl_records(raw_text)
-            or []
-        )
-        force_special_fallback = bool(sea_waybill_fallback or debit_fallback)
         if fallback_records and (
             force_special_fallback
             or not azure_records
@@ -340,8 +356,15 @@ def parse_document_intelligently(
         ):
             from record_reconciliation import reconcile_record_lists
 
-            azure_records = reconcile_record_lists(azure_records, fallback_records)
+            azure_records = reconcile_record_lists(
+                azure_records,
+                fallback_records,
+                prefer_fallback_keys=_TRUSTED_FALLBACK_FORCE_KEYS,
+            )
             quality["fallback_used"] = True
+            quality["fallback_force_keys"] = sorted(_TRUSTED_FALLBACK_FORCE_KEYS)
+            if deterministic:
+                document_layout = deterministic.layout or document_layout
 
         azure_records = dedupe_records_by_bl(azure_records)
         azure_records = finalize_multi_bl_records(azure_records, raw_text)
@@ -363,7 +386,7 @@ def parse_document_intelligently(
     validated = _validate_records(azure_records, raw_text, method, pdf_bytes=file_bytes)
 
     quality["validated_record_count"] = len(validated)
-    quality["document_type_detected"] = (
+    quality["document_type_detected"] = quality.get("deterministic_document_type") or (
         "multi_bl_pdf" if len(validated) >= 2 else "single_bl_pdf"
     )
     if extracted_meta:

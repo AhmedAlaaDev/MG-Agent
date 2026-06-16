@@ -581,6 +581,32 @@ def test_house_cargo_upsert_replaces_wrong_gross_and_syncs_totals(monkeypatch):
     assert master.get("cr401_totalpackages") == 7
 
 
+def test_master_upload_normalizes_container_and_keeps_voyage(monkeypatch):
+    fake = FakeClient()
+    _patch_client(monkeypatch, fake)
+
+    result = du.upload_crm_json(
+        {
+            "mesco_bltype": du._MASTER_BL_TYPE,
+            "mesco_masterblno": "COSU6446151350",
+            "mesco_voytruckno": "0BEN9W1MA",
+            "mesco_Container_MasterOperation_mesco_Operation": [
+                {
+                    "mesco_containernumber": "CSNU687334-7",
+                    "mesco_containerno": "CSNU687334-7",
+                    "mesco_name": "CSNU687334-7",
+                    "mesco_containertype": "40HC",
+                }
+            ],
+        }
+    )
+
+    master = next(o for o in fake.operations if o.get("mesco_bltype") == du._MASTER_BL_TYPE)
+    assert master["mesco_voytruckno"] == "0BEN9W1MA"
+    assert fake.containers[0]["mesco_containernumber"] == "CSNU6873347"
+    assert result["containers"][0]["container_no"] == "CSNU6873347"
+
+
 def test_deduplicate_false_always_creates(monkeypatch):
     fake = FakeClient()
     _patch_client(monkeypatch, fake)
