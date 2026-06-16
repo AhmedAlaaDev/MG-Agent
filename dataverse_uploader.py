@@ -347,6 +347,10 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
             "mesco_placeofissue",
             "mesco_houseblno",
             "mesco_shippedonboarddate",
+            # Cargo-only package unit lookup.  Standard house B/L extraction
+            # keeps it on the source record so it can be copied into the nested
+            # cargo row, but mesco_operation itself has no such property.
+            "mesco_umpackages",
             # Internal pipeline markers
             "source_extraction_method",
             # Nested relation keys — handled as separate POST calls, not fields
