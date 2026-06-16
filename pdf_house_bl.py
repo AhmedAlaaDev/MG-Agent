@@ -47,6 +47,16 @@ _ATA_POD_RE = re.compile(
     r"(\d{1,2}\s+[A-Z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
     re.I,
 )
+_TP_CARGO_AGENT = "TRANS PACIFIC CARGO LIMITED (SHENZHEN)"
+_TP_CARGO_RE = re.compile(
+    r"\b(?:TP\s*CARGO|TPALX\d{6,10}|TRANS\s+PACIFIC\s+CARGO\s+LIMITED)\b",
+    re.I,
+)
+_CARRIER_AGENT_RE = re.compile(
+    r"\bCARRIER\s*:\s*"
+    r"(TRANS\s+PACIFIC\s+CARGO\s+LIMITED(?:\s*\(?\s*SHENZHEN\s*\)?)?)",
+    re.I,
+)
 
 
 def _block_order_section(text: str) -> str:
@@ -111,6 +121,31 @@ def _clean(value: Any, max_len: Optional[int] = None) -> Optional[str]:
     if not text:
         return None
     return text[:max_len] if max_len else text
+
+
+def _canonical_agent_name(value: Any) -> Optional[str]:
+    text = _clean(value, 120)
+    if not text:
+        return None
+    upper = text.upper()
+    if "TRANS PACIFIC CARGO" in upper or "TP CARGO" in upper:
+        return _TP_CARGO_AGENT
+    return text
+
+
+def _extract_agent(text: str) -> Optional[str]:
+    for section in _text_candidates(text):
+        m = _CARRIER_AGENT_RE.search(section)
+        if m:
+            agent = _canonical_agent_name(m.group(1))
+            if agent:
+                return agent
+
+    # TPALX house B/L forms are issued by TP Cargo even when OCR only catches
+    # the logo or B/L prefix and misses the full carrier label.
+    if _TP_CARGO_RE.search(text or ""):
+        return _TP_CARGO_AGENT
+    return None
 
 
 def _normalize_port(value: Optional[str]) -> Optional[str]:
@@ -513,6 +548,7 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         return None
 
     shipper, shipper_addr, consignee, consignee_addr = _extract_party_blocks(text, hbl)
+    agent = _extract_agent(text)
     notify, notify_addr = _extract_mesco_notify(text)
     pol, pod, vessel, voyage = _extract_route_vessel(text)
     container = _extract_container(text)
@@ -536,6 +572,8 @@ def parse_standard_house_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_shipper"] = shipper
     if shipper_addr:
         record["mesco_shipperaddress"] = shipper_addr
+    if agent:
+        record["mesco_agent"] = agent
     if consignee:
         record["mesco_consigneenamecontactno"] = consignee
         record["mesco_consignee"] = consignee

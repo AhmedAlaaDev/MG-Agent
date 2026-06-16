@@ -614,8 +614,38 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "EVERGREEN",
             "EMC",
         ],
+        "COSCO SHIPPING LINES CO.,LTD.": [
+            "COSCO",
+            "COSCO SHIPPING",
+            "COSCO SHIPPING LINES",
+            "COSCO SHIPPING LINE",
+            "COSCO SHIPPING LINES CO LTD",
+        ],
+        "COSCO SHIPPING LINES CO LTD": [
+            "COSCO",
+            "COSCO SHIPPING",
+            "COSCO SHIPPING LINES",
+            "COSCO SHIPPING LINE",
+        ],
+        "ARKAS DENIZCILIK VE NAKLIYAT A.S.": [
+            "ARKAS",
+            "ARKAS LINE",
+            "ARKAS DENIZCILIK",
+            "ARKAS DENIZCILIK VE NAKLIYAT",
+        ],
     },
     "mesco_agent": {
+        "TRANS PACIFIC CARGO LIMITED (SHENZHEN)": [
+            "TP CARGO",
+            "TRANS PACIFIC CARGO",
+            "TRANS PACIFIC CARGO LIMITED",
+            "TRANS PACIFIC",
+        ],
+        "TP CARGO": [
+            "TRANS PACIFIC CARGO LIMITED (SHENZHEN)",
+            "TRANS PACIFIC CARGO",
+            "TRANS PACIFIC CARGO LIMITED",
+        ],
         "BYTEPORT LOGISTICS TECHNOLOGIES PRIVATE LIMITED": [
             "BYTEPORT LOGISTICS",
             "BYTEPORT",
@@ -715,7 +745,7 @@ def _sanitize_cargo_quantity(
 
 
 def _normalize_container_number(value: str) -> str:
-    return re.sub(r"\s+", "", (value or "").strip()).upper()
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").strip().upper())
 
 
 _MONTHS = {
@@ -851,6 +881,11 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
             add(label)
 
     if logical_name == "mesco_agent":
+        if "TRANS PACIFIC" in upper or "TP CARGO" in upper or "TPALX" in upper:
+            add("TRANS PACIFIC CARGO LIMITED (SHENZHEN)")
+            add("TP CARGO")
+            add("TRANS PACIFIC CARGO")
+            add("TRANS PACIFIC CARGO LIMITED")
         if "BYTEPORT" in upper:
             add("BYTEPORT LOGISTICS")
             add("BYTEPORT")
@@ -1620,6 +1655,27 @@ def _payload_container_numbers(
         for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
             add(item.get(key))
     return numbers
+
+
+def _normalize_container_identity_fields(container: Dict[str, Any]) -> None:
+    """Make all container identity fields use one Dataverse-safe number form."""
+    if not isinstance(container, dict):
+        return
+    normalized = ""
+    for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
+        value = container.get(key)
+        if value not in (None, ""):
+            normalized = _normalize_container_number(str(value))
+            if normalized:
+                break
+    if not normalized:
+        return
+    for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
+        if container.get(key) not in (None, "") or key in {
+            "mesco_containernumber",
+            "mesco_containerno",
+        }:
+            container[key] = normalized
 
 
 def _payload_seal_numbers(
@@ -3320,6 +3376,7 @@ def upload_crm_json(
     for idx, container in enumerate(containers):
         container_clean = _clean_odata_meta(container)
         container_clean = _strip_null(container_clean)
+        _normalize_container_identity_fields(container_clean)
 
         # Ensure the Container No lookup (mesco_containerno) is populated from the
         # container number, even when the extractor only produced the text field.
@@ -3336,9 +3393,9 @@ def upload_crm_json(
         )
 
         container_no = (
-            container.get("mesco_containernumber")
-            or container.get("mesco_containerno")
-            or container.get("mesco_name")
+            container_clean.get("mesco_containernumber")
+            or container_clean.get("mesco_containerno")
+            or container_clean.get("mesco_name")
         )
 
         ctn_fields = _preprocess_payload(container_clean, _CONTAINER_ENTITY, client)

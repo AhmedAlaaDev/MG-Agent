@@ -158,6 +158,7 @@ def test_parses_standard_tpalx_house_bl_evidence_without_llm():
     assert rec
     assert rec["mesco_houseblno"] == "TPALX2602005"
     assert "mesco_masterblno" not in rec
+    assert rec["mesco_agent"] == "TRANS PACIFIC CARGO LIMITED (SHENZHEN)"
     assert rec["mesco_vessel"] == "CMA CGM SAO PAULO"
     assert rec["mesco_voytruckno"] == "0BEN9W1MA"
     assert rec["mesco_origin"] == "SHANGHAI, CHINA"
@@ -184,6 +185,7 @@ def test_house_json_does_not_invent_master_link_for_standard_house():
     house = house_json["value"][0]
     assert house["mesco_masterblno"] == "TPALX2602005"
     assert "mesco_masterbllinkno" not in house
+    assert house["mesco_agent"] == "TRANS PACIFIC CARGO LIMITED (SHENZHEN)"
     containers = house["mesco_Container_mesco_houses"]
     assert containers[0]["mesco_containernumber"] == "CSNU6873347"
     assert containers[0]["mesco_carrierseal"] == "CW794147"
@@ -200,6 +202,7 @@ def test_parses_ocr_labelled_tpalx_house_bl_for_master_linking():
     rec = parse_standard_house_bl(TPALX_OCR_LABELLED_SAMPLE)
     assert rec
     assert rec["mesco_houseblno"] == "TPALX2603001"
+    assert rec["mesco_agent"] == "TRANS PACIFIC CARGO LIMITED (SHENZHEN)"
     assert rec["mesco_shippernamecontactno"] == "LANBO TONGCHUANG APPLIANCE CO.,LTD"
     assert rec["mesco_shipper"] == "LANBO TONGCHUANG APPLIANCE CO.,LTD"
     assert rec["mesco_consigneenamecontactno"] == "NILE TRADING COMPANY"
