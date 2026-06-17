@@ -61,6 +61,7 @@ from pdf_consolidated_lcl import (
 )
 from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
 from pdf_house_bl import is_standard_house_bl, parse_standard_house_bl
+from pdf_standard_master_bl import is_standard_master_bl, parse_standard_master_bl
 from pdf_sea_waybill import (
     build_house_records_for_consolidation_sea_waybill,
     is_consolidation_sea_waybill,
@@ -1621,6 +1622,40 @@ async def _extract_file_inner_impl(
                     crm_output = house_output["value"][0]
                 else:
                     crm_output = records_to_master_json([validated])
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
+        if is_standard_master_bl(raw_text):
+            master_record = parse_standard_master_bl(raw_text)
+            if master_record:
+                validated = validate_and_correct(
+                    master_record,
+                    raw_text,
+                    enrichment_text=raw_text,
+                )
+                extraction_quality["document_type_detected"] = "standard_master_bl_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_standard_master_bl",
+                    "mode": "single_master_bl",
+                }
+                crm_output = records_to_master_json([validated])
+                house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(
+                    getattr(bl_type, "value", bl_type),
+                )
+                if resolved_bl == "house":
+                    bl_type = BlTypeQuery.master
+                    extraction_quality["bl_type_corrected"] = "master_standard_bl"
                 return _build_response(
                     crm_output,
                     raw_text,

@@ -106,6 +106,7 @@ def extract_deterministic_parses(
     from pdf_sea_waybill import is_consolidation_sea_waybill, parse_consolidation_sea_waybill
     from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
     from pdf_house_bl import is_standard_house_bl, parse_standard_house_bl
+    from pdf_standard_master_bl import is_standard_master_bl, parse_standard_master_bl
     from pdf_isaly_draft_bl import detect_isaly_draft_multi_bl, extract_isaly_draft_records
     from pdf_multi_bl import detect_and_extract_multi_bl_records, detect_multi_bl_candidate
 
@@ -193,6 +194,18 @@ def extract_deterministic_parses(
                     parse_standard_house_bl(text),
                     93,
                     "standard_house_bl_pdf",
+                )
+            )
+        )
+    if is_standard_master_bl(text):
+        add(
+            _safe_call(
+                lambda: _single(
+                    "pdf_standard_master_bl",
+                    "single_bl",
+                    parse_standard_master_bl(text),
+                    93,
+                    "standard_master_bl_pdf",
                 )
             )
         )
