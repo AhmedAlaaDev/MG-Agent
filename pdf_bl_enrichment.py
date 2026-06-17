@@ -417,6 +417,13 @@ def _extract_goods_narrative_block(text: str) -> Optional[str]:
 def _extract_standard_cargo_description(text: str) -> Optional[str]:
     """Goods lines from standard ocean B/L cargo pages."""
     lines_out: List[str] = []
+    has_continuation = bool(
+        re.search(
+            r"Continued\s+(?:on\s+Next|From\s+Previous)\s+Sheet",
+            text or "",
+            re.I,
+        )
+    )
     pages = re.split(r"---\s*PAGE\s*\d+\s*---", text or "", flags=re.I)
     for idx in range(1, len(pages)):
         body = _visual_page_text(text, idx) if idx < len(pages) else pages[idx]
@@ -431,7 +438,7 @@ def _extract_standard_cargo_description(text: str) -> Optional[str]:
             start = m.end()
         chunk = _collect_goods_lines(body, start, stop_re=_CARGO_LINE_STOP_RE)
         lines_out.extend(chunk)
-        if lines_out:
+        if lines_out and not has_continuation:
             break
 
     if not lines_out:
