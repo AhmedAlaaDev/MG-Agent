@@ -15,6 +15,7 @@ from pdf_attached_list import build_house_records_from_attached_list, extract_at
 from pdf_lcl_export_manifest import is_export_lcl_manifest, parse_export_lcl_manifest
 from pdf_tur_cargo_manifest import is_tur_cargo_manifest, parse_tur_cargo_manifest
 from pdf_consolidated_lcl import is_consolidated_lcl_multi_hbl, parse_consolidated_lcl_multi_hbl
+from pdf_standard_master_bl import is_standard_master_bl, parse_standard_master_bl
 from spreadsheet_extractor import extract_document_text_professionally
 from validator import validate_and_correct
 
@@ -169,6 +170,24 @@ def process_pdf_bytes(
                 extraction_quality["record_routing"] = {
                     "policy": "pdf_consolidated_lcl_multi_hbl",
                     "mode": "one_master_with_house_records",
+                    "document_layout": document_layout,
+                }
+
+        if not validated_records and is_standard_master_bl(raw_text):
+            master_record = parse_standard_master_bl(raw_text)
+            if master_record:
+                validated = validate_and_correct(
+                    master_record,
+                    raw_text,
+                    enrichment_text=raw_text,
+                )
+                validated_records = [validated]
+                crm_masters = [records_to_master_json([validated])]
+                document_layout = "single_bl"
+                extraction_quality["document_type_detected"] = "standard_master_bl_pdf"
+                extraction_quality["record_routing"] = {
+                    "policy": "pdf_standard_master_bl",
+                    "mode": "single_master_bl",
                     "document_layout": document_layout,
                 }
 

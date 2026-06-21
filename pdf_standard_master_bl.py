@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from validator import extract_bl_number_regex
+from validator import extract_acid_regex, extract_bl_number_regex
 
 
 _MASTER_BL_TOKEN_RE = re.compile(r"\b[A-Z]{2,5}\d[A-Z0-9-]{4,20}\b", re.I)
@@ -25,6 +25,56 @@ _CONTAINER_ROW_RE = re.compile(
     re.I,
 )
 _DATE_FORMATS = ("%d %b %Y", "%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d")
+_COUNTRY_BY_CODE = {
+    "CN": "China",
+    "EG": "Egypt",
+    "IN": "India",
+    "TR": "Turkey",
+    "AE": "United Arab Emirates",
+    "DE": "Germany",
+    "IT": "Italy",
+    "ES": "Spain",
+    "FR": "France",
+    "US": "United States",
+    "GB": "United Kingdom",
+}
+_ROUTE_PORTS = (
+    "ALEXANDRIA OLD PORT",
+    "PORT SAID WEST",
+    "PORT SAID",
+    "AIN SOKHNA",
+    "EL SOKHNA",
+    "ALEXANDRIA",
+    "ANTWERP",
+    "AMBARLI",
+    "BEIRUT",
+    "BUSAN",
+    "COLOMBO",
+    "DAMIETTA",
+    "DEKHEILA",
+    "FELIXSTOWE",
+    "GENOA",
+    "GIOIA TAURO",
+    "HAMBURG",
+    "HONG KONG",
+    "ISTANBUL",
+    "JEBEL ALI",
+    "LE HAVRE",
+    "LIMASSOL",
+    "MERSIN",
+    "NINGBO",
+    "PIRAEUS",
+    "QINGDAO",
+    "ROTTERDAM",
+    "SHANGHAI",
+    "SHEKOU",
+    "SHENZHEN",
+    "SINGAPORE",
+    "TIANJIN",
+    "VALENCIA",
+    "XIAMEN",
+    "YANTIAN",
+)
 
 
 def _tagged_section(text: str, tag: str) -> str:
@@ -224,6 +274,39 @@ def _is_route_label(line: str) -> bool:
     )
 
 
+def _parse_compact_route_line(line: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    value = _clean(re.sub(r"\*+", " ", line or ""))
+    if not value:
+        return None, None, None, None
+
+    ports = sorted(_ROUTE_PORTS, key=len, reverse=True)
+    for destination in ports:
+        dest_re = re.escape(destination)
+        m_dest = re.match(
+            rf"^(?P<before>.+?)\s+{dest_re}(?:\s+(?P<delivery>.+))?$",
+            value,
+            re.I,
+        )
+        if not m_dest:
+            continue
+
+        before = _clean(m_dest.group("before"))
+        delivery = _clean(m_dest.group("delivery"))
+        if delivery and re.fullmatch(r"[\s*Xx-]+", delivery):
+            delivery = None
+
+        for origin in ports:
+            origin_re = re.escape(origin)
+            m_origin = re.match(rf"^(?P<vessel>.+?)\s+{origin_re}$", before or "", re.I)
+            if not m_origin:
+                continue
+            vessel = _clean(m_origin.group("vessel"), 50)
+            if vessel:
+                return vessel, origin, destination, delivery or destination
+
+    return None, None, None, None
+
+
 def _extract_route_vessel(text: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     block = _block_order_section(text)
     lines = _clean_lines(block)
@@ -249,6 +332,17 @@ def _extract_route_vessel(text: str) -> Tuple[Optional[str], Optional[str], Opti
             return vessel, origin, destination, delivery
 
     visual = _visual_section(text)
+    visual_lines = _clean_lines(visual)
+    for idx, line in enumerate(visual_lines):
+        if not re.search(r"VESSEL\s+PORT\s+OF\s+LOADING\s+PORT\s+OF\s+DISCHARGE", line, re.I):
+            continue
+        for candidate in visual_lines[idx + 1 : idx + 4]:
+            if re.search(r"^MARKS\s+AND\s+NOS\b", candidate, re.I):
+                break
+            parsed = _parse_compact_route_line(candidate)
+            if parsed[0]:
+                return parsed
+
     m = re.search(
         r"VESSEL\s+PORT\s+OF\s+LOADING\s+PORT\s+OF\s+DISCHARGE[^\n]*\n"
         r"(?P<vessel>[A-Z][A-Z0-9 ]+?)\s+(?P<origin>[A-Z][A-Z ]{2,30})\s+"
@@ -345,6 +439,111 @@ def _extract_shipping_line(text: str) -> Optional[str]:
     return _clean(m.group(1), 120) if m else None
 
 
+def _extract_hs_codes(text: str) -> Optional[str]:
+    codes: List[str] = []
+    for m in re.finditer(r"H\.?\s*S\.?\s*CODE\s*:?\s*([0-9]{6,12})", text or "", re.I):
+        code = m.group(1)
+        if code not in codes:
+            codes.append(code)
+    return ", ".join(codes) if codes else None
+
+
+def _country_from_text(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    upper = re.sub(r"\s+", " ", value).strip().upper()
+    if upper in _COUNTRY_BY_CODE:
+        return _COUNTRY_BY_CODE[upper]
+    if "CHINA" in upper:
+        return "China"
+    if "EGYPT" in upper:
+        return "Egypt"
+    if "INDIA" in upper:
+        return "India"
+    if "TURKEY" in upper:
+        return "Turkey"
+    return _clean(value, 80)
+
+
+def _extract_nafeza_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+    source = text or ""
+
+    importer = re.search(
+        r"\b(?:EGYPTIAN\s+(?:FREIGHT\s+FORWARDER|IMPORTER)|IMPORTER)\s+TAX\s+ID\s*:?\s*(\d{6,15})",
+        source,
+        re.I,
+    )
+    if importer:
+        fields["mesco_importerstaxno"] = importer.group(1)
+
+    reg_type = re.search(
+        r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+REGISTRATION\s+TYPE\s*:?\s*([A-Z][A-Z ]{2,40})",
+        source,
+        re.I,
+    )
+    if reg_type:
+        reg_value = _clean(reg_type.group(1))
+        if reg_value and re.search(r"\b(?:VAT|TAX)\b", reg_value, re.I):
+            fields["mesco_typeofregistrationnumber"] = "Tax Number"
+        elif reg_value and re.search(r"\bREGISTRATION\b", reg_value, re.I):
+            fields["mesco_typeofregistrationnumber"] = "Registration number"
+
+    foreign_id = re.search(
+        r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+ID\s*:?\s*([A-Z0-9-]{5,30})",
+        source,
+        re.I,
+    )
+    if foreign_id:
+        fields["mesco_foreignsupplierregistrationnumber"] = foreign_id.group(1).upper()
+
+    foreign_country = re.search(
+        r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+COUNTRY\s*:?\s*([A-Z][A-Z ]{1,40})",
+        source,
+        re.I,
+    )
+    country_code = re.search(
+        r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+COUNTRY\s+CODE\s*:?\s*([A-Z]{2})\b",
+        source,
+        re.I,
+    )
+    country = _country_from_text(foreign_country.group(1)) if foreign_country else None
+    if not country and country_code:
+        country = _country_from_text(country_code.group(1))
+    if country:
+        fields["mesco_country"] = country
+        fields.setdefault("mesco_countryoforigin", country)
+
+    return fields
+
+
+def _infer_shipper_country(shipper_address: Optional[str], origin: Optional[str]) -> Optional[str]:
+    return _country_from_text(shipper_address) or _country_from_text(origin)
+
+
+def _extract_freight_terms(text: str) -> Dict[str, Any]:
+    upper = (text or "").upper()
+    if re.search(r"\bFREIGHT\s+COLLECT\b", upper):
+        return {
+            "mesco_pcfreightterm": "COLLECT",
+            "mesco_freightpayableat": "Destination",
+            "mesco_bookingterm": 886150001,
+        }
+    if re.search(r"\bFREIGHT\s+PREPAID\b", upper):
+        return {
+            "mesco_pcfreightterm": "PREPAID",
+            "mesco_freightpayableat": "Origin",
+            "mesco_bookingterm": 886150000,
+        }
+    if re.search(r"\bFREIGHT\s+TO\s+BE\s+PAID\s+AT\b", upper) and not re.search(r"\bCOLLECT\b", upper):
+        return {
+            "mesco_pcfreightterm": "PREPAID",
+            "mesco_freightpayableat": "Origin",
+            "mesco_bookingterm": 886150000,
+        }
+    return {}
+
+
 def is_standard_master_bl(text: str) -> bool:
     if not text or not text.strip():
         return False
@@ -375,6 +574,10 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
     container, packages, package_unit, gross, volume = _extract_container(text)
     place_of_issue, date_of_issue = _extract_issue(text)
     shipped_on_board = _extract_shipped_on_board(text)
+    acid = extract_acid_regex(text)
+    hs_codes = _extract_hs_codes(text)
+    nafeza_fields = _extract_nafeza_fields(text)
+    freight_fields = _extract_freight_terms(text)
 
     record: Dict[str, Any] = {
         "document_type": "Bill of Lading",
@@ -385,6 +588,7 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
         "mesco_loadtype": 300000001 if re.search(r"\bCONSOLIDATED\s+CARGO\b", text, re.I) else 300000000,
         "mesco_consolidation": bool(re.search(r"\bCONSOLIDATED\s+CARGO\b", text, re.I)),
     }
+    record.update(freight_fields)
 
     if shipper:
         record["mesco_shippernamecontactno"] = shipper
@@ -416,6 +620,10 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_deliveryaddress"] = delivery
     if place_receipt:
         record["mesco_pickupaddress"] = place_receipt
+    shipper_country = _infer_shipper_country(shipper_address, origin)
+    if shipper_country:
+        record["mesco_country"] = shipper_country
+        record.setdefault("mesco_countryoforigin", shipper_country)
     if packages is not None:
         record["cr401_totalpackages"] = packages
     if package_unit:
@@ -438,6 +646,11 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_dateofissue"] = date_of_issue
     if shipped_on_board:
         record["mesco_shippedonboarddate"] = shipped_on_board
+    if acid:
+        record["mesco_acidnumber"] = acid
+    if hs_codes:
+        record["mesco_hscode"] = hs_codes
+    record.update(nafeza_fields)
 
     originals = _extract_no_of_originals(text)
     if originals:

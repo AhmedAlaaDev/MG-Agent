@@ -7,6 +7,7 @@ from crm_output_formatter import (
     records_to_master_json,
 )
 from custom_business_rules import use_custom_rules
+import pdf_batch_processor as pdf_batch_processor_module
 from pdf_deterministic_registry import best_deterministic_parse
 from pdf_standard_master_bl import is_standard_master_bl, parse_standard_master_bl
 from validator import validate_and_correct
@@ -104,6 +105,16 @@ RISKS, CARES AND EXPENSES, LINE'S
 RESPONSIBILITY CEASES AT PORT OF
 DISCHARGE.
 ACID:2979239001004410035
+EGYPTIAN FREIGHT FORWARDER TAX ID:
+297923900
+FOREIGN FREIGHT FORWARDER
+REGISTRATION TYPE: VAT NUMBER
+FOREIGN FREIGHT FORWARDER ID:
+91440300MA5EJFER3Y
+FOREIGN FREIGHT FORWARDER COUNTRY:
+CHINA
+FOREIGN FREIGHT FORWARDER COUNTRY
+CODE: CN
 1 X 40HC
 179 PACKAGE(S)
 SAY ONE HUNDRED SEVENTY-NINE PACKAGE(S)
@@ -113,6 +124,20 @@ Weight in Kgs Total: 1 CONTAINER(S) Continued From Previous Sheet Sheet 2 of 2 1
 SIGNED FOR THE CARRIER CMA CGM S.A.
 PLACE AND DATE OF ISSUE NINGBO 19 MAR 2026
 BY CMA CGM Ningbo
+"""
+
+
+VISUAL_ONLY_CMA_CGM_ROUTE_SAMPLE = """
+--- PAGE 1 ---
+[VISUAL WORD ORDER]
+VOYAGE NUMBER
+0BEN9W1MA
+COPY NON NEGOTIABLE
+BILL OF LADING NUMBER
+BILL OF LADING
+SHZ7922638
+VESSEL PORT OF LOADING PORT OF DISCHARGE FINAL PLACE OF DELIVERY*
+CMA CGM SAO PAULO SHEKOU ALEXANDRIA ***********************
 """
 
 
@@ -139,6 +164,25 @@ def test_standard_master_detects_and_parses_cma_cgm_mbl():
     assert rec["mesco_nooforgbls"] == "3"
     assert rec["mesco_dateofissue"] == "2026-03-19"
     assert rec["mesco_shippedonboarddate"] == "2026-03-19"
+    assert rec["mesco_pcfreightterm"] == "PREPAID"
+    assert rec["mesco_freightpayableat"] == "Origin"
+    assert rec["mesco_bookingterm"] == 886150000
+    assert rec["mesco_importerstaxno"] == "297923900"
+    assert rec["mesco_foreignsupplierregistrationnumber"] == "91440300MA5EJFER3Y"
+    assert rec["mesco_typeofregistrationnumber"] == "Tax Number"
+    assert rec["mesco_country"] == "China"
+    assert rec["mesco_countryoforigin"] == "China"
+
+
+def test_standard_master_parses_visual_only_cma_cgm_route():
+    rec = parse_standard_master_bl(VISUAL_ONLY_CMA_CGM_ROUTE_SAMPLE)
+
+    assert rec
+    assert rec["mesco_masterblno"] == "SHZ7922638"
+    assert rec["mesco_vessel"] == "CMA CGM SAO PAULO"
+    assert rec["mesco_origin"] == "SHEKOU"
+    assert rec["mesco_destination"] == "ALEXANDRIA"
+    assert rec["mesco_deliveryaddress"] == "ALEXANDRIA"
 
 
 def test_standard_master_registry_fallback_has_no_llm_dependency():
@@ -184,3 +228,50 @@ def test_standard_master_crm_payload_keeps_master_teus_and_nested_rows():
     assert len(master[MASTER_CARGO_KEY]) == 1
     assert master[MASTER_CONTAINERS_KEY][0]["mesco_containernumber"] == "TLLU4178846"
     assert master[MASTER_CARGO_KEY][0]["mesco_noofpackages"] == 179
+
+
+def test_batch_processor_routes_standard_master_directly(monkeypatch):
+    def fake_extract_document_text(file_bytes, filename):
+        return {
+            "method": "native",
+            "text": CMA_CGM_MASTER_SAMPLE,
+            "quality": {
+                "native_char_count": len(CMA_CGM_MASTER_SAMPLE),
+                "native_field_hits": 19,
+                "page_count": 2,
+                "warnings": [],
+            },
+        }
+
+    def fail_intelligent_parse(*args, **kwargs):
+        raise AssertionError("standard master B/L should not require LLM fallback")
+
+    monkeypatch.setattr(
+        pdf_batch_processor_module,
+        "extract_document_text_professionally",
+        fake_extract_document_text,
+    )
+    monkeypatch.setattr(
+        pdf_batch_processor_module,
+        "parse_document_intelligently",
+        fail_intelligent_parse,
+    )
+
+    result = pdf_batch_processor_module.process_pdf_bytes(
+        b"%PDF-1.7\n",
+        "SHZ7922638.pdf",
+    )
+
+    assert result.success
+    assert result.passed
+    assert result.records_summary[0]["mesco_masterblno"] == "SHZ7922638"
+    assert result.records_summary[0]["mesco_vessel"] == "CMA CGM SAO PAULO"
+    assert result.extraction_quality["record_routing"]["policy"] == "pdf_standard_master_bl"
+    crm_master = result.crm_masters[0]
+    assert crm_master["mesco_pcfreightterm"] == "PREPAID"
+    assert crm_master["mesco_freightpayableat"] == "Origin"
+    assert crm_master["mesco_bookingterm"] == 886150000
+    assert crm_master["mesco_importerstaxno"] == "297923900"
+    assert crm_master["mesco_foreignsupplierregistrationnumber"] == "91440300MA5EJFER3Y"
+    assert crm_master["mesco_typeofregistrationnumber"] == "Tax Number"
+    assert crm_master["mesco_country"] == "China"
