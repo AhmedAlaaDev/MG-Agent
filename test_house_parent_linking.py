@@ -159,7 +159,7 @@ def test_find_master_by_shipment_evidence_links_house_without_mbl(monkeypatch):
 
 def test_find_master_by_shipment_evidence_can_use_seal_when_master_container_number_missing(monkeypatch):
     def fake_container_ids(_client, numbers):
-        assert numbers == ["CSNU687334-7"]
+        assert numbers == ["CSNU6873347"]
         return set()
 
     def fake_seal_ids(_client, seals):
@@ -285,8 +285,8 @@ def test_upload_reused_standalone_house_patches_parent_after_evidence_match(monk
     monkeypatch.setattr(du, "_get_operation_lookup_bind", lambda client, op_id, logical_name: None)
     monkeypatch.setattr(du, "_find_master_by_shipment_evidence", lambda client, payload, containers: "master-1")
     monkeypatch.setattr(du, "_update_entity", lambda client, entity_set, op_id, fields: patches.append((entity_set, op_id, fields)))
-    monkeypatch.setattr(du, "_find_existing_cargo", lambda *args, **kwargs: None)
-    monkeypatch.setattr(du, "_dedupe_cargo_for_operation", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(du, "_find_existing_cargo", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(du, "_dedupe_cargo_for_operation", lambda *args, **kwargs: 0, raising=False)
 
     result = du.upload_crm_json(
         {

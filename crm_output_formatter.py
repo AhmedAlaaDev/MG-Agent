@@ -192,6 +192,12 @@ _META_KEYS = {
     "_consolidated_lcl_row",
 }
 
+_UNSUPPORTED_CRM_FIELDS = {
+    # Dataverse mesco_operation has consignee/shipper contact fields, but no
+    # notify contact field. Keep notify phone details out of POST payloads.
+    "mesco_notifycontactnumber",
+}
+
 _MASTER_SKIP = {"mesco_houseblno"}
 _ROOT_METADATA_KEYS = {
     "@odata.context",
@@ -336,6 +342,8 @@ def _clean_metadata(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 def _crm_field_items(src: Dict[str, Any]) -> Iterable[tuple[str, Any]]:
     for key, value in _clean_metadata(src).items():
+        if key in _UNSUPPORTED_CRM_FIELDS:
+            continue
         if key in _RELATIONSHIP_KEYS or key in _ROOT_METADATA_KEYS:
             continue
         if key.startswith("@") or "@" in key:

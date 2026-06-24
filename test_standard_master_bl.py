@@ -141,6 +141,65 @@ CMA CGM SAO PAULO SHEKOU ALEXANDRIA ***********************
 """
 
 
+TRANS_PACIFIC_OCR_SAMPLE = """
+--- PAGE 1 ---
+[VISUAL WORD ORDER]
+961.8
+
+[OCR FULL PAGE BEST]
+COPY
+CARRIER: TRANS PACIFIC CARGO LIMITED (SHENZHEN) BILL OF LADING For Multimodal Transport or Port to Port Shipments
+SHIPPER (COMPLETE NAME / STREET ADDRESS)
+HAISRU INTERNATIONAL (HK) TECHNOLOGY
+CO. LIMITED TP CARGO
+ADD:FLAT/RM 1605 HO KING COMMERCIAL CENTRE
+2-16FA YUEN STREET MONGKOK KL, HONG
+KONG, CHINA VIA SHENZHEN KINGELECT CARRIER REFERENCE B/L. NO. PAGE
+TECHNOLOGY CO., LTD TPSALX20260112 1/1
+ADD:ROOM 5C, 5F, BLOCK A,GUO QI BUILDING,
+
+CONSIGNEE (NOT NEGOTIABLE UNLESS CONSIGNED TO ORDER) EXPORTER REFERENCE
+AMERICAN FOOD SERVICE FOR IMPORT & HOTEL
+SUPPLIES COMPANY
+2 ST ABED ELAL DARWISH FROM AL ALESHRINE
+-FAYSEL- GIZA -EGYPT CONSIGNEE REFERENCE
+MOB:+201223422916 & +201226032180
+Email :A.FSCO@YAHOO.COM
+VAT NO. :333167104
+
+NOTIFY PARTY (COMPLETE NAME / STREET ADDRESS) FOR DELIVERY OF GOODS PLEASE APPLY TO
+SAME AS CONSIGNEE MARINE & ENGINEERING SERVICES COMPANY -MESCO
+8 PATRIC LUMUMBA ST.BAB SHARQ
+ALEXANDRIA -EGYPT
+TEL.+2 (03) 3991000
+FAX.+2(03)3991001 TAX NO.297923900
+
+PRE-CARRIAGE BY (MODE) PLACE OF RECEIPT ROUTING & INSTRUCTIONS
+SHENZHEN, CHINA
+
+OCEAN VESSEL / VOYAGE PORT OF LOADING PORT OF DISCHARGING PLACE OF DELIVERY
+CMA CGM SAO
+PAULO/OBEN9OW1MA SHENZHEN , CHINA ALEXANDRIA, EGYPT ALEXANDRIA, EGYPT
+
+Container Nos., Seal Nos., Marks, and Nos. Numbers and Kind of Packages, Description of Goods Gross Weight Measurements
+Ic902 SAID TO CONTAINE:74CARTONS IN TOTAL 961.8 4.245
+Tc915 IC902 CONTROLLER OF PCB CONTROLLER 220V
+IC902-24 IC915 CONTROLLER OF PCB CONTROLLER 220V
+IC 902-24 CONTROLLER OF PCB 902 CONTROLLER
+24V AC
+HS CODE: 8537109000
+ACID :3331671041000910010
+TELEX RELEASE
+VAT NO. :HK-01-1546385
+TOTAL PREPAID TOTAL COLLECT TOTAL CHARGES NUMBER OF ORIGINAL B/Ls FREIGHT PAYABLE AT
+ZERO (0) COLLECT
+PLACE AND DATE OF ISSUE LADEN ON BOARD DATE STAMP / SIGNATURE OF THE CARRIER OR ITS AGENT
+ZHUHAI , CHINA 2026-03-19
+CFS/CFS
+2026-03-19
+"""
+
+
 def test_standard_master_detects_and_parses_cma_cgm_mbl():
     assert is_standard_master_bl(CMA_CGM_MASTER_SAMPLE)
 
@@ -172,6 +231,56 @@ def test_standard_master_detects_and_parses_cma_cgm_mbl():
     assert rec["mesco_typeofregistrationnumber"] == "Tax Number"
     assert rec["mesco_country"] == "China"
     assert rec["mesco_countryoforigin"] == "China"
+
+
+def test_standard_master_parses_trans_pacific_sparse_visual_ocr():
+    assert is_standard_master_bl(TRANS_PACIFIC_OCR_SAMPLE)
+
+    rec = parse_standard_master_bl(TRANS_PACIFIC_OCR_SAMPLE)
+
+    assert rec
+    assert rec["mesco_masterblno"] == "TPSALX20260112"
+    assert rec["mesco_shippingline"] == "TRANS PACIFIC CARGO LIMITED"
+    assert rec["mesco_vessel"] == "CMA CGM SAO PAULO"
+    assert rec["mesco_voytruckno"] == "OBEN9OW1MA"
+    assert rec["mesco_origin"] == "SHENZHEN , CHINA"
+    assert rec["mesco_destination"] == "ALEXANDRIA, EGYPT"
+    assert rec["cr401_totalpackages"] == 74
+    assert rec["cr401_totalgrossweight"] == 961.8
+    assert rec["cr401_totalvolume"] == 4.245
+    assert rec["mesco_acidnumber"] == "3331671041000910010"
+    assert rec["mesco_hscode"] == "8537109000"
+    assert rec["mesco_pcfreightterm"] == "COLLECT"
+    assert rec["mesco_freightpayableat"] == "Destination"
+    assert rec["mesco_loadtype"] == 300000001
+    assert rec["mesco_nooforgbls"] == "0"
+    assert rec["mesco_telexrelease"] is True
+    assert rec["mesco_importerstaxno"] == "333167104"
+    assert rec["mesco_foreignsupplierregistrationnumber"] == "HK-01-1546385"
+    assert "mesco_notifycontactnumber" not in rec
+
+
+def test_standard_master_trans_pacific_validation_cleans_crm_payload():
+    rec = parse_standard_master_bl(TRANS_PACIFIC_OCR_SAMPLE)
+    validated = validate_and_correct(
+        rec,
+        TRANS_PACIFIC_OCR_SAMPLE,
+        enrichment_text=TRANS_PACIFIC_OCR_SAMPLE,
+    )
+
+    assert validated["mesco_cargodescription"].startswith("Tc915 IC902 CONTROLLER")
+    assert "[OCR TEXT FALLBACK" not in validated["mesco_cargodescription"]
+    assert validated.get("mesco_agent") in (None, "")
+    assert "mesco_notifycontactnumber" not in validated
+
+    master = records_to_master_json([validated])
+    cargo_rows = master[MASTER_CARGO_KEY]
+
+    assert "mesco_notifycontactnumber" not in master
+    assert master.get("mesco_agent") in (None, "")
+    assert "[OCR TEXT FALLBACK" not in master["mesco_cargodescription"]
+    assert cargo_rows
+    assert "[OCR TEXT FALLBACK" not in cargo_rows[0]["mesco_descriptionofgoods"]
 
 
 def test_standard_master_parses_visual_only_cma_cgm_route():

@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     # Server-side API extraction can still use "azure" or explicit "gemini".
     llm_provider: str = Field(default="puter", alias="LLM_PROVIDER")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-3.1-flash-lite", alias="GEMINI_MODEL")
-    puter_model: str = Field(default="gemini-3.1-flash-lite", alias="PUTER_MODEL")
+    gemini_model: str = Field(default="gemini-3-pro-preview", alias="GEMINI_MODEL")
+    puter_model: str = Field(default="gemini-3-pro-preview", alias="PUTER_MODEL")
 
     # Post-extraction CRM business rules (freight→booking, load type, TEUs, totals).
     custom_business_rules_enabled: bool = Field(

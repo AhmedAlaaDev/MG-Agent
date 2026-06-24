@@ -16,6 +16,19 @@ def test_operation_payload_drops_cargo_package_unit_field():
     assert "mesco_umpackages" not in cleaned
 
 
+def test_operation_payload_drops_unsupported_notify_contact_field():
+    payload = {
+        "mesco_masterblno": "TPSALX20260112",
+        "mesco_notifycontactnumber": "TEL.+2 (03) 3991000",
+        "mesco_notifyaddress": "8 PATRIC LUMUMBA ST.BAB SHARQ",
+    }
+
+    cleaned = du._preprocess_payload(payload, "mesco_operations")
+
+    assert "mesco_notifycontactnumber" not in cleaned
+    assert cleaned["mesco_notifyaddress"] == "8 PATRIC LUMUMBA ST.BAB SHARQ"
+
+
 def test_cargo_schema_keeps_package_unit_lookup():
     cargo_schema = du._ENTITY_SCHEMAS["mesco_cargos"]
 
