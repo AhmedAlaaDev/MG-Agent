@@ -2237,11 +2237,11 @@ async def extract_pdf(
         description="Post as Master B/L (886150001) or House B/L (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Query(
-        None,
+        LlmProviderQuery.puter,
         description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
     ),
     llm_model: Optional[GeminiModelQuery] = Query(
-        None,
+        GeminiModelQuery.gemini_3_pro_preview,
         description="Gemini model id when llm_provider=gemini (Puter.js-compatible ids)",
     ),
     post_to_dataverse: bool = Query(
@@ -2289,11 +2289,11 @@ async def extract_excel(
         description="B/L type: master (886150001) or house (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        None,
+        LlmProviderQuery.puter,
         description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
-        None,
+        GeminiModelQuery.gemini_3_pro_preview,
         description="Gemini model id when llm_provider=gemini",
     ),
     post_to_dataverse: bool = Form(

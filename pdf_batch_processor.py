@@ -203,6 +203,12 @@ def process_pdf_bytes(
             if not parse_result.records:
                 elapsed = int((time.perf_counter() - started) * 1000)
                 report = validate_pdf_extraction([], raw_text)
+                error = "No B/L records extracted."
+                if extraction_quality.get("puter_required"):
+                    error = (
+                        "Browser Puter.js Gemini extraction required. "
+                        "Open /puter and upload this PDF there."
+                    )
                 return PdfBatchItemResult(
                     filename=name,
                     success=False,
@@ -210,7 +216,7 @@ def process_pdf_bytes(
                     score=0,
                     record_count=0,
                     processing_ms=elapsed,
-                    error="No B/L records extracted.",
+                    error=error,
                     extraction_quality=extraction_quality,
                     validation=report.to_dict(),
                     raw_text_preview=raw_text[:3000] if include_raw_text_preview else None,

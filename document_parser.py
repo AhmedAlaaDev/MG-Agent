@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
-from llm_context import llm_extraction_prefix, llm_meta
+from llm_context import llm_extraction_prefix, llm_meta, uses_puter
 from pdf_consolidated_lcl import parse_consolidated_lcl_multi_hbl
 from pdf_isaly_draft_bl import (
     detect_isaly_draft_multi_bl,
@@ -308,37 +308,56 @@ def parse_document_intelligently(
         quality["fallback_used"] = True
         document_layout = "multi_bl_pages"
 
-        try:
-            azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
-            quality["llm_attempted"] = True
-            quality["azure_attempted"] = True
-            quality["per_page_llm_calls"] = len(canonical)
-            quality["per_page_azure_calls"] = len(canonical)
-        except Exception as exc:
-            logger.warning("Per-page Azure enrichment skipped: %s", exc)
-            azure_warnings.append(str(exc))
+        if uses_puter():
             azure_records = [dict(c) for c in canonical]
+            quality["server_side_llm_available"] = False
+            quality["server_side_llm_reason"] = (
+                "Puter.js Gemini runs in the browser; per-page server enrichment was skipped."
+            )
+        else:
+            try:
+                azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
+                quality["llm_attempted"] = True
+                quality["azure_attempted"] = True
+                quality["per_page_llm_calls"] = len(canonical)
+                quality["per_page_azure_calls"] = len(canonical)
+            except Exception as exc:
+                logger.warning("Per-page Azure enrichment skipped: %s", exc)
+                azure_warnings.append(str(exc))
+                azure_records = [dict(c) for c in canonical]
 
         method = "isaly_draft_page_anchored" if isaly_expected else "multi_bl_page_anchored"
     else:
         azure_records: List[Dict[str, Any]] = []
-        try:
-            payload = extract_records_with_azure_openai(
-                raw_text,
-                file_bytes=file_bytes,
-                filename=filename,
-            )
-            quality["llm_attempted"] = True
-            quality["azure_attempted"] = True
-            document_layout = payload.get("document_layout") or "unknown"
-            azure_records = [dict(r) for r in (payload.get("records") or [])]
-            azure_warnings = list(payload.get("warnings") or [])
-            quality["azure_document_layout"] = document_layout
-            quality["azure_record_count"] = len(azure_records)
-        except Exception as exc:
-            logger.warning("Whole-document Azure extraction failed: %s", exc)
-            azure_warnings.append(f"azure_whole_document_error: {exc}")
-            quality["azure_error"] = str(exc)
+        if uses_puter():
+            reason = "Puter.js Gemini runs in the browser; server-side LLM extraction was skipped."
+            quality["server_side_llm_available"] = False
+            quality["server_side_llm_reason"] = reason
+            azure_warnings.append(f"puter_browser_required: {reason}")
+        else:
+            try:
+                quality["llm_attempted"] = True
+                quality["azure_attempted"] = True
+                payload = extract_records_with_azure_openai(
+                    raw_text,
+                    file_bytes=file_bytes,
+                    filename=filename,
+                )
+                document_layout = payload.get("document_layout") or "unknown"
+                azure_records = [dict(r) for r in (payload.get("records") or [])]
+                azure_warnings = list(payload.get("warnings") or [])
+                quality["azure_document_layout"] = document_layout
+                quality["azure_record_count"] = len(azure_records)
+            except Exception as exc:
+                logger.warning("Whole-document Azure extraction failed: %s", exc)
+                error_text = str(exc)
+                azure_warnings.append(f"azure_whole_document_error: {error_text}")
+                quality["azure_error"] = error_text
+                if "Gemini is not configured" in error_text or "Puter is a browser-side AI provider" in error_text:
+                    quality["server_side_llm_available"] = False
+                    quality["browser_extraction_required"] = True
+                    quality["puter_required"] = True
+                    quality["puter_url"] = "/puter"
 
         deterministic = best_deterministic_parse(raw_text, filename=filename)
         fallback_records = deterministic.reconciliation_records() if deterministic else []
@@ -377,6 +396,13 @@ def parse_document_intelligently(
 
     if not azure_records:
         quality["parser"] = "failed"
+        if uses_puter():
+            reason = "Puter.js Gemini must run in the browser for this document."
+            quality["puter_required"] = True
+            quality["puter_url"] = "/puter"
+            quality["browser_extraction_required"] = True
+            quality["server_side_llm_available"] = False
+            quality["llm_error"] = reason
         return IntelligentParseResult(
             records=[],
             document_layout=document_layout,

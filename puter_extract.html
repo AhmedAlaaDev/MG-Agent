@@ -6,6 +6,7 @@
   <title>Puter Gemini B/L Extractor</title>
   <script src="https://js.puter.com/v2/"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     :root {
       --bg: #f5f7fb;
@@ -134,8 +135,8 @@
 
   <main>
     <section>
-      <label for="fileInput">PDF document</label>
-      <input id="fileInput" type="file" accept="application/pdf,.pdf">
+      <label for="fileInput">PDF, Excel, or CSV document</label>
+      <input id="fileInput" type="file" accept="application/pdf,.pdf,.xlsx,.xls,.csv,text/csv">
 
       <label for="modelSelect">Puter Gemini model</label>
       <select id="modelSelect"></select>
@@ -155,7 +156,7 @@
         <button id="copyBtn" class="secondary" disabled>Copy CRM JSON</button>
       </div>
 
-      <div id="status" class="status">Choose a PDF, then run extraction.</div>
+      <div id="status" class="status">Choose a PDF, Excel, or CSV file, then run extraction.</div>
       <div id="links" class="status" style="display:none"></div>
     </section>
 
@@ -273,6 +274,55 @@
       };
     }
 
+    async function readSpreadsheetForGemini(file) {
+      const lowerName = (file.name || "").toLowerCase();
+      if (lowerName.endsWith(".csv") || file.type === "text/csv") {
+        const text = await file.text();
+        return {
+          rawText: "--- FILE: " + (file.name || "upload.csv") + " ---\n" + text,
+          pageImages: [],
+          pageCount: null,
+          inputKind: "spreadsheet"
+        };
+      }
+
+      if (!window.XLSX) {
+        throw new Error("Spreadsheet parser did not load. Check internet access and reload the page.");
+      }
+
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: "array", cellDates: true });
+      const sheets = [];
+      workbook.SheetNames.forEach((sheetName) => {
+        const worksheet = workbook.Sheets[sheetName];
+        const text = XLSX.utils.sheet_to_csv(worksheet, {
+          FS: "\t",
+          blankrows: false
+        });
+        if (text.trim()) {
+          sheets.push("--- SHEET: " + sheetName + " ---\n" + text);
+        }
+      });
+
+      return {
+        rawText: sheets.join("\n\n"),
+        pageImages: [],
+        pageCount: null,
+        inputKind: "spreadsheet"
+      };
+    }
+
+    async function readDocumentForGemini(file) {
+      const lowerName = (file.name || "").toLowerCase();
+      const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+      if (isPdf) {
+        const pdfInput = await readPdfForGemini(file);
+        pdfInput.inputKind = "pdf";
+        return pdfInput;
+      }
+      return await readSpreadsheetForGemini(file);
+    }
+
     async function callPuterGemini(prompt, pageImages, model) {
       const options = { model, temperature: 0 };
       if (pageImages && pageImages.length) {
@@ -292,7 +342,7 @@
     async function runExtraction() {
       const file = $("fileInput").files[0];
       if (!file) {
-        setStatus("Please choose a PDF first.", "bad");
+        setStatus("Please choose a PDF, Excel, or CSV file first.", "bad");
         return;
       }
       if (!window.puter || !puter.ai || !puter.ai.chat) {
@@ -306,29 +356,39 @@
       lastCrmJson = null;
 
       try {
-        setStatus("Preparing PDF for Gemini vision/OCR...");
-        const pdfInput = await readPdfForGemini(file);
-        const rawText = pdfInput.rawText || "";
-        if (!rawText.trim() && !pdfInput.pageImages.length) {
-          throw new Error("No PDF pages could be read for Gemini extraction.");
+        setStatus("Preparing document for Puter Gemini...");
+        const documentInput = await readDocumentForGemini(file);
+        const rawText = documentInput.rawText || "";
+        if (!rawText.trim() && !documentInput.pageImages.length) {
+          throw new Error("No document content could be read for Gemini extraction.");
         }
 
         const limit = puterConfig.max_text_chars || 900000;
+        const textIntro = documentInput.inputKind === "spreadsheet"
+          ? "[Browser spreadsheet text begins]\n"
+          : "[Browser text hint begins]\n";
+        const textOutro = documentInput.inputKind === "spreadsheet"
+          ? "\n[Browser spreadsheet text ends]"
+          : "\n[Browser text hint ends]";
         const prompt =
           puterConfig.prompt_prefix +
-          "[Browser text hint begins]\n" +
+          "Source filename: " + (file.name || "upload") + "\n" +
+          "Source kind: " + documentInput.inputKind + "\n\n" +
+          textIntro +
           (rawText.trim() ? rawText.slice(0, limit) : "No browser text layer was found; use the attached page images only.") +
-          "\n[Browser text hint ends]";
+          textOutro;
         const model = $("modelSelect").value || puterConfig.default_model;
 
         setStatus(
-          "Calling Puter Gemini vision/OCR (" +
+          "Calling Puter Gemini (" +
           model +
           ") with " +
-          pdfInput.pageImages.length +
-          " rendered page image(s)..."
+          (documentInput.pageImages.length
+            ? documentInput.pageImages.length + " rendered page image(s)"
+            : "browser-extracted spreadsheet text") +
+          "..."
         );
-        const puterResponse = await callPuterGemini(prompt, pdfInput.pageImages, model);
+        const puterResponse = await callPuterGemini(prompt, documentInput.pageImages, model);
         const puterPayload = parseJsonLoose(puterText(puterResponse));
         $("puterOutput").textContent = pretty(puterPayload);
 
@@ -342,8 +402,10 @@
             bl_type: $("houseToggle").checked ? "house" : "master",
             post_to_dataverse: $("postToggle").checked,
             llm_model: model,
-            visual_page_count: pdfInput.pageImages.length,
-            pdf_page_count: pdfInput.pageCount
+            visual_page_count: documentInput.pageImages.length,
+            pdf_page_count: documentInput.pageCount,
+            input_kind: documentInput.inputKind,
+            source_filename: file.name || null
           })
         });
         const formatted = await formatResponse.json();

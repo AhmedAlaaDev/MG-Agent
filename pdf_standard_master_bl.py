@@ -11,11 +11,11 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from validator import extract_acid_regex, extract_bl_number_regex
+from validator import extract_acid_regex, extract_bl_number_regex, is_likely_bl_number
 
 
-_MASTER_BL_TOKEN_RE = re.compile(r"\b[A-Z]{2,5}\d[A-Z0-9-]{4,20}\b", re.I)
-_HOUSE_HINT_RE = re.compile(r"\b(?:HOUSE\s+B/?L|H\s*/?\s*BL|HBL|CFS\s*/\s*CFS)\b", re.I)
+_MASTER_BL_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9-]{5,25}\b)(?=[A-Z0-9-]*\d)[A-Z]{2,8}[A-Z0-9-]*\b", re.I)
+_HOUSE_HINT_RE = re.compile(r"\b(?:HOUSE\s+B/?L|H\s*/?\s*BL|HBL)\b", re.I)
 _CONTAINER_ROW_RE = re.compile(
     r"\b(?P<container>[A-Z]{4}\d{7})\s+"
     r"(?P<count>\d+)\s*x\s*(?P<ctype>\d{2}[A-Z0-9]{0,4})\s+"
@@ -84,11 +84,38 @@ def _tagged_section(text: str, tag: str) -> str:
 
 
 def _visual_section(text: str) -> str:
-    return _tagged_section(text, "VISUAL WORD ORDER") or (text or "")
+    visual = _tagged_section(text, "VISUAL WORD ORDER")
+    if _section_looks_readable(visual):
+        return visual
+    for tag in ("BLOCK ORDER", "OCR FULL PAGE BEST", "OCR BODY PSM4", "OCR HEADER PSM6"):
+        candidate = _tagged_section(text, tag)
+        if _section_looks_readable(candidate):
+            return candidate
+    return visual or (text or "")
 
 
 def _block_order_section(text: str) -> str:
     return _tagged_section(text, "BLOCK ORDER") or (text or "")
+
+
+def _section_looks_readable(section: str) -> bool:
+    if not section or len(section.strip()) < 80:
+        return False
+    upper = section.upper()
+    hits = sum(
+        1
+        for marker in (
+            "BILL OF LADING",
+            "SHIPPER",
+            "CONSIGNEE",
+            "NOTIFY",
+            "PORT OF LOADING",
+            "PORT OF DISCHARG",
+            "ACID",
+        )
+        if marker in upper
+    )
+    return hits >= 2
 
 
 def _clean(value: Any, max_len: Optional[int] = None) -> Optional[str]:
@@ -136,8 +163,29 @@ def _parse_date(value: Any) -> Optional[str]:
 
 
 def _extract_master_bl(text: str) -> Optional[str]:
-    sample = "\n".join(part for part in (_visual_section(text), _block_order_section(text)) if part)
+    sample = "\n".join(
+        part
+        for part in (
+            _visual_section(text),
+            _block_order_section(text),
+            _tagged_section(text, "OCR FULL PAGE BEST"),
+            text or "",
+        )
+        if part
+    )
+
+    carrier_ref = re.search(
+        r"CARRIER\s+REFERENCE\s+B\s*/?\s*L\.?\s*NO\.?(?:\s+PAGE)?(?P<body>.{0,220})",
+        sample,
+        re.I | re.S,
+    )
+    if carrier_ref:
+        for token in re.findall(r"\b[A-Z0-9][A-Z0-9-]{4,25}\b", carrier_ref.group("body").upper()):
+            if any(ch.isdigit() for ch in token) and is_likely_bl_number(token):
+                return token
+
     patterns = (
+        r"CARRIER\s+REFERENCE\s+B\s*/?\s*L\.?\s*NO\.?\s*(?:PAGE)?\s*(?P<bl>[A-Z0-9-]{5,25})",
         r"BILL\s+OF\s+LADING\s+NUMBER\s*(?:\n|\s)+(?:BILL\s+OF\s+LADING\s*)?(?P<bl>[A-Z0-9-]{5,25})",
         r"BILL\s+OF\s+LADING\s*(?:NO|NUMBER|#)\.?\s*[:\-]?\s*(?P<bl>[A-Z0-9-]{5,25})",
     )
@@ -145,7 +193,7 @@ def _extract_master_bl(text: str) -> Optional[str]:
         m = re.search(pattern, sample, re.I)
         if m:
             candidate = m.group("bl").strip().upper()
-            if _MASTER_BL_TOKEN_RE.fullmatch(candidate):
+            if _MASTER_BL_TOKEN_RE.fullmatch(candidate) and is_likely_bl_number(candidate):
                 return candidate
 
     bl = extract_bl_number_regex(sample)
@@ -158,8 +206,13 @@ def _extract_voyage(text: str, master_bl: Optional[str]) -> Optional[str]:
     for section in (_visual_section(text), _block_order_section(text), text or ""):
         m = re.search(r"VOYAGE\s+NUMBER\s*(?P<body>.{0,180})", section, re.I | re.S)
         if not m:
+            m = re.search(r"OCEAN\s+VESSEL\s*/\s*VOYAGE(?P<body>.{0,260})", section, re.I | re.S)
+        if not m:
+            slash = re.search(r"/\s*(?P<voyage>[A-Z0-9]{5,15})\b", section, re.I)
+            if slash:
+                return slash.group("voyage").upper()
             continue
-        for token in re.findall(r"\b(?=[A-Z0-9]*\d)[A-Z0-9]{5,12}\b", m.group("body"), re.I):
+        for token in re.findall(r"\b(?=[A-Z0-9]*\d)[A-Z0-9]{5,15}\b", m.group("body"), re.I):
             token = token.upper()
             if master_bl and token == master_bl.upper():
                 continue
@@ -173,6 +226,8 @@ def _clean_shipper_line(line: str, *, master_bl: Optional[str], voyage: Optional
     for token in (master_bl, voyage):
         if token:
             text = re.sub(rf"\b{re.escape(str(token))}\b", " ", text, flags=re.I)
+    text = re.sub(r"\([^)]*(?:COMPLETE\s+NAME|STREET\s+ADDRESS)[^)]*\)", " ", text, flags=re.I)
+    text = re.sub(r"\bCARRIER\s+REFERENCE\s+B\s*/?\s*L\.?\s*NO\.?\s*PAGE\b.*$", " ", text, flags=re.I)
     text = re.sub(r"\bCOPY\s+NON\s+NEGOTIABLE\b", " ", text, flags=re.I)
     text = re.sub(r"\bBILL\s+OF\s+LADING\s+NUMBER\b", " ", text, flags=re.I)
     text = re.sub(r"\bBILL\s+OF\s+LADING\b", " ", text, flags=re.I)
@@ -192,11 +247,8 @@ def _extract_shipper(text: str, master_bl: Optional[str], voyage: Optional[str])
         if not line:
             continue
         upper = line.upper()
-        if not address_parts and (
-            "TRANS PACIFIC CARGO" in upper
-            or "LIMITED" in upper
-            or re.search(r"\b(?:CO\.?,?\s*LTD|LTD\.?)\b", upper)
-        ):
+        is_address = upper.startswith("ADD:") or re.match(r"^\d", upper)
+        if not address_parts and not is_address:
             name_parts.append(line)
             continue
         address_parts.append(line)
@@ -208,30 +260,32 @@ def _extract_shipper(text: str, master_bl: Optional[str], voyage: Optional[str])
 
 def _party_from_lines(lines: List[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     cleaned: List[str] = []
-    contact: Optional[str] = None
+    contact_parts: List[str] = []
     for line in lines:
-        line = re.sub(r"\b(?:EXPORT\s+REFERENCES|Carrier not to be responsible for failure to notify)\b", " ", line, flags=re.I)
+        line = re.sub(r"\b(?:EXPORTER?\s+REFERENCES?|Carrier not to be responsible for failure to notify)\b", " ", line, flags=re.I)
+        line = re.sub(r"\([^)]*(?:NOT\s+NEGOTIABLE|COMPLETE\s+NAME|STREET\s+ADDRESS)[^)]*\)", " ", line, flags=re.I)
+        line = re.sub(r"\b(?:CONSIGNEE|NOTIFY\s+PARTY)\s+REFERENCE\b", " ", line, flags=re.I)
         line = _clean(line)
         if not line:
             continue
-        if re.search(r"\bTEL\.?|PHONE|FAX\b", line, re.I):
-            contact = _clean(line, 80)
+        if re.search(r"\bTEL\.?|PHONE|FAX|MOB|MOBILE|EMAIL|VAT\s+NO\b", line, re.I):
+            contact_parts.append(line)
             continue
         cleaned.append(line)
 
     if not cleaned:
-        return None, None, contact
+        return None, None, _clean(" | ".join(contact_parts), 160)
 
     name_parts: List[str] = []
     address_parts: List[str] = []
     for line in cleaned:
         upper = line.upper()
-        if not address_parts and (
-            "MARINE" in upper
-            or "ENGINEERING" in upper
-            or "MESCO" in upper
-            or "COMPANY" in upper
-        ):
+        is_address = (
+            upper.startswith("ADD:")
+            or re.match(r"^[\d-]", upper)
+            or any(token in upper for token in (" GIZA", " EGYPT", " ALEXANDRIA", "ST."))
+        )
+        if not address_parts and not is_address:
             name_parts.append(line)
             continue
         address_parts.append(line)
@@ -239,7 +293,7 @@ def _party_from_lines(lines: List[str]) -> Tuple[Optional[str], Optional[str], O
     if not name_parts:
         name_parts = cleaned[:1]
         address_parts = cleaned[1:]
-    return _clean(" ".join(name_parts), 120), _clean(", ".join(address_parts), 250), contact
+    return _clean(" ".join(name_parts), 120), _clean(", ".join(address_parts), 250), _clean(" | ".join(contact_parts), 160)
 
 
 def _extract_consignee(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -255,7 +309,7 @@ def _extract_consignee(text: str) -> Tuple[Optional[str], Optional[str], Optiona
 def _extract_notify(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     visual = _visual_section(text)
     m = re.search(
-        r"\bNOTIFY\s+PARTY[^\n]*\n(?P<body>.*?)(?=\bCARRIER\s*:|\bPRE\s+CARRIAGE\b)",
+        r"\bNOTIFY\s+PARTY[^\n]*\n(?P<body>.*?)(?=\bCARRIER\s*:|\bPRE[-\s]*CARRIAGE\b)",
         visual,
         re.I | re.S,
     )
@@ -343,6 +397,33 @@ def _extract_route_vessel(text: str) -> Tuple[Optional[str], Optional[str], Opti
             if parsed[0]:
                 return parsed
 
+    compact = re.sub(r"\s+", " ", visual).strip()
+    m_route = re.search(
+        r"OCEAN\s+VESSEL\s*/\s*VOYAGE\s+PORT\s+OF\s+LOADING\s+PORT\s+OF\s+DISCHARG\w*"
+        r"\s+PLACE\s+OF\s+DELIVERY\s+(?P<body>.+?)(?:BELOW\s+PARTICULARS|Container\s+Nos\.|$)",
+        compact,
+        re.I,
+    )
+    if m_route:
+        body = m_route.group("body")
+        m = re.search(
+            r"(?P<vessel>.+?)\s+"
+            r"(?P<origin>SHENZHEN\s*,?\s*CHINA|HONG\s+KONG|SHANGHAI\s*,?\s*CHINA|NINGBO\s*,?\s*CHINA|YANTIAN\s*,?\s*CHINA)"
+            r"\s+"
+            r"(?P<dest>ALEXANDRIA\s*,?\s*EGYPT|PORT\s+SAID\s*,?\s*EGYPT|DAMIETTA\s*,?\s*EGYPT)"
+            r"(?:\s+(?P<delivery>ALEXANDRIA\s*,?\s*EGYPT|PORT\s+SAID\s*,?\s*EGYPT|DAMIETTA\s*,?\s*EGYPT))?",
+            body,
+            re.I,
+        )
+        if m:
+            vessel = _clean(re.sub(r"/\s*[A-Z0-9]{5,15}\b", "", m.group("vessel")), 50)
+            return (
+                vessel,
+                _clean(m.group("origin"), 80),
+                _clean(m.group("dest"), 80),
+                _clean(m.group("delivery"), 120) or _clean(m.group("dest"), 120),
+            )
+
     m = re.search(
         r"VESSEL\s+PORT\s+OF\s+LOADING\s+PORT\s+OF\s+DISCHARGE[^\n]*\n"
         r"(?P<vessel>[A-Z][A-Z0-9 ]+?)\s+(?P<origin>[A-Z][A-Z ]{2,30})\s+"
@@ -370,6 +451,12 @@ def _extract_place_of_receipt(text: str) -> Optional[str]:
         visual,
         re.I,
     )
+    if not m:
+        m = re.search(
+            r"PRE[-\s]*CARRIAGE\s+BY[^\n]*PLACE\s+OF\s+RECEIPT[^\n]*\n+\s*([A-Z][A-Z ,]{2,50})\b",
+            visual,
+            re.I,
+        )
     if not m:
         return None
     candidate = re.sub(r"\bTHREE\b.*$", "", m.group(1), flags=re.I)
@@ -402,10 +489,33 @@ def _extract_container(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[in
     return container, packages, unit, gross, volume
 
 
+def _extract_loose_cargo_totals(text: str) -> Tuple[Optional[int], Optional[str], Optional[float], Optional[float]]:
+    patterns = (
+        r"SAID\s+TO\s+CONTAIN(?:E)?\s*:?\s*(?P<packages>\d+)\s*(?P<unit>[A-Z]{3,20})"
+        r"(?:\s+IN\s+TOTAL)?\s+(?P<gross>[\d,.]+)\s+(?P<volume>[\d,.]+)",
+        r"(?P<packages>\d+)\s*(?P<unit>CARTONS?|PACKAGES?|PALLETS?|BOXES?)\s+IN\s+TOTAL"
+        r"\s+(?P<gross>[\d,.]+)\s+(?P<volume>[\d,.]+)",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, text or "", re.I)
+        if not m:
+            continue
+        return (
+            int(m.group("packages")),
+            m.group("unit").upper(),
+            _parse_float(m.group("gross")),
+            _parse_float(m.group("volume")),
+        )
+    return None, None, None, None
+
+
 def _extract_no_of_originals(text: str) -> Optional[str]:
     m = re.search(r"NUMBER\s+OF\s+ORIGINAL\s+BILLS\s+OF\s+LADING[^\n]*\n[^\n]*\b(\d+)\b", text, re.I)
     if m:
         return m.group(1)
+    m = re.search(r"\bZERO\s*\(\s*0\s*\)", text, re.I)
+    if m:
+        return "0"
     m = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE)\s*\((\d+)\)", text, re.I)
     return m.group(2) if m else None
 
@@ -419,11 +529,22 @@ def _extract_issue(text: str) -> Tuple[Optional[str], Optional[str]]:
     )
     if m:
         return _clean(m.group("place"), 80), _parse_date(m.group("date"))
+    m = re.search(
+        r"PLACE\s+AND\s+DATE\s+OF\s+ISSUE\s+(?P<place>[A-Z][A-Z ,]{2,60})\s+"
+        r"(?P<date>\d{4}-\d{2}-\d{2})",
+        text,
+        re.I,
+    )
+    if m:
+        return _clean(m.group("place"), 80), _parse_date(m.group("date"))
     return None, None
 
 
 def _extract_shipped_on_board(text: str) -> Optional[str]:
     m = re.search(r"Shipped\s+on\s+Board[^\n]*?\b(\d{1,2}[-\s][A-Z]{3,9}[-\s]\d{4})", text, re.I)
+    if m:
+        return _parse_date(m.group(1))
+    m = re.search(r"LADEN\s+ON\s+BOARD\s+DATE[^\n]*?\b(\d{4}-\d{2}-\d{2})", text, re.I | re.S)
     return _parse_date(m.group(1)) if m else None
 
 
@@ -433,10 +554,15 @@ def _extract_issuing_agent(text: str) -> Optional[str]:
 
 
 def _extract_shipping_line(text: str) -> Optional[str]:
+    m = re.search(r"\bCARRIER\s*:\s*([A-Z][A-Z0-9 .,&'-]{3,80})", text or "", re.I)
+    if m:
+        carrier = _clean(m.group(1), 120)
+        if carrier and re.search(r"\bCMA\s+CGM\b", carrier, re.I):
+            return "CMA CGM"
+        return carrier
     if re.search(r"\bCMA\s+CGM\b", text or "", re.I):
         return "CMA CGM"
-    m = re.search(r"\bCARRIER\s*:\s*([A-Z][A-Z0-9 .,&'-]{3,80})", text or "", re.I)
-    return _clean(m.group(1), 120) if m else None
+    return None
 
 
 def _extract_hs_codes(text: str) -> Optional[str]:
@@ -476,6 +602,10 @@ def _extract_nafeza_fields(text: str) -> Dict[str, str]:
     )
     if importer:
         fields["mesco_importerstaxno"] = importer.group(1)
+    else:
+        vat = re.search(r"\bVAT\s+NO\.?\s*:?\s*(\d{6,15})\b", source, re.I)
+        if vat:
+            fields["mesco_importerstaxno"] = vat.group(1)
 
     reg_type = re.search(
         r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+REGISTRATION\s+TYPE\s*:?\s*([A-Z][A-Z ]{2,40})",
@@ -496,6 +626,11 @@ def _extract_nafeza_fields(text: str) -> Dict[str, str]:
     )
     if foreign_id:
         fields["mesco_foreignsupplierregistrationnumber"] = foreign_id.group(1).upper()
+    else:
+        vat_foreign = re.search(r"\bVAT\s+NO\.?\s*:?\s*([A-Z]{2}-[A-Z0-9-]{5,30})", source, re.I)
+        if vat_foreign:
+            fields["mesco_foreignsupplierregistrationnumber"] = vat_foreign.group(1).upper()
+            fields.setdefault("mesco_typeofregistrationnumber", "Tax Number")
 
     foreign_country = re.search(
         r"\bFOREIGN\s+(?:FREIGHT\s+FORWARDER|EXPORTER|SUPPLIER)\s+COUNTRY\s*:?\s*([A-Z][A-Z ]{1,40})",
@@ -523,6 +658,12 @@ def _infer_shipper_country(shipper_address: Optional[str], origin: Optional[str]
 
 def _extract_freight_terms(text: str) -> Dict[str, Any]:
     upper = (text or "").upper()
+    if re.search(r"FREIGHT\s+PAYABLE\s+AT.{0,100}\bCOLLECT\b", upper, re.S):
+        return {
+            "mesco_pcfreightterm": "COLLECT",
+            "mesco_freightpayableat": "Destination",
+            "mesco_bookingterm": 886150001,
+        }
     if re.search(r"\bFREIGHT\s+COLLECT\b", upper):
         return {
             "mesco_pcfreightterm": "COLLECT",
@@ -572,12 +713,15 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
     vessel, origin, destination, delivery = _extract_route_vessel(text)
     place_receipt = _extract_place_of_receipt(text)
     container, packages, package_unit, gross, volume = _extract_container(text)
+    if packages is None:
+        packages, package_unit, gross, volume = _extract_loose_cargo_totals(text)
     place_of_issue, date_of_issue = _extract_issue(text)
     shipped_on_board = _extract_shipped_on_board(text)
     acid = extract_acid_regex(text)
     hs_codes = _extract_hs_codes(text)
     nafeza_fields = _extract_nafeza_fields(text)
     freight_fields = _extract_freight_terms(text)
+    is_lcl = bool(re.search(r"\b(?:CFS\s*/\s*CFS|LCL|CONSOLIDATED\s+CARGO)\b", text, re.I))
 
     record: Dict[str, Any] = {
         "document_type": "Bill of Lading",
@@ -585,10 +729,12 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
         "mesco_masterblno": master_bl,
         "mesco_bookingnumber": master_bl,
         "mesco_transporttype": 300000000,
-        "mesco_loadtype": 300000001 if re.search(r"\bCONSOLIDATED\s+CARGO\b", text, re.I) else 300000000,
+        "mesco_loadtype": 300000001 if is_lcl else 300000000,
         "mesco_consolidation": bool(re.search(r"\bCONSOLIDATED\s+CARGO\b", text, re.I)),
     }
     record.update(freight_fields)
+    if re.search(r"\bTELEX\s+RELEASE\b", text, re.I):
+        record["mesco_telexrelease"] = True
 
     if shipper:
         record["mesco_shippernamecontactno"] = shipper
@@ -606,8 +752,6 @@ def parse_standard_master_bl(text: str) -> Optional[Dict[str, Any]]:
         record["mesco_notify1"] = notify
     if notify_address:
         record["mesco_notifyaddress"] = notify_address
-    if notify_contact:
-        record["mesco_notifycontactnumber"] = notify_contact
     if vessel:
         record["mesco_vessel"] = vessel
     if voyage:

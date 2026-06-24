@@ -19,14 +19,47 @@ def _page1_text(raw_text: str) -> str:
     return pages[1] if len(pages) > 1 else (raw_text or "")
 
 
+def _tagged_section(text: str, tag: str) -> str:
+    pattern = rf"\[{re.escape(tag)}\]\s*(.*?)(?=\n\[[^\]\n]{{3,80}}\]|\Z)"
+    m = re.search(pattern, text or "", re.I | re.S)
+    return m.group(1) if m else ""
+
+
+def _section_looks_readable(section: str) -> bool:
+    if not section or len(section.strip()) < 80:
+        return False
+    upper = section.upper()
+    hits = sum(
+        1
+        for marker in (
+            "BILL OF LADING",
+            "SHIPPER",
+            "CONSIGNEE",
+            "NOTIFY",
+            "PORT OF LOADING",
+            "DESCRIPTION OF GOODS",
+            "SAID TO CONTAIN",
+            "HS CODE",
+        )
+        if marker in upper
+    )
+    return hits >= 2
+
+
 def _visual_page_text(raw_text: str, page_index: int = 1) -> str:
     """Prefer [VISUAL WORD ORDER] section (reading order) over block-order OCR."""
     pages = re.split(r"---\s*PAGE\s*\d+\s*---", raw_text or "", flags=re.I)
     if page_index < 1 or page_index >= len(pages):
         return pages[1] if len(pages) > 1 else (raw_text or "")
     body = pages[page_index]
-    m = re.search(r"\[VISUAL WORD ORDER\](.*?)(?=\[BLOCK ORDER\]|$)", body, re.S | re.I)
-    return m.group(1) if m else body
+    visual = _tagged_section(body, "VISUAL WORD ORDER")
+    if _section_looks_readable(visual):
+        return visual
+    for tag in ("OCR FULL PAGE BEST", "OCR BODY PSM4", "OCR HEADER PSM6", "BLOCK ORDER"):
+        candidate = _tagged_section(body, tag)
+        if _section_looks_readable(candidate):
+            return candidate
+    return visual or body
 
 
 def _is_mtd_document(text: str) -> bool:
@@ -62,11 +95,13 @@ _CARGO_LINE_STOP_RE = re.compile(
     r"^(CONSOLIDATED CARGO|CARGO IN TRANSIT|FOREIGN EXPORTER|EGYPTIAN FREIGHT|FOREIGN FREIGHT|"
     r"REGISTRATION TYPE|PARTICULARS OF GOODS|Continued on Next Sheet|Continued From Previous|"
     r"ABOVE PARTICULARS|SAY ONE HUNDRED|SAY \w+ HUNDRED|Shipped on Board|Weight in Kgs Total|"
-    r"SIGNED FOR THE CARRIER|FREIGHT AND CHARGES|SHIPPED ON BOARD)",
+    r"SIGNED FOR THE CARRIER|FREIGHT AND CHARGES|SHIPPED ON BOARD|ACID\s*:|TELEX\s+RELEASE|"
+    r"REVENUE TONS|SERVICE MODE|RECEIVED BY THE CARRIER|CHARGE RATE|TOTAL PREPAID|"
+    r"PLACE AND DATE OF ISSUE|LADEN ON BOARD DATE)",
     re.I,
 )
 _CARGO_LINE_SKIP_RE = re.compile(
-    r"^(MARKS AND|CONTAINER AND|NO AND KIND|DESCRIPTION OF PACKAGES|DESCRIPTIONS OF GOODS|"
+    r"^(\[[^\]]+\]|MARKS AND|CONTAINER AND|NO AND KIND|DESCRIPTION OF PACKAGES|DESCRIPTIONS OF GOODS|"
     r"NUMBER OF PACKAGES|GROSS WEIGHT|TARE|MEASUREMENT|SHIPPER'?S LOAD|SAID TO CONTAIN|"
     r"VOYAGE|BILL OF LADING|PRE CARRIAGE|VESSEL|PORT OF LOADING|"
     r"PORT OF DISCHARGE|FINAL PLACE|COPY NON|BILL OF LADING NUMBER|"
@@ -430,7 +465,9 @@ def _extract_standard_cargo_description(text: str) -> Optional[str]:
         start = 0
         m = re.search(
             r"(?:SEAL\s+NO\s*:?\s*\d+\s*\n|SEAL\s+[A-Z0-9]+\s*\n|"
-            r"SAID TO CONTAIN CARGO\s*\n|N/M\s+|\d+\s+PALLETS?\s*\n)",
+            r"SAID TO CONTAIN(?:E)?(?:\s+CARGO)?\s*:?[^\n]*\n|"
+            r"\d+\s*(?:CARTONS?|PACKAGES?|PALLETS?)\s+IN\s+TOTAL[^\n]*\n|"
+            r"N/M\s+|\d+\s+PALLETS?\s*\n)",
             body,
             re.I,
         )
@@ -1023,6 +1060,13 @@ def _clean_issuing_agent_name(name: str) -> Optional[str]:
     cleaned = re.sub(r"\s+", " ", (name or "")).strip(" .,-|")
     cleaned = re.sub(r"^(?:FOR|THE)\s+", "", cleaned, flags=re.I).strip()
     if not cleaned or len(cleaned) < 6:
+        return None
+    if re.search(
+        r"\b(?:LOSS\s+OF|DAMAGE\s+TO\s+THE\s+GOODS|GOODS\s+SHALL\s+BE|"
+        r"LIABILITY|CARRIAGE|MERCHANT|CLAUSE|CONTRACT|COURTS?)\b",
+        cleaned,
+        re.I,
+    ):
         return None
     if _DESTINATION_AGENT_RE.search(cleaned):
         return None

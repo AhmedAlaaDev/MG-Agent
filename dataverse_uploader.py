@@ -1806,17 +1806,78 @@ def _get_master_candidate_row(
     )
 
 
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if not s2:
+        return len(s1)
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def _generate_voyage_candidates(voyage: str) -> List[str]:
+    if not voyage:
+        return []
+    voyage_upper = voyage.strip().upper()
+    candidates = {voyage_upper}
+
+    def add_variations(v: str):
+        candidates.add(v)
+        # Swap O and 0
+        v_swap_o_to_0 = v.replace("O", "0")
+        candidates.add(v_swap_o_to_0)
+        v_swap_0_to_o = v.replace("0", "O")
+        candidates.add(v_swap_0_to_o)
+        
+        # Remove common OCR insertions like "OW" -> "W", "0W" -> "W" after a digit
+        for prefix in ["O", "0"]:
+            if f"{prefix}W" in v:
+                v_no_ow = v.replace(f"{prefix}W", "W")
+                candidates.add(v_no_ow)
+                candidates.add(v_no_ow.replace("O", "0"))
+                candidates.add(v_no_ow.replace("0", "O"))
+                
+    add_variations(voyage_upper)
+    
+    # Also do a version where we replace all O with 0 first and then clean f"{prefix}W"
+    v_clean = voyage_upper.replace("O", "0")
+    if "0W" in v_clean:
+        v_no_w = v_clean.replace("0W", "W")
+        candidates.add(v_no_w)
+        candidates.add(v_no_w.replace("0", "O"))
+
+    return sorted(list(candidates))
+
+
 def _master_candidate_rows_by_voyage(
     client: DataverseClientService,
     voyage: Any,
 ) -> List[Dict[str, Any]]:
-    safe = _odata_escape(str(voyage or "").strip())
-    if not safe:
+    voyage_str = str(voyage or "").strip()
+    if not voyage_str:
         return []
+    candidates = _generate_voyage_candidates(voyage_str)
+    escaped = []
+    for c in candidates:
+        safe_c = _odata_escape(c)
+        if safe_c:
+            escaped.append(safe_c)
+    if not escaped:
+        return []
+    voyage_clauses = [f"mesco_voytruckno eq '{c}'" for c in escaped]
+    voyage_or_clause = f"({ ' or '.join(voyage_clauses) })"
     return _query_many(
         client,
         _ENTITY,
-        f"mesco_bltype eq {_MASTER_BL_TYPE} and mesco_voytruckno eq '{safe}'",
+        f"mesco_bltype eq {_MASTER_BL_TYPE} and {voyage_or_clause}",
         _MASTER_MATCH_SELECT,
         top=25,
     )
@@ -1839,9 +1900,18 @@ def _score_master_match(
     if payload_vessel and row_vessel and payload_vessel == row_vessel:
         score += 2
         reasons.append("vessel")
-    if payload_voyage and row_voyage and payload_voyage == row_voyage:
-        score += 3
-        reasons.append("voyage")
+    if payload_voyage and row_voyage:
+        is_match = False
+        if payload_voyage == row_voyage:
+            is_match = True
+        else:
+            dist = _levenshtein_distance(payload_voyage, row_voyage)
+            max_len = max(len(payload_voyage), len(row_voyage))
+            if dist <= 2 and (dist / max_len) < 0.3:
+                is_match = True
+        if is_match:
+            score += 3
+            reasons.append("voyage")
 
     if row_id and str(row_id) in container_master_ids:
         score += 4
@@ -1881,10 +1951,21 @@ def _candidate_rows_by_voyage(
     bltype: int,
     orphan_house: bool = False,
 ) -> List[Dict[str, Any]]:
-    safe = _odata_escape(str(voyage or "").strip())
-    if not safe:
+    voyage_str = str(voyage or "").strip()
+    if not voyage_str:
         return []
-    clauses = [f"mesco_bltype eq {bltype}", f"mesco_voytruckno eq '{safe}'"]
+    candidates = _generate_voyage_candidates(voyage_str)
+    escaped = []
+    for c in candidates:
+        safe_c = _odata_escape(c)
+        if safe_c:
+            escaped.append(safe_c)
+    if not escaped:
+        return []
+    voyage_clauses = [f"mesco_voytruckno eq '{c}'" for c in escaped]
+    voyage_or_clause = f"({ ' or '.join(voyage_clauses) })"
+    
+    clauses = [f"mesco_bltype eq {bltype}", voyage_or_clause]
     if orphan_house:
         clauses.append(f"{_OP_PARENT_MASTER_VALUE_FIELD} eq null")
     return _query_many(client, _ENTITY, " and ".join(clauses), _SHIPMENT_MATCH_SELECT, top=50)
@@ -1910,9 +1991,18 @@ def _score_shipment_match(
 
     payload_voyage = _norm_match_text(payload.get("mesco_voytruckno"))
     row_voyage = _norm_match_text(row.get("mesco_voytruckno"))
-    if payload_voyage and row_voyage and payload_voyage == row_voyage:
-        score += 3
-        reasons.append("voyage")
+    if payload_voyage and row_voyage:
+        is_match = False
+        if payload_voyage == row_voyage:
+            is_match = True
+        else:
+            dist = _levenshtein_distance(payload_voyage, row_voyage)
+            max_len = max(len(payload_voyage), len(row_voyage))
+            if dist <= 2 and (dist / max_len) < 0.3:
+                is_match = True
+        if is_match:
+            score += 3
+            reasons.append("voyage")
 
     if row_id and row_id in container_candidate_ids:
         score += 4
@@ -3132,11 +3222,10 @@ def upload_crm_json(
             "mesco_shippingline",
         )
         if standalone_parent_shippingline_bind:
-            _inherit_lookup_bind(
-                payload,
-                "mesco_shippingline",
-                standalone_parent_shippingline_bind,
-            )
+            nav_key = _NAV_PROPERTY_MAP.get("mesco_shippingline", "mesco_shippingline")
+            payload[_lookup_bind_key(nav_key)] = standalone_parent_shippingline_bind
+            payload.pop("mesco_shippingline", None)
+            payload.pop(nav_key, None)
         _inherit_master_date_fields(
             payload,
             _get_operation_fields(
@@ -3182,7 +3271,7 @@ def upload_crm_json(
                     containers,
                 )
             if parent_master_id:
-                if not standalone_parent_shippingline_bind and not standalone_had_shippingline:
+                if not standalone_parent_shippingline_bind:
                     standalone_parent_shippingline_bind = _get_operation_lookup_bind(
                         client,
                         parent_master_id,
@@ -3231,7 +3320,7 @@ def upload_crm_json(
     # Read it back so the response reflects the real parent.
     if is_standalone_house and not parent_master_id:
         parent_master_id = _get_operation_parent(client, master_id)
-        if parent_master_id and not standalone_had_shippingline:
+        if parent_master_id:
             standalone_parent_shippingline_bind = _get_operation_lookup_bind(
                 client,
                 parent_master_id,
