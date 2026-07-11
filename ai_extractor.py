@@ -271,6 +271,10 @@ suffix noise. Use null when not confidently present.
   bottom. NEVER the destination delivery agent (MESCO / "MARINE & ENGINEERING SERVICES
   COMPANY" at "Destination Agent Address"), NEVER the shipper, consignee, or notify party,
   and NEVER the ocean vessel operator unless they are clearly the document issuer.
+  On TP Cargo / TPALX house B/L forms, "CARRIER: TRANS PACIFIC CARGO LIMITED
+  (SHENZHEN)" and the TP CARGO logo identify the issuing NVOCC/agent. Set
+  mesco_agent = "TRANS PACIFIC CARGO LIMITED (SHENZHEN)" for those forms, not MESCO
+  and not the ocean shipping line.
 - mesco_incoterm: the 3-letter Incoterm code only (CIF, CFR, FOB, EXW, FCA, DAP, DDP,
   CPT, CIP). Strip any trailing place ("CIF ALEXANDRIA" -> "CIF").
 - Container number: 4 letters + 6 digits + check digit. Preserve full form; OCR slash
@@ -289,6 +293,14 @@ suffix noise. Use null when not confidently present.
   origin — as one coherent mesco_cargodescription (dedupe repeated lines).
 - Weights/CBM: from the goods table on the same page (or continuation pages for one B/L).
 - Vessel/voyage: split correctly. Port of loading -> mesco_origin; discharge -> mesco_destination.
+- House/Master linking evidence: if a House B/L does NOT print the Master B/L
+  number, do not invent one. Instead preserve every shared join key visible:
+  container_number, seal_number, containers[], mesco_vessel, mesco_voytruckno,
+  mesco_origin, mesco_destination, mesco_etdorigin / shipped-on-board / laden
+  date, booking number, PO/customer reference. Example: a COSCO master and TP
+  Cargo house can be linked by CSNU6873347/CW794147 + CMA CGM SAO PAULO /
+  0BEN9W1MA + Shanghai -> Alexandria + 16 Mar 2026 even when the HBL omits
+  COSU6446151350.
 - Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
   Downstream rules map Prepaid→Freehand booking + Origin payable; Collect→Nomination + Destination.
 - mesco_loadtype: choose FCL (300000000) vs LCL (300000001) by shipment meaning — LCL for
@@ -536,17 +548,38 @@ def _call_gemini_json(
         except Exception:
             contents = user
 
-    response = client.models.generate_content(
-        model=effective_llm_model(),
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=combined_system,
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-    )
+    def _generate(payload: Any):
+        return client.models.generate_content(
+            model=effective_llm_model(),
+            contents=payload,
+            config=types.GenerateContentConfig(
+                system_instruction=combined_system,
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+        )
+
+    response = _generate(contents)
     content = (response.text or "").strip()
-    return _parse_json_response(content, "Gemini")
+    try:
+        return _parse_json_response(content, "Gemini")
+    except ValueError:
+        retry_note = (
+            "\n\nSTRICT RETRY: return exactly one JSON object matching the schema. "
+            "Do not include markdown, explanations, duplicate JSON objects, or trailing text."
+        )
+        retry_contents = contents
+        if isinstance(contents, list) and contents:
+            retry_contents = list(contents)
+            if isinstance(retry_contents[-1], str):
+                retry_contents[-1] = retry_contents[-1] + retry_note
+            else:
+                retry_contents.append(retry_note)
+        elif isinstance(contents, str):
+            retry_contents = contents + retry_note
+        response = _generate(retry_contents)
+        content = (response.text or "").strip()
+        return _parse_json_response(content, "Gemini")
 
 
 def _call_llm_json(

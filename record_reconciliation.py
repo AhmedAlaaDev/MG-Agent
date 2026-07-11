@@ -11,8 +11,8 @@ def _has(val: Any) -> bool:
 
 
 def _bl_key(rec: Dict[str, Any]) -> str:
-    bl = rec.get("mesco_masterblno") or rec.get("mesco_houseblno") or ""
-    return re.sub(r"\D", "", str(bl).upper())
+    bl = rec.get("mesco_houseblno") or rec.get("mesco_masterblno") or ""
+    return re.sub(r"[^A-Z0-9]+", "", str(bl).upper())
 
 
 def dedupe_records_by_bl(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -69,6 +69,8 @@ def merge_record_fields(
 def reconcile_record_lists(
     azure_records: List[Dict[str, Any]],
     fallback_records: List[Dict[str, Any]],
+    *,
+    prefer_fallback_keys: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Combine Azure interpretation with deterministic fallbacks.
@@ -90,7 +92,13 @@ def reconcile_record_lists(
         fb = fallback_by_bl.get(key) if key else None
         if fb:
             used_fallback.add(key)
-            merged.append(merge_record_fields(az, fb))
+            merged.append(
+                merge_record_fields(
+                    az,
+                    fb,
+                    prefer_secondary_keys=prefer_fallback_keys,
+                )
+            )
         else:
             merged.append(az)
 

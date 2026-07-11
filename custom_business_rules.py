@@ -18,6 +18,7 @@ from config import settings
 
 LCL_LOAD_TYPE = 300000001
 FCL_LOAD_TYPE = 300000000
+HOUSE_BL_TYPE = 886150002
 BOOKING_FREEHAND = "Freehand"
 BOOKING_NOMINATION = "Nomination"
 FREIGHT_AT_ORIGIN = "Origin"
@@ -321,6 +322,10 @@ def _nested_houses(crm_output: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [h for h in nested if isinstance(h, dict)]
 
 
+def _is_house_operation(data: Dict[str, Any]) -> bool:
+    return str(data.get("mesco_bltype") or "") == str(HOUSE_BL_TYPE)
+
+
 def apply_crm_payload_rules(
     crm_output: Dict[str, Any],
     *,
@@ -335,7 +340,7 @@ def apply_crm_payload_rules(
         return crm_output
 
     nested = _nested_houses(crm_output)
-    is_standalone_house = not nested and bool(crm_output.get("mesco_masterblno"))
+    is_standalone_house = not nested and _is_house_operation(crm_output)
 
     if house_records and len(house_records) > 1:
         reconcile_master_totals_from_houses(

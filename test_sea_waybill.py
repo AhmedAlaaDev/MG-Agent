@@ -74,9 +74,104 @@ NON-NEGOTIABLE SEA WAY BILL OF LADING
 ARKAS DENIZCILIK VE NAKLIYAT A.S.
 """
 
+COSCO_SAMPLE = """
+--- PAGE 1 ---
+[VISUAL WORD ORDER]
+SEA WAYBILL
+NON-NEGOTIABLE SEA WAYBILL FOR COMBINED TRANSPORT OR PORT TO PORT
+1. Shipper Insert Name Address and Phone/Fax Booking No. Sea Waybill No.
+TRANS PACIFIC CARGO 6446151350 COSU6446151350
+LIMITED(SHENZHEN)
+Export References
+2701 SHENNAN 1001,SHENNAN EAST
+CSO/AGREEMENT NUMBER 00178711
+ROAD,LUOHU DISTRICT,SHENZHEN,CHINA*
+EG ACID# 2979239001005510049
+EG IMP VAT# 297923900
+2. Consignee Insert Name Address and Phone/Fax
+MARINE&ENGINEERING SERVICES
+COMPANY - MESCO
+8 PATRICE LUMUMBA ST.BAB SHARQ
+ALEXANDRIA - EGYPT
+4. Combined Transport * Pre-Carriage by 5. Combined Transport * Place of Receipt
+SHANGHAI CHINA
+6. Ocean Vessel Voy. No. 7. Port of Loading Service Contract No. Doc. Form No.
+CMA CGM SAO PAULO 0BEN9W1MA SHANGHAI/CHINA 2
+8. Port of Discharge 9. Combined Transport * Place of Delivery Type of Movement
+ALEXANDRIA/EGYPT ALEXANDRIA,EGYPT FCL / FCL CY-FO
+N/M 307 0.7MM WELDING WIRE 21572.300KGS 59.9670CBM
+PACKAGES HS CODE: 72173010
+CONSOLIDATED CARGO
+CARGO IN TRANSIT TO MERGHEM
+BONDED WAREHOUSE ON
+MERCHANT'S ACCOUNT AND RISK
+ACID:2979239001005510049
+** TO BE CONTINUED ON ATTACHED LIST **
+Date Laden on Board 16 MAR 2026
+9805 Date of Issue 16 MAR 2026 Place of Issue SHANGHAI Signed for the Carrier, COSCO SHIPPING LINES CO.,LTD.
+
+[BLOCK ORDER]
+SEA WAYBILL
+NON-NEGOTIABLE SEA WAYBILL FOR COMBINED TRANSPORT OR PORT TO PORT
+1. Shipper Insert Name Address and Phone/Fax
+TRANS PACIFIC CARGO
+LIMITED(SHENZHEN)
+2701 SHENNAN 1001,SHENNAN EAST
+ROAD,LUOHU DISTRICT,SHENZHEN,CHINA*
+Sea Waybill No.
+COSU6446151350
+Booking No.
+6446151350
+Export References
+EG ACID# 2979239001005510049
+EG IMP VAT# 297923900
+2. Consignee Insert Name Address and Phone/Fax
+MARINE&ENGINEERING SERVICES
+COMPANY - MESCO
+8 PATRICE LUMUMBA ST.BAB SHARQ
+ALEXANDRIA - EGYPT
+6. Ocean Vessel Voy. No.
+CMA CGM SAO PAULO 0BEN9W1MA
+7. Port of Loading
+SHANGHAI/CHINA
+Service Contract No.
+Doc. Form No.
+2
+8. Port of Discharge
+ALEXANDRIA/EGYPT
+9. Combined Transport * Place of Delivery
+ALEXANDRIA,EGYPT
+Type of Movement
+FCL / FCL CY-FO
+N/M 307 0.7MM WELDING WIRE 21572.300KGS 59.9670CBM
+PACKAGES HS CODE: 72173010
+CONSOLIDATED CARGO
+** TO BE CONTINUED ON ATTACHED LIST **
+COSCO SHIPPING LINES CO.,LTD.
+"""
+
 
 def test_detects_consolidation_sea_waybill():
     assert is_consolidation_sea_waybill(ARKAS_SAMPLE)
+    assert is_consolidation_sea_waybill(COSCO_SAMPLE)
+
+
+def test_parses_cosco_consolidated_sea_waybill_without_llm():
+    rec = parse_consolidation_sea_waybill(COSCO_SAMPLE)
+    assert rec
+    assert rec["mesco_masterblno"] == "COSU6446151350"
+    assert rec["mesco_bookingnumber"] == "6446151350"
+    assert rec["mesco_shippernamecontactno"] == "TRANS PACIFIC CARGO LIMITED(SHENZHEN)"
+    assert rec["mesco_vessel"] == "CMA CGM SAO PAULO"
+    assert rec["mesco_voytruckno"] == "0BEN9W1MA"
+    assert rec["mesco_origin"] == "SHANGHAI, CHINA"
+    assert rec["mesco_destination"] == "ALEXANDRIA, EGYPT"
+    assert rec["cr401_totalpackages"] == 307
+    assert rec["cr401_totalgrossweight"] == 21572.3
+    assert rec["cr401_totalvolume"] == 59.967
+    assert rec["mesco_acidnumber"] == "2979239001005510049"
+    assert rec["mesco_shippingline"] == "COSCO SHIPPING LINES CO.,LTD."
+    assert "0.7MM WELDING WIRE" in rec["mesco_cargodescription"]
 
 
 def test_parses_arkas_master_fields():

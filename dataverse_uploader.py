@@ -64,12 +64,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from dataverse.client_service import DataverseClientService, RetryConfig
 from dataverse_field_limits import limit_for as _registry_limit_for
 from dataverse_metadata import is_option_set_field, resolve_option_value
 from crm_output_formatter import (
+    ensure_stc_cargo_description,
     infer_package_unit_label,
     is_house_bl_type,
     prepare_standalone_house_upload,
@@ -84,6 +85,8 @@ _CARGO_ENTITY     = "mesco_cargos"
 # mesco_bltype option-set values (master vs house operation).
 _MASTER_BL_TYPE = 886150001
 _HOUSE_BL_TYPE  = 886150002
+_SAME_AS_CONSIGNEE_LOOKUP_NAME = "Same As Consignee"
+_SAME_AS_CONSIGNEE_RE = re.compile(r"\bSAME\s+AS\s+(?:CONSIGNEE|CNEE)\b", re.I)
 
 # Lookup *value* columns used by duplicate-detection $filter queries.
 _OP_PARENT_MASTER_VALUE_FIELD = "_mesco_operation_value"
@@ -344,6 +347,10 @@ _ENTITY_SCHEMAS: Dict[str, _EntitySchema] = {
             "mesco_placeofissue",
             "mesco_houseblno",
             "mesco_shippedonboarddate",
+            # Cargo-only package unit lookup.  Standard house B/L extraction
+            # keeps it on the source record so it can be copied into the nested
+            # cargo row, but mesco_operation itself has no such property.
+            "mesco_umpackages",
             # Internal pipeline markers
             "source_extraction_method",
             # Nested relation keys — handled as separate POST calls, not fields
@@ -563,6 +570,7 @@ _NAME_FIELDS_BY_ENTITY: Dict[str, List[str]] = {
     "xollsp_unitsofmeasure": ["xollsp_name", "name"],
     "mesco_operation":       ["mesco_code", "mesco_name", "name"],
     "mesco_containerno":     ["mesco_containerno"],
+    "mesco_warehouse":       ["mesco_name", "mesco_warehouse", "mesco_code", "name"],
 }
 
 # Per-upload cache: (entity logical name, normalized label) → GUID or None
@@ -589,6 +597,10 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "AL KAYAN",
             "AL KAYAN FOR IMPORT",
         ],
+        "NILE TRADING COMPANY": [
+            "NILE TRADING",
+            "NILE TRADING CO",
+        ],
     },
     "mesco_shippingline": {
         "EVERGREEN MARINE (ASIA) PTE. LTD.": [
@@ -602,8 +614,38 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "EVERGREEN",
             "EMC",
         ],
+        "COSCO SHIPPING LINES CO.,LTD.": [
+            "COSCO",
+            "COSCO SHIPPING",
+            "COSCO SHIPPING LINES",
+            "COSCO SHIPPING LINE",
+            "COSCO SHIPPING LINES CO LTD",
+        ],
+        "COSCO SHIPPING LINES CO LTD": [
+            "COSCO",
+            "COSCO SHIPPING",
+            "COSCO SHIPPING LINES",
+            "COSCO SHIPPING LINE",
+        ],
+        "ARKAS DENIZCILIK VE NAKLIYAT A.S.": [
+            "ARKAS",
+            "ARKAS LINE",
+            "ARKAS DENIZCILIK",
+            "ARKAS DENIZCILIK VE NAKLIYAT",
+        ],
     },
     "mesco_agent": {
+        "TRANS PACIFIC CARGO LIMITED (SHENZHEN)": [
+            "TP CARGO",
+            "TRANS PACIFIC CARGO",
+            "TRANS PACIFIC CARGO LIMITED",
+            "TRANS PACIFIC",
+        ],
+        "TP CARGO": [
+            "TRANS PACIFIC CARGO LIMITED (SHENZHEN)",
+            "TRANS PACIFIC CARGO",
+            "TRANS PACIFIC CARGO LIMITED",
+        ],
         "BYTEPORT LOGISTICS TECHNOLOGIES PRIVATE LIMITED": [
             "BYTEPORT LOGISTICS",
             "BYTEPORT",
@@ -627,6 +669,13 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
         "CRATES": ["CRATE", "CRATES"],
         "BUNDLES": ["BUNDLE", "BUNDLES"],
         "CANS": ["CAN", "CANS"],
+    },
+    "mesco_warehouse": {
+        "MERGHEM": [
+            "MERGHEM",
+            "MERGHEM BONDED WAREHOUSE",
+            "WAREHOUSE MERGHEM",
+        ],
     },
 }
 
@@ -696,7 +745,7 @@ def _sanitize_cargo_quantity(
 
 
 def _normalize_container_number(value: str) -> str:
-    return re.sub(r"\s+", "", (value or "").strip()).upper()
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").strip().upper())
 
 
 _MONTHS = {
@@ -832,6 +881,11 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
             add(label)
 
     if logical_name == "mesco_agent":
+        if "TRANS PACIFIC" in upper or "TP CARGO" in upper or "TPALX" in upper:
+            add("TRANS PACIFIC CARGO LIMITED (SHENZHEN)")
+            add("TP CARGO")
+            add("TRANS PACIFIC CARGO")
+            add("TRANS PACIFIC CARGO LIMITED")
         if "BYTEPORT" in upper:
             add("BYTEPORT LOGISTICS")
             add("BYTEPORT")
@@ -840,6 +894,15 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
 
     if logical_name == "account":
         tokens = [t for t in re.split(r"\W+", base) if len(t) >= 3]
+        suffix_re = re.compile(
+            r"\b(?:COMPANY|CO|CO\.|LTD|LTD\.|LIMITED|LLC|L\.L\.C|INC|"
+            r"CORPORATION|CORP|PRIVATE|PVT|S\.A\.E|S\.A|S\.P\.A)\b\.?",
+            re.I,
+        )
+        without_suffix = suffix_re.sub(" ", base)
+        without_suffix = re.sub(r"\s+", " ", without_suffix).strip(" ,.-")
+        if without_suffix and _normalize_lookup_label(without_suffix) != _normalize_lookup_label(base):
+            add(without_suffix)
         if len(tokens) >= 2:
             add(" ".join(tokens[:3]))
             add(" ".join(tokens[:2]))
@@ -1206,6 +1269,8 @@ def _preprocess_payload(
         # --- Lookup field ---
         if key in lookups and isinstance(value, str):
             target_logical = lookups[key]
+            if key == "mesco_notify1" and _SAME_AS_CONSIGNEE_RE.search(value):
+                value = _SAME_AS_CONSIGNEE_LOOKUP_NAME
             if client:
                 if target_logical == "mesco_containerno":
                     guid = _resolve_containerno_lookup(
@@ -1412,7 +1477,25 @@ def _query_first(
         if isinstance(rows, list) and rows:
             return rows[0]
     except Exception as exc:
-        logger.warning("Dataverse dedup query failed (%s): %s", filter_expr, exc)
+        logger.warning(
+            "Dataverse dedup query failed with selected columns (%s): %s",
+            filter_expr,
+            exc,
+        )
+        fallback_query = f"{entity_set}?$filter={filter_expr}&$top=1"
+        try:
+            resp = client.get(fallback_query)
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else None
+            if isinstance(rows, list) and rows:
+                return rows[0]
+            logger.info("Dataverse dedup fallback returned no rows (%s)", filter_expr)
+        except Exception as fallback_exc:
+            logger.warning(
+                "Dataverse dedup fallback query failed (%s): %s",
+                filter_expr,
+                fallback_exc,
+            )
     return None
 
 
@@ -1431,7 +1514,23 @@ def _query_many(
         rows = data.get("value") if isinstance(data, dict) else None
         return list(rows or []) if isinstance(rows, list) else []
     except Exception as exc:
-        logger.warning("Dataverse candidate query failed (%s): %s", filter_expr, exc)
+        logger.warning(
+            "Dataverse candidate query failed with selected columns (%s): %s",
+            filter_expr,
+            exc,
+        )
+        fallback_query = f"{entity_set}?$filter={filter_expr}&$top={top}"
+        try:
+            resp = client.get(fallback_query)
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else None
+            return list(rows or []) if isinstance(rows, list) else []
+        except Exception as fallback_exc:
+            logger.warning(
+                "Dataverse candidate fallback query failed (%s): %s",
+                filter_expr,
+                fallback_exc,
+            )
     return []
 
 
@@ -1496,6 +1595,28 @@ _MASTER_MATCH_SELECT = ",".join(
 )
 
 
+_SHIPMENT_MATCH_SELECT = ",".join(
+    (
+        "mesco_operationid",
+        "mesco_code",
+        "mesco_masterblno",
+        "mesco_masterbllinkno",
+        "mesco_bookingnumber",
+        "mesco_customerreference",
+        "mesco_ponumber",
+        "mesco_voytruckno",
+        "mesco_etdorigin",
+        "mesco_atdorigin",
+        "mesco_shippedonboarddate",
+        "mesco_dateofissue",
+        "_mesco_vessel_value",
+        "_mesco_origin_value",
+        "_mesco_destination_value",
+        _OP_PARENT_MASTER_VALUE_FIELD,
+    )
+)
+
+
 def _norm_match_text(value: Any) -> str:
     text = re.sub(r"[^A-Z0-9]+", " ", str(value or "").upper())
     return re.sub(r"\s+", " ", text).strip()
@@ -1536,6 +1657,48 @@ def _payload_container_numbers(
     return numbers
 
 
+def _normalize_container_identity_fields(container: Dict[str, Any]) -> None:
+    """Make all container identity fields use one Dataverse-safe number form."""
+    if not isinstance(container, dict):
+        return
+    normalized = ""
+    for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
+        value = container.get(key)
+        if value not in (None, ""):
+            normalized = _normalize_container_number(str(value))
+            if normalized:
+                break
+    if not normalized:
+        return
+    for key in ("container_number", "mesco_containernumber", "mesco_containerno", "mesco_name"):
+        if container.get(key) not in (None, "") or key in {
+            "mesco_containernumber",
+            "mesco_containerno",
+        }:
+            container[key] = normalized
+
+
+def _payload_seal_numbers(
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    seals: List[str] = []
+
+    def add(value: Any) -> None:
+        normalized = _normalize_container_number(str(value or ""))
+        if normalized and normalized not in seals:
+            seals.append(normalized)
+
+    for key in ("seal_number", "carrier_seal", "mesco_carrierseal", "mesco_sealno"):
+        add(payload.get(key))
+    for item in containers or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("seal_number", "carrier_seal", "mesco_carrierseal", "mesco_sealno"):
+            add(item.get(key))
+    return seals
+
+
 def _payload_match_dates(payload: Dict[str, Any]) -> Set[str]:
     dates: Set[str] = set()
     for key in (
@@ -1553,11 +1716,58 @@ def _payload_match_dates(payload: Dict[str, Any]) -> Set[str]:
 
 def _row_match_dates(row: Dict[str, Any]) -> Set[str]:
     dates: Set[str] = set()
-    for key in ("mesco_etdorigin", "mesco_atdorigin", "mesco_shippedonboarddate"):
+    for key in ("mesco_etdorigin", "mesco_atdorigin", "mesco_shippedonboarddate", "mesco_dateofissue"):
         value = _normalize_date(row.get(key))
         if value:
             dates.add(value)
     return dates
+
+
+def _reference_tokens(src: Dict[str, Any]) -> Set[str]:
+    tokens: Set[str] = set()
+    for key in (
+        "mesco_bookingnumber",
+        "mesco_customerreference",
+        "mesco_ponumber",
+        "mesco_cargodescription",
+    ):
+        text = str(src.get(key) or "").upper()
+        for token in re.findall(r"\b[A-Z]{2,}\d{4,}[A-Z0-9-]*\b|\b[A-Z0-9]{8,}\b", text):
+            token = token.strip("-")
+            if len(token) >= 8:
+                tokens.add(token)
+    return tokens
+
+
+def _candidate_operation_ids_by_container(
+    client: DataverseClientService,
+    container_numbers: List[str],
+) -> Set[str]:
+    return _candidate_master_ids_by_container(client, container_numbers)
+
+
+def _candidate_operation_ids_by_seal(
+    client: DataverseClientService,
+    seal_numbers: List[str],
+) -> Set[str]:
+    ids: Set[str] = set()
+    select = f"{_id_field(_CONTAINER_ENTITY)},{_CONTAINER_MASTER_VALUE_FIELD},mesco_carrierseal"
+    for number in seal_numbers:
+        safe = _odata_escape(number)
+        if not safe:
+            continue
+        rows = _query_many(
+            client,
+            _CONTAINER_ENTITY,
+            f"mesco_carrierseal eq '{safe}' and {_CONTAINER_MASTER_VALUE_FIELD} ne null",
+            select,
+            top=25,
+        )
+        for row in rows:
+            op_id = row.get(_CONTAINER_MASTER_VALUE_FIELD)
+            if op_id:
+                ids.add(str(op_id))
+    return ids
 
 
 def _candidate_master_ids_by_container(
@@ -1596,17 +1806,78 @@ def _get_master_candidate_row(
     )
 
 
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if not s2:
+        return len(s1)
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def _generate_voyage_candidates(voyage: str) -> List[str]:
+    if not voyage:
+        return []
+    voyage_upper = voyage.strip().upper()
+    candidates = {voyage_upper}
+
+    def add_variations(v: str):
+        candidates.add(v)
+        # Swap O and 0
+        v_swap_o_to_0 = v.replace("O", "0")
+        candidates.add(v_swap_o_to_0)
+        v_swap_0_to_o = v.replace("0", "O")
+        candidates.add(v_swap_0_to_o)
+        
+        # Remove common OCR insertions like "OW" -> "W", "0W" -> "W" after a digit
+        for prefix in ["O", "0"]:
+            if f"{prefix}W" in v:
+                v_no_ow = v.replace(f"{prefix}W", "W")
+                candidates.add(v_no_ow)
+                candidates.add(v_no_ow.replace("O", "0"))
+                candidates.add(v_no_ow.replace("0", "O"))
+                
+    add_variations(voyage_upper)
+    
+    # Also do a version where we replace all O with 0 first and then clean f"{prefix}W"
+    v_clean = voyage_upper.replace("O", "0")
+    if "0W" in v_clean:
+        v_no_w = v_clean.replace("0W", "W")
+        candidates.add(v_no_w)
+        candidates.add(v_no_w.replace("0", "O"))
+
+    return sorted(list(candidates))
+
+
 def _master_candidate_rows_by_voyage(
     client: DataverseClientService,
     voyage: Any,
 ) -> List[Dict[str, Any]]:
-    safe = _odata_escape(str(voyage or "").strip())
-    if not safe:
+    voyage_str = str(voyage or "").strip()
+    if not voyage_str:
         return []
+    candidates = _generate_voyage_candidates(voyage_str)
+    escaped = []
+    for c in candidates:
+        safe_c = _odata_escape(c)
+        if safe_c:
+            escaped.append(safe_c)
+    if not escaped:
+        return []
+    voyage_clauses = [f"mesco_voytruckno eq '{c}'" for c in escaped]
+    voyage_or_clause = f"({ ' or '.join(voyage_clauses) })"
     return _query_many(
         client,
         _ENTITY,
-        f"mesco_bltype eq {_MASTER_BL_TYPE} and mesco_voytruckno eq '{safe}'",
+        f"mesco_bltype eq {_MASTER_BL_TYPE} and {voyage_or_clause}",
         _MASTER_MATCH_SELECT,
         top=25,
     )
@@ -1629,9 +1900,18 @@ def _score_master_match(
     if payload_vessel and row_vessel and payload_vessel == row_vessel:
         score += 2
         reasons.append("vessel")
-    if payload_voyage and row_voyage and payload_voyage == row_voyage:
-        score += 3
-        reasons.append("voyage")
+    if payload_voyage and row_voyage:
+        is_match = False
+        if payload_voyage == row_voyage:
+            is_match = True
+        else:
+            dist = _levenshtein_distance(payload_voyage, row_voyage)
+            max_len = max(len(payload_voyage), len(row_voyage))
+            if dist <= 2 and (dist / max_len) < 0.3:
+                is_match = True
+        if is_match:
+            score += 3
+            reasons.append("voyage")
 
     if row_id and str(row_id) in container_master_ids:
         score += 4
@@ -1651,55 +1931,211 @@ def _score_master_match(
     return score, reasons
 
 
-def _find_master_by_shipment_evidence(
+def _operation_candidate_row(
     client: DataverseClientService,
+    op_id: str,
+    *,
+    bltype: int,
+    orphan_house: bool = False,
+) -> Optional[Dict[str, Any]]:
+    clauses = [f"{_id_field(_ENTITY)} eq {op_id}", f"mesco_bltype eq {bltype}"]
+    if orphan_house:
+        clauses.append(f"{_OP_PARENT_MASTER_VALUE_FIELD} eq null")
+    return _query_first(client, _ENTITY, " and ".join(clauses), _SHIPMENT_MATCH_SELECT)
+
+
+def _candidate_rows_by_voyage(
+    client: DataverseClientService,
+    voyage: Any,
+    *,
+    bltype: int,
+    orphan_house: bool = False,
+) -> List[Dict[str, Any]]:
+    voyage_str = str(voyage or "").strip()
+    if not voyage_str:
+        return []
+    candidates = _generate_voyage_candidates(voyage_str)
+    escaped = []
+    for c in candidates:
+        safe_c = _odata_escape(c)
+        if safe_c:
+            escaped.append(safe_c)
+    if not escaped:
+        return []
+    voyage_clauses = [f"mesco_voytruckno eq '{c}'" for c in escaped]
+    voyage_or_clause = f"({ ' or '.join(voyage_clauses) })"
+    
+    clauses = [f"mesco_bltype eq {bltype}", voyage_or_clause]
+    if orphan_house:
+        clauses.append(f"{_OP_PARENT_MASTER_VALUE_FIELD} eq null")
+    return _query_many(client, _ENTITY, " and ".join(clauses), _SHIPMENT_MATCH_SELECT, top=50)
+
+
+def _score_shipment_match(
+    row: Dict[str, Any],
     payload: Dict[str, Any],
-    containers: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[str]:
-    """Find an existing master from vessel/voyage + container + route + date evidence."""
-    id_field = _id_field(_ENTITY)
-    container_numbers = _payload_container_numbers(payload, containers)
-    container_master_ids = _candidate_master_ids_by_container(client, container_numbers)
+    container_candidate_ids: Set[str],
+    seal_candidate_ids: Set[str],
+    payload_dates: Set[str],
+    payload_refs: Set[str],
+) -> Tuple[int, List[str]]:
+    score = 0
+    reasons: List[str] = []
+    row_id = str(row.get(_id_field(_ENTITY)) or "")
 
-    candidate_rows: Dict[str, Dict[str, Any]] = {}
-    for row in _master_candidate_rows_by_voyage(client, payload.get("mesco_voytruckno")):
-        if row.get(id_field):
-            candidate_rows[str(row[id_field])] = row
-    for master_id in container_master_ids:
-        row = _get_master_candidate_row(client, master_id)
-        if row and row.get(id_field):
-            candidate_rows[str(row[id_field])] = row
+    payload_vessel = _norm_match_text(payload.get("mesco_vessel"))
+    row_vessel = _norm_match_text(_row_lookup_label(row, "mesco_vessel"))
+    if payload_vessel and row_vessel and payload_vessel == row_vessel:
+        score += 2
+        reasons.append("vessel")
 
-    if not candidate_rows:
+    payload_voyage = _norm_match_text(payload.get("mesco_voytruckno"))
+    row_voyage = _norm_match_text(row.get("mesco_voytruckno"))
+    if payload_voyage and row_voyage:
+        is_match = False
+        if payload_voyage == row_voyage:
+            is_match = True
+        else:
+            dist = _levenshtein_distance(payload_voyage, row_voyage)
+            max_len = max(len(payload_voyage), len(row_voyage))
+            if dist <= 2 and (dist / max_len) < 0.3:
+                is_match = True
+        if is_match:
+            score += 3
+            reasons.append("voyage")
+
+    if row_id and row_id in container_candidate_ids:
+        score += 4
+        reasons.append("container")
+
+    if row_id and row_id in seal_candidate_ids:
+        score += 4
+        reasons.append("seal")
+
+    for logical_key, reason in (("mesco_origin", "origin"), ("mesco_destination", "destination")):
+        payload_port = _norm_match_text(payload.get(logical_key))
+        row_port = _norm_match_text(_row_lookup_label(row, logical_key))
+        if payload_port and row_port and (
+            payload_port == row_port or payload_port in row_port or row_port in payload_port
+        ):
+            score += 1
+            reasons.append(reason)
+
+    if payload_dates and (_row_match_dates(row) & payload_dates):
+        score += 2
+        reasons.append("date")
+
+    row_refs = _reference_tokens(row)
+    if payload_refs and row_refs and (payload_refs & row_refs):
+        score += 2
+        reasons.append("reference")
+
+    return score, reasons
+
+
+def _best_shipment_match(
+    candidates: Dict[str, Dict[str, Any]],
+    payload: Dict[str, Any],
+    container_candidate_ids: Set[str],
+    seal_candidate_ids: Set[str],
+) -> Optional[Tuple[str, int, List[str]]]:
+    if not candidates:
         return None
-
-    house_dates = _payload_match_dates(payload)
+    payload_dates = _payload_match_dates(payload)
+    payload_refs = _reference_tokens(payload)
     scored: List[Tuple[int, str, List[str]]] = []
-    for master_id, row in candidate_rows.items():
-        score, reasons = _score_master_match(row, payload, container_master_ids, house_dates)
-        scored.append((score, master_id, reasons))
+    for op_id, row in candidates.items():
+        score, reasons = _score_shipment_match(
+            row,
+            payload,
+            container_candidate_ids,
+            seal_candidate_ids,
+            payload_dates,
+            payload_refs,
+        )
+        scored.append((score, op_id, reasons))
     scored.sort(reverse=True, key=lambda item: item[0])
     best_score, best_id, best_reasons = scored[0]
     tied = [item for item in scored if item[0] == best_score]
     if len(tied) > 1:
         logger.warning(
-            "Shipment-evidence master match is ambiguous: score=%s ids=%s",
+            "Shipment-evidence match is ambiguous: score=%s ids=%s",
             best_score,
             [item[1] for item in tied],
         )
         return None
-    strong_anchor = "container" in best_reasons or (
+    strong_anchor = "container" in best_reasons or "seal" in best_reasons or (
         "vessel" in best_reasons and "voyage" in best_reasons
     )
     if strong_anchor and best_score >= 6:
-        logger.info(
-            "Linked standalone house to master %s by shipment evidence (%s, score=%s)",
-            best_id,
-            ", ".join(best_reasons),
-            best_score,
-        )
-        return best_id
+        return best_id, best_score, best_reasons
     return None
+
+
+def _find_master_by_shipment_evidence(
+    client: DataverseClientService,
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Find an existing master when the HBL omits the MBL number.
+
+    Evidence rules are conservative:
+    - explicit MBL still wins before this function is called;
+    - shared container or carrier seal is a strong anchor;
+    - vessel+voyage is a strong anchor;
+    - route, ETD/laden date, and booking/reference tokens add confidence;
+    - tied candidates are rejected to avoid linking to the wrong master.
+    """
+    id_field = _id_field(_ENTITY)
+    container_numbers = _payload_container_numbers(payload, containers)
+    seal_numbers = _payload_seal_numbers(payload, containers)
+    container_candidate_ids = _candidate_operation_ids_by_container(client, container_numbers)
+    seal_candidate_ids = _candidate_operation_ids_by_seal(client, seal_numbers)
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    for row in _candidate_rows_by_voyage(client, payload.get("mesco_voytruckno"), bltype=_MASTER_BL_TYPE):
+        if row.get(id_field):
+            candidates[str(row[id_field])] = row
+    for op_id in container_candidate_ids | seal_candidate_ids:
+        row = _operation_candidate_row(client, op_id, bltype=_MASTER_BL_TYPE)
+        if row and row.get(id_field):
+            candidates[str(row[id_field])] = row
+
+    best = _best_shipment_match(candidates, payload, container_candidate_ids, seal_candidate_ids)
+    if not best:
+        return None
+    master_id, score, reasons = best
+    logger.info(
+        "Linked standalone house to master %s by shipment evidence (%s, score=%s)",
+        master_id,
+        ", ".join(reasons),
+        score,
+    )
+    return master_id
+
+
+def _house_linking_checks(
+    payload: Dict[str, Any],
+    containers: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Expose the evidence used for automatic House -> Master linking."""
+    return {
+        "container_numbers": _payload_container_numbers(payload, containers),
+        "seal_numbers": _payload_seal_numbers(payload, containers),
+        "vessel": payload.get("mesco_vessel"),
+        "voyage": payload.get("mesco_voytruckno"),
+        "origin": payload.get("mesco_origin"),
+        "destination": payload.get("mesco_destination"),
+        "dates": sorted(_payload_match_dates(payload)),
+        "matching_rules": [
+            "explicit mesco_masterbllinkno -> master mesco_masterblno",
+            "shared container number",
+            "shared carrier seal",
+            "vessel + voyage",
+            "POL/POD route",
+            "ETD / ATD / laden / issue date",
+        ],
+    }
 
 
 def _find_orphan_house_operations(
@@ -1758,6 +2194,87 @@ def _adopt_orphan_houses_for_master(
                 "adopted": True,
                 "code": row.get("mesco_code"),
             }
+        )
+    return adopted
+
+
+def _adopt_orphan_houses_by_shipment_evidence(
+    client: DataverseClientService,
+    master_id: str,
+    master_payload: Dict[str, Any],
+    master_containers: Optional[List[Dict[str, Any]]] = None,
+    master_shippingline_bind: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Link orphan houses to this master by container/seal/vessel/voyage/route/date evidence."""
+    adopted: List[Dict[str, Any]] = []
+    if not master_id:
+        return adopted
+
+    id_field = _id_field(_ENTITY)
+    container_numbers = _payload_container_numbers(master_payload, master_containers)
+    seal_numbers = _payload_seal_numbers(master_payload, master_containers)
+    container_candidate_ids = _candidate_operation_ids_by_container(client, container_numbers)
+    seal_candidate_ids = _candidate_operation_ids_by_seal(client, seal_numbers)
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    for row in _candidate_rows_by_voyage(
+        client,
+        master_payload.get("mesco_voytruckno"),
+        bltype=_HOUSE_BL_TYPE,
+        orphan_house=True,
+    ):
+        if row.get(id_field):
+            candidates[str(row[id_field])] = row
+    for op_id in container_candidate_ids | seal_candidate_ids:
+        if op_id == master_id:
+            continue
+        row = _operation_candidate_row(
+            client,
+            op_id,
+            bltype=_HOUSE_BL_TYPE,
+            orphan_house=True,
+        )
+        if row and row.get(id_field):
+            candidates[str(row[id_field])] = row
+
+    bind = {_lookup_bind_key("mesco_Operation"): f"/{_ENTITY}({master_id})"}
+    if master_shippingline_bind:
+        bind[_lookup_bind_key("mesco_ShippingLine")] = master_shippingline_bind
+
+    payload_dates = _payload_match_dates(master_payload)
+    payload_refs = _reference_tokens(master_payload)
+    for house_id, row in candidates.items():
+        score, reasons = _score_shipment_match(
+            row,
+            master_payload,
+            container_candidate_ids,
+            seal_candidate_ids,
+            payload_dates,
+            payload_refs,
+        )
+        strong_anchor = "container" in reasons or "seal" in reasons or ("vessel" in reasons and "voyage" in reasons)
+        if not strong_anchor or score < 6:
+            continue
+        _update_entity(client, _ENTITY, house_id, bind)
+        adopted.append(
+            {
+                "index": len(adopted),
+                "id": house_id,
+                "hbl": row.get("mesco_masterblno"),
+                "mbl": master_payload.get("mesco_masterblno"),
+                "reused": True,
+                "adopted": True,
+                "match_score": score,
+                "match_reasons": reasons,
+                "code": row.get("mesco_code"),
+            }
+        )
+        logger.info(
+            "Linked orphan house %s to master %s by shipment evidence (%s, score=%s)",
+            house_id,
+            master_id,
+            ", ".join(reasons),
+            score,
         )
     return adopted
 
@@ -1840,6 +2357,93 @@ def _inherit_lookup_bind(
     nav_key = _NAV_PROPERTY_MAP.get(logical_key, logical_key)
     target[_lookup_bind_key(nav_key)] = inherited_bind
     return True
+
+
+_HOUSE_INHERITED_MASTER_DATE_FIELDS: Tuple[str, ...] = ("mesco_atadestination",)
+
+
+def _inherited_master_date_fields(source: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: source.get(key)
+        for key in _HOUSE_INHERITED_MASTER_DATE_FIELDS
+        if _present_lookup_value(source.get(key))
+    }
+
+
+def _inherit_master_date_fields(
+    target: Dict[str, Any],
+    master_source: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Copy master date fields to a house payload only when the house is blank."""
+    inherited: Dict[str, Any] = {}
+    for key, value in _inherited_master_date_fields(master_source).items():
+        if not _present_lookup_value(target.get(key)):
+            target[key] = value
+            inherited[key] = value
+    return inherited
+
+
+def _get_operation_fields(
+    client: DataverseClientService,
+    op_id: Optional[str],
+    fields: Iterable[str],
+) -> Dict[str, Any]:
+    if not op_id:
+        return {}
+    selected = [field for field in fields if field]
+    if not selected:
+        return {}
+    row = _query_first(
+        client,
+        _ENTITY,
+        f"{_id_field(_ENTITY)} eq {op_id}",
+        ",".join(selected),
+    )
+    return {
+        field: row.get(field)
+        for field in selected
+        if row and _present_lookup_value(row.get(field))
+    }
+
+
+def _related_house_rows_for_master(
+    client: DataverseClientService,
+    master_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not master_id:
+        return []
+    select = f"{_id_field(_ENTITY)},mesco_masterblno,mesco_code"
+    return _query_many(
+        client,
+        _ENTITY,
+        f"{_OP_PARENT_MASTER_VALUE_FIELD} eq {master_id} and mesco_bltype eq {_HOUSE_BL_TYPE}",
+        select,
+        top=500,
+    )
+
+
+def _propagate_master_dates_to_houses(
+    client: DataverseClientService,
+    master_id: Optional[str],
+    master_dates: Dict[str, Any],
+) -> int:
+    """Patch inherited master dates onto every house linked to the master."""
+    patch = _preprocess_payload(
+        _inherited_master_date_fields(master_dates),
+        _ENTITY,
+        client,
+    )
+    if not master_id or not patch:
+        return 0
+    count = 0
+    id_field = _id_field(_ENTITY)
+    for row in _related_house_rows_for_master(client, master_id):
+        house_id = row.get(id_field)
+        if not house_id:
+            continue
+        if _update_entity(client, _ENTITY, house_id, patch):
+            count += 1
+    return count
 
 
 def _find_existing_container(
@@ -2074,6 +2678,10 @@ def _cargo_fields_for_update(
     number, IMO class, reefer flags, product lookups, and lookup binds are
     extracted correctly but silently omitted from the Dataverse PATCH.
     """
+    stc_desc = ensure_stc_cargo_description(cargo_clean.get("mesco_descriptionofgoods"))
+    if stc_desc:
+        cargo_clean = dict(cargo_clean)
+        cargo_clean["mesco_descriptionofgoods"] = stc_desc
     prepared = _preprocess_payload(cargo_clean, _CARGO_ENTITY, client)
     out: Dict[str, Any] = {}
     for key, value in prepared.items():
@@ -2254,16 +2862,17 @@ def _update_entity(
     entity_set: str,
     guid: str,
     fields: Dict[str, Any],
-) -> None:
+) -> bool:
     """PATCH an existing record (best-effort; logs but does not raise)."""
     if not fields:
-        return
+        return True
     from dataverse_field_limits import cap_record
 
     entity_key = entity_set if entity_set in {"mesco_operations", "mesco_cargos", "mesco_containers"} else "mesco_operations"
     payload = cap_record(entity_key, dict(fields))
     try:
         client.patch(f"{entity_set}({guid})", json=payload)
+        return True
     except Exception as exc:
         body = ""
         if hasattr(exc, "response") and exc.response is not None:
@@ -2280,7 +2889,7 @@ def _update_entity(
                     entity_set,
                     guid,
                 )
-                return
+                return True
             except Exception as retry_exc:
                 logger.warning(
                     "Dataverse PATCH %s(%s) retry failed: %s",
@@ -2292,6 +2901,110 @@ def _update_entity(
             "Dataverse PATCH %s(%s) failed: %s%s",
             entity_set, guid, exc, f"\nResponse: {body}" if body else "",
         )
+    return False
+
+
+_OPERATION_DISPLAY_REFRESH_FIELDS: Set[str] = {
+    "mesco_masterblno",
+    "mesco_masterbllinkno",
+    "mesco_bookingnumber",
+    "mesco_customerreference",
+    "mesco_ponumber",
+    "mesco_voytruckno",
+    "mesco_shippernamecontactno",
+    "mesco_shipperaddress",
+    "mesco_shippercontactname",
+    "mesco_shippercontactnumber",
+    "mesco_consigneenamecontactno",
+    "mesco_consigneeaddress",
+    "mesco_notifyaddress",
+    "mesco_notifypartyaddress",
+    "mesco_deliveryaddress",
+    "mesco_pickupaddress",
+    "mesco_descriptionofgoods",
+    "mesco_cargodescription",
+    "mesco_containertype",
+    "mesco_carrierseal",
+    "mesco_handlinginformation",
+    "mesco_direction",
+    "mesco_loadtype",
+    "mesco_transporttype",
+    "mesco_bltype",
+    "mesco_consolidation",
+    "mesco_etdorigin",
+    "mesco_etadestination",
+    "mesco_atdorigin",
+    "mesco_atadestination",
+    "mesco_shippedonboarddate",
+    "mesco_dateofissue",
+    "cr401_totalpackages",
+    "cr401_totalgrossweight",
+    "cr401_totalvolume",
+    "cr401_totalteus",
+}
+
+
+def _split_lookup_bind_fields(fields: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Separate scalar/display fields from Dataverse lookup bind fields."""
+    scalar: Dict[str, Any] = {}
+    binds: Dict[str, Any] = {}
+    for key, value in fields.items():
+        if key.endswith("@odata.bind"):
+            binds[key] = value
+        else:
+            scalar[key] = value
+    return scalar, binds
+
+
+def _operation_display_refresh_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the user-visible operation fields that must refresh on re-upload."""
+    return {
+        key: value
+        for key, value in fields.items()
+        if key in _OPERATION_DISPLAY_REFRESH_FIELDS and not key.endswith("@odata.bind")
+    }
+
+
+def _update_operation_lookup_binds(
+    client: DataverseClientService,
+    guid: str,
+    lookup_binds: Dict[str, Any],
+) -> bool:
+    """Patch lookup binds individually so one bad lookup cannot block the rest."""
+    if not lookup_binds:
+        return True
+    parent_key = _lookup_bind_key("mesco_Operation")
+    ordered_keys = []
+    if parent_key in lookup_binds:
+        ordered_keys.append(parent_key)
+    ordered_keys.extend(key for key in lookup_binds if key != parent_key)
+
+    ok = True
+    for key in ordered_keys:
+        ok = _update_entity(client, _ENTITY, guid, {key: lookup_binds[key]}) and ok
+    return ok
+
+
+def _update_existing_operation(
+    client: DataverseClientService,
+    guid: str,
+    fields: Dict[str, Any],
+) -> bool:
+    """Refresh a reused operation without letting lookup failures block text fields.
+
+    Existing house rows are commonly re-uploaded after a better OCR/LLM pass.
+    If one lookup bind is invalid, a single combined PATCH can fail and leave
+    visible fields such as consignee/shipper stuck with old values.  Patch
+    scalar display data first, then lookup relationships independently.
+    """
+    scalar_fields, lookup_binds = _split_lookup_bind_fields(fields)
+    scalar_ok = _update_entity(client, _ENTITY, guid, scalar_fields)
+    if not scalar_ok:
+        fallback = _operation_display_refresh_fields(fields)
+        if fallback and fallback != scalar_fields:
+            scalar_ok = _update_entity(client, _ENTITY, guid, fallback)
+    lookup_ok = _update_operation_lookup_binds(client, guid, lookup_binds)
+    return scalar_ok and lookup_ok
 
 
 def _upsert_operation(
@@ -2309,7 +3022,7 @@ def _upsert_operation(
             client, bl_no, is_house=is_house, master_id=master_id,
         )
         if existing:
-            _update_entity(client, _ENTITY, existing, fields)
+            _update_existing_operation(client, existing, fields)
             return existing, True
     return _create_entity(client, _ENTITY, fields), False
 
@@ -2438,15 +3151,22 @@ def upload_crm_json(
         "cargo":         [],
         "deduplicated":  bool(deduplicate),
         "skipped_cargo": 0,
+        "house_linking": None,
     }
 
     # Extract nested arrays BEFORE building the master payload so they are not
     # passed as unknown fields to the master operation POST.
     houses: List[Dict]     = payload.pop("mesco_Operation_mesco_Operation_mesco_Operation", []) or []
     containers: List[Dict] = payload.pop("mesco_Container_MasterOperation_mesco_Operation", []) or []
+    house_containers: List[Dict] = payload.pop("mesco_Container_mesco_houses", []) or []
     cargo_list: List[Dict] = payload.pop("mesco_Cargo_MasterOperation_mesco_Operation", []) or []
     house_cargo: List[Dict] = payload.pop("mesco_Cargo_HouseOperation_mesco_Operation", []) or []
     is_standalone_house = is_house_bl_type(payload.get("mesco_bltype")) and not houses
+    if house_containers:
+        if is_standalone_house:
+            containers = containers + house_containers
+        elif not containers:
+            containers = house_containers
     if house_cargo:
         if is_standalone_house or is_house_bl_type(payload.get("mesco_bltype")):
             cargo_list = house_cargo
@@ -2460,6 +3180,8 @@ def upload_crm_json(
         parent_match = re.search(r"\(([^)]+)\)", parent_master_bind)
         if parent_match:
             parent_master_id = parent_match.group(1)
+    if is_standalone_house:
+        result["house_linking_checks"] = _house_linking_checks(payload, containers)
 
     # A standalone house must hang off a master operation. The house PDF rarely
     # carries an explicit parent GUID, so when none was supplied try to find the
@@ -2500,11 +3222,18 @@ def upload_crm_json(
             "mesco_shippingline",
         )
         if standalone_parent_shippingline_bind:
-            _inherit_lookup_bind(
-                payload,
-                "mesco_shippingline",
-                standalone_parent_shippingline_bind,
-            )
+            nav_key = _NAV_PROPERTY_MAP.get("mesco_shippingline", "mesco_shippingline")
+            payload[_lookup_bind_key(nav_key)] = standalone_parent_shippingline_bind
+            payload.pop("mesco_shippingline", None)
+            payload.pop(nav_key, None)
+        _inherit_master_date_fields(
+            payload,
+            _get_operation_fields(
+                client,
+                parent_master_id,
+                _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # 1. Root operation (master or standalone house) — find-or-create
@@ -2514,6 +3243,7 @@ def upload_crm_json(
     root_bl = payload.get("mesco_masterblno") or payload.get("mesco_houseblno")
 
     master_fields = _preprocess_payload(payload, _ENTITY, client)
+    master_inherited_dates = _inherited_master_date_fields(master_fields)
     master_id, master_reused = _upsert_operation(
         client,
         master_fields,
@@ -2524,12 +3254,73 @@ def upload_crm_json(
     )
     result["master_id"] = master_id
     result["master_reused"] = master_reused
+
+    if is_standalone_house and deduplicate:
+        current_parent_id = _get_operation_parent(client, master_id)
+        if current_parent_id:
+            parent_master_id = current_parent_id
+            result["house_linking"] = {
+                "status": "already_linked",
+                "parent_master_id": parent_master_id,
+            }
+        else:
+            if not parent_master_id:
+                parent_master_id = _find_master_by_shipment_evidence(
+                    client,
+                    payload,
+                    containers,
+                )
+            if parent_master_id:
+                if not standalone_parent_shippingline_bind:
+                    standalone_parent_shippingline_bind = _get_operation_lookup_bind(
+                        client,
+                        parent_master_id,
+                        "mesco_shippingline",
+                    )
+                patch = {
+                    _lookup_bind_key("mesco_Operation"): f"/{_ENTITY}({parent_master_id})"
+                }
+                if standalone_parent_shippingline_bind:
+                    patch[_lookup_bind_key("mesco_ShippingLine")] = standalone_parent_shippingline_bind
+                inherited_dates = _inherit_master_date_fields(
+                    payload,
+                    _get_operation_fields(
+                        client,
+                        parent_master_id,
+                        _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+                    ),
+                )
+                if inherited_dates:
+                    patch.update(_preprocess_payload(inherited_dates, _ENTITY, client))
+                _update_entity(client, _ENTITY, master_id, patch)
+                result["house_linking"] = {
+                    "status": "linked_after_reuse" if master_reused else "linked_after_create",
+                    "parent_master_id": parent_master_id,
+                }
+                logger.info(
+                    "Patched standalone house %s to parent master %s after upsert",
+                    master_id,
+                    parent_master_id,
+                )
+            else:
+                result["house_linking"] = {
+                    "status": "unlinked_no_match",
+                    "parent_master_id": None,
+                    "container_numbers": _payload_container_numbers(payload, containers),
+                    "seal_numbers": _payload_seal_numbers(payload, containers),
+                    "vessel": payload.get("mesco_vessel"),
+                    "voyage": payload.get("mesco_voytruckno"),
+                    "origin": payload.get("mesco_origin"),
+                    "destination": payload.get("mesco_destination"),
+                    "dates": sorted(_payload_match_dates(payload)),
+                }
+
     # For a standalone house that we did not explicitly link, the record may
     # already be linked to a master from a previous (e.g. Excel manifest) upload.
     # Read it back so the response reflects the real parent.
     if is_standalone_house and not parent_master_id:
         parent_master_id = _get_operation_parent(client, master_id)
-        if parent_master_id and not standalone_had_shippingline:
+        if parent_master_id:
             standalone_parent_shippingline_bind = _get_operation_lookup_bind(
                 client,
                 parent_master_id,
@@ -2545,6 +3336,24 @@ def upload_crm_json(
                             standalone_parent_shippingline_bind
                     },
                 )
+
+    if is_standalone_house and parent_master_id:
+        inherited_dates = _inherit_master_date_fields(
+            payload,
+            _get_operation_fields(
+                client,
+                parent_master_id,
+                _HOUSE_INHERITED_MASTER_DATE_FIELDS,
+            ),
+        )
+        if inherited_dates:
+            _update_entity(
+                client,
+                _ENTITY,
+                master_id,
+                _preprocess_payload(inherited_dates, _ENTITY, client),
+            )
+
     # Clarity for callers: what kind of operation the root record is, and (for a
     # standalone house) which master it is linked to (None ⇒ unlinked).
     result["root_kind"] = "house" if is_standalone_house else "master"
@@ -2618,6 +3427,7 @@ def upload_crm_json(
             "mesco_shippingline",
             master_shippingline_bind,
         )
+        _inherit_master_date_fields(house_clean, master_inherited_dates)
 
         house_bl = house.get("mesco_masterblno") or house.get("mesco_houseblno")
         # mesco_houseblno is not a column on mesco_operations — drop it so the
@@ -2655,6 +3465,7 @@ def upload_crm_json(
     for idx, container in enumerate(containers):
         container_clean = _clean_odata_meta(container)
         container_clean = _strip_null(container_clean)
+        _normalize_container_identity_fields(container_clean)
 
         # Ensure the Container No lookup (mesco_containerno) is populated from the
         # container number, even when the extractor only produced the text field.
@@ -2671,9 +3482,9 @@ def upload_crm_json(
         )
 
         container_no = (
-            container.get("mesco_containernumber")
-            or container.get("mesco_containerno")
-            or container.get("mesco_name")
+            container_clean.get("mesco_containernumber")
+            or container_clean.get("mesco_containerno")
+            or container_clean.get("mesco_name")
         )
 
         ctn_fields = _preprocess_payload(container_clean, _CONTAINER_ENTITY, client)
@@ -2700,6 +3511,33 @@ def upload_crm_json(
             "Reused" if ctn_reused else "Created",
             idx, container_no, ctn_id,
         )
+
+    if not is_standalone_house and deduplicate:
+        evidence_adopted = _adopt_orphan_houses_by_shipment_evidence(
+            client,
+            master_id,
+            payload,
+            containers,
+            master_shippingline_bind,
+        )
+        if evidence_adopted:
+            existing_house_ids = {h.get("id") for h in result["houses"]}
+            for item in evidence_adopted:
+                if item.get("id") not in existing_house_ids:
+                    result["houses"].append(item)
+                    existing_house_ids.add(item.get("id"))
+
+    if not is_standalone_house and master_inherited_dates:
+        propagated = _propagate_master_dates_to_houses(
+            client,
+            master_id,
+            master_inherited_dates,
+        )
+        if propagated:
+            logger.info(
+                "Inherited master ATA POD/date fields to %d linked house(s)",
+                propagated,
+            )
 
     # Standalone house: associate containers on the house operation (N:N).
     if is_standalone_house and result["containers"]:
@@ -2760,6 +3598,9 @@ def upload_crm_json(
     for idx, cargo in enumerate(cargo_list):
         cargo_clean = _clean_odata_meta(cargo)
         cargo_clean = _strip_null(cargo_clean)
+        stc_desc = ensure_stc_cargo_description(cargo_clean.get("mesco_descriptionofgoods"))
+        if stc_desc:
+            cargo_clean["mesco_descriptionofgoods"] = stc_desc
         _apply_cargo_package_unit_hint(cargo_clean)
         cargo_hbl = (
             cargo_clean.pop("_house_hbl", None)

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ai_extractor import extract_records_with_azure_openai
 from bl_number_rules import finalize_multi_bl_records
-from llm_context import llm_extraction_prefix, llm_meta
+from llm_context import llm_extraction_prefix, llm_meta, uses_puter
 from pdf_consolidated_lcl import parse_consolidated_lcl_multi_hbl
 from pdf_isaly_draft_bl import (
     detect_isaly_draft_multi_bl,
@@ -25,6 +25,7 @@ from pdf_multi_bl import (
     detect_multi_bl_candidate,
     split_pdf_pages,
 )
+from pdf_deterministic_registry import best_deterministic_parse
 from record_reconciliation import dedupe_records_by_bl, merge_record_fields
 from validator import validate_and_correct
 
@@ -47,6 +48,35 @@ _CANONICAL_FORCE_KEYS = {
     "container_number",
     "seal_number",
     "containers",
+}
+
+_TRUSTED_FALLBACK_FORCE_KEYS = _CANONICAL_FORCE_KEYS | {
+    "mesco_houseblno",
+    "mesco_masterbllinkno",
+    "mesco_bltype",
+    "mesco_transporttype",
+    "mesco_loadtype",
+    "mesco_direction",
+    "mesco_pcfreightterm",
+    "mesco_bookingterm",
+    "mesco_blstatus",
+    "mesco_telexrelease",
+    "mesco_consolidation",
+    "mesco_freightpayableat",
+    "mesco_shippingline",
+    "mesco_shipper",
+    "mesco_consignee",
+    "mesco_country",
+    "mesco_countryoforigin",
+    "mesco_importerstaxno",
+    "mesco_foreignsupplierregistrationnumber",
+    "mesco_typeofregistrationnumber",
+    "mesco_hscode",
+    "mesco_containertype",
+    "mesco_dateofissue",
+    "mesco_shippedonboarddate",
+    "mesco_placeofissue",
+    "cargo_lines",
 }
 
 
@@ -157,6 +187,8 @@ def _validate_records(
             page_no=item.get("source_page") or item.get("_page_number"),
         )
         item = validate_and_correct(item, ctx, enrichment_text=enrich_ctx)
+        if rec.get("_deterministic_role") == "master" and not rec.get("mesco_houseblno"):
+            item.pop("mesco_houseblno", None)
         item["extraction_method"] = item.get("extraction_method") or extraction_method
         item["_routing"] = {
             "route": "azure_intelligent",
@@ -276,63 +308,68 @@ def parse_document_intelligently(
         quality["fallback_used"] = True
         document_layout = "multi_bl_pages"
 
-        try:
-            azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
-            quality["llm_attempted"] = True
-            quality["azure_attempted"] = True
-            quality["per_page_llm_calls"] = len(canonical)
-            quality["per_page_azure_calls"] = len(canonical)
-        except Exception as exc:
-            logger.warning("Per-page Azure enrichment skipped: %s", exc)
-            azure_warnings.append(str(exc))
+        if uses_puter():
             azure_records = [dict(c) for c in canonical]
+            quality["server_side_llm_available"] = False
+            quality["server_side_llm_reason"] = (
+                "Puter.js Gemini runs in the browser; per-page server enrichment was skipped."
+            )
+        else:
+            try:
+                azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
+                quality["llm_attempted"] = True
+                quality["azure_attempted"] = True
+                quality["per_page_llm_calls"] = len(canonical)
+                quality["per_page_azure_calls"] = len(canonical)
+            except Exception as exc:
+                logger.warning("Per-page Azure enrichment skipped: %s", exc)
+                azure_warnings.append(str(exc))
+                azure_records = [dict(c) for c in canonical]
 
         method = "isaly_draft_page_anchored" if isaly_expected else "multi_bl_page_anchored"
     else:
         azure_records: List[Dict[str, Any]] = []
-        try:
-            payload = extract_records_with_azure_openai(
-                raw_text,
-                file_bytes=file_bytes,
-                filename=filename,
-            )
-            quality["llm_attempted"] = True
-            quality["azure_attempted"] = True
-            document_layout = payload.get("document_layout") or "unknown"
-            azure_records = [dict(r) for r in (payload.get("records") or [])]
-            azure_warnings = list(payload.get("warnings") or [])
-            quality["azure_document_layout"] = document_layout
-            quality["azure_record_count"] = len(azure_records)
-        except Exception as exc:
-            logger.warning("Whole-document Azure extraction failed: %s", exc)
-            azure_warnings.append(f"azure_whole_document_error: {exc}")
-            quality["azure_error"] = str(exc)
+        if uses_puter():
+            reason = "Puter.js Gemini runs in the browser; server-side LLM extraction was skipped."
+            quality["server_side_llm_available"] = False
+            quality["server_side_llm_reason"] = reason
+            azure_warnings.append(f"puter_browser_required: {reason}")
+        else:
+            try:
+                quality["llm_attempted"] = True
+                quality["azure_attempted"] = True
+                payload = extract_records_with_azure_openai(
+                    raw_text,
+                    file_bytes=file_bytes,
+                    filename=filename,
+                )
+                document_layout = payload.get("document_layout") or "unknown"
+                azure_records = [dict(r) for r in (payload.get("records") or [])]
+                azure_warnings = list(payload.get("warnings") or [])
+                quality["azure_document_layout"] = document_layout
+                quality["azure_record_count"] = len(azure_records)
+            except Exception as exc:
+                logger.warning("Whole-document Azure extraction failed: %s", exc)
+                error_text = str(exc)
+                azure_warnings.append(f"azure_whole_document_error: {error_text}")
+                quality["azure_error"] = error_text
+                if "Gemini is not configured" in error_text or "Puter is a browser-side AI provider" in error_text:
+                    quality["server_side_llm_available"] = False
+                    quality["browser_extraction_required"] = True
+                    quality["puter_required"] = True
+                    quality["puter_url"] = "/puter"
 
-        from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
-        from pdf_sea_waybill import is_consolidation_sea_waybill, parse_consolidation_sea_waybill
+        deterministic = best_deterministic_parse(raw_text, filename=filename)
+        fallback_records = deterministic.reconciliation_records() if deterministic else []
+        force_special_fallback = bool(deterministic)
+        if deterministic:
+            quality["deterministic_parser"] = deterministic.parser
+            quality["deterministic_confidence"] = deterministic.confidence
+            quality["deterministic_record_count"] = len(fallback_records)
+            quality["deterministic_layout"] = deterministic.layout
+            if deterministic.document_type:
+                quality["deterministic_document_type"] = deterministic.document_type
 
-        debit_fallback: List[Dict[str, Any]] = []
-        if is_freight_debit_note(raw_text):
-            dn = parse_freight_debit_note(raw_text)
-            if dn:
-                debit_fallback = [dn]
-                quality["debit_note_fallback"] = True
-
-        sea_waybill_fallback: List[Dict[str, Any]] = []
-        if is_consolidation_sea_waybill(raw_text):
-            sw = parse_consolidation_sea_waybill(raw_text)
-            if sw:
-                sea_waybill_fallback = [sw]
-                quality["sea_waybill_fallback"] = True
-
-        fallback_records = (
-            debit_fallback
-            or sea_waybill_fallback
-            or extract_isaly_draft_records(raw_text)
-            or detect_and_extract_multi_bl_records(raw_text)
-            or []
-        )
-        force_special_fallback = bool(sea_waybill_fallback or debit_fallback)
         if fallback_records and (
             force_special_fallback
             or not azure_records
@@ -340,8 +377,15 @@ def parse_document_intelligently(
         ):
             from record_reconciliation import reconcile_record_lists
 
-            azure_records = reconcile_record_lists(azure_records, fallback_records)
+            azure_records = reconcile_record_lists(
+                azure_records,
+                fallback_records,
+                prefer_fallback_keys=_TRUSTED_FALLBACK_FORCE_KEYS,
+            )
             quality["fallback_used"] = True
+            quality["fallback_force_keys"] = sorted(_TRUSTED_FALLBACK_FORCE_KEYS)
+            if deterministic:
+                document_layout = deterministic.layout or document_layout
 
         azure_records = dedupe_records_by_bl(azure_records)
         azure_records = finalize_multi_bl_records(azure_records, raw_text)
@@ -352,6 +396,13 @@ def parse_document_intelligently(
 
     if not azure_records:
         quality["parser"] = "failed"
+        if uses_puter():
+            reason = "Puter.js Gemini must run in the browser for this document."
+            quality["puter_required"] = True
+            quality["puter_url"] = "/puter"
+            quality["browser_extraction_required"] = True
+            quality["server_side_llm_available"] = False
+            quality["llm_error"] = reason
         return IntelligentParseResult(
             records=[],
             document_layout=document_layout,
@@ -363,7 +414,7 @@ def parse_document_intelligently(
     validated = _validate_records(azure_records, raw_text, method, pdf_bytes=file_bytes)
 
     quality["validated_record_count"] = len(validated)
-    quality["document_type_detected"] = (
+    quality["document_type_detected"] = quality.get("deterministic_document_type") or (
         "multi_bl_pdf" if len(validated) >= 2 else "single_bl_pdf"
     )
     if extracted_meta:

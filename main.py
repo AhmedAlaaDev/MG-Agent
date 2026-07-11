@@ -37,7 +37,9 @@ from dataverse_field_limits import cap_nested_payload
 from spreadsheet_extractor import extract_document_text_professionally
 from ai_extractor import MULTI_BL_JSON_SCHEMA, SYSTEM_PROMPT, extract_with_azure_openai
 from document_parser import parse_document_intelligently
+from pdf_deterministic_registry import best_deterministic_parse
 from pdf_batch_processor import process_pdf_bytes
+from record_reconciliation import merge_record_fields, reconcile_record_lists
 from crm_mapper import map_crm_operation_to_records
 from config import GEMINI_MODELS, settings
 from llm_context import (
@@ -69,6 +71,8 @@ from pdf_consolidated_lcl import (
     parse_consolidated_lcl_multi_hbl,
 )
 from pdf_debit_note import is_freight_debit_note, parse_freight_debit_note
+from pdf_house_bl import is_standard_house_bl, parse_standard_house_bl
+from pdf_standard_master_bl import is_standard_master_bl, parse_standard_master_bl
 from pdf_sea_waybill import (
     build_house_records_for_consolidation_sea_waybill,
     is_consolidation_sea_waybill,
@@ -76,6 +80,42 @@ from pdf_sea_waybill import (
     parse_consolidation_sea_waybill,
 )
 from upload_audit import audit_store
+
+
+_PUTER_DETERMINISTIC_FORCE_KEYS = {
+    "mesco_masterblno",
+    "mesco_bookingnumber",
+    "mesco_acidnumber",
+    "cr401_totalpackages",
+    "cr401_totalgrossweight",
+    "cr401_totalvolume",
+    "mesco_origin",
+    "mesco_destination",
+    "mesco_vessel",
+    "mesco_voytruckno",
+    "container_number",
+    "seal_number",
+    "containers",
+    "mesco_containertype",
+    "mesco_transporttype",
+    "mesco_loadtype",
+    "mesco_pcfreightterm",
+    "mesco_bookingterm",
+    "mesco_freightpayableat",
+    "mesco_consolidation",
+    "mesco_shippingline",
+    "mesco_shipper",
+    "mesco_consignee",
+    "mesco_country",
+    "mesco_countryoforigin",
+    "mesco_importerstaxno",
+    "mesco_foreignsupplierregistrationnumber",
+    "mesco_typeofregistrationnumber",
+    "mesco_dateofissue",
+    "mesco_shippedonboarddate",
+    "mesco_placeofissue",
+    "mesco_nooforgbls",
+}
 
 
 class BlTypeQuery(str, Enum):
@@ -490,6 +530,9 @@ class PuterFormatRequest(BaseModel):
     raw_text: Optional[str] = ""
     bl_type: BlTypeQuery = BlTypeQuery.master
     post_to_dataverse: bool = True
+    llm_model: Optional[str] = None
+    visual_page_count: Optional[int] = None
+    pdf_page_count: Optional[int] = None
 
 
 class ExtractResponse(BaseModel):
@@ -1603,6 +1646,73 @@ async def _extract_file_inner_impl(
                     bl_type=bl_type,
                 )
 
+        if is_standard_house_bl(raw_text):
+            house_record = parse_standard_house_bl(raw_text)
+            if house_record:
+                # This direct parser reads already-labelled House B/L fields.
+                # The broad PDF validator can over-enrich noisy OCR on this
+                # layout and invent a master link from phone/reference numbers.
+                validated = house_record
+                extraction_quality["document_type_detected"] = "standard_house_bl_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_standard_house_bl",
+                    "mode": "single_house_with_linking_evidence",
+                }
+                house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(
+                    getattr(bl_type, "value", bl_type),
+                )
+                if resolved_bl == "house" and house_output.get("value"):
+                    crm_output = house_output["value"][0]
+                else:
+                    crm_output = records_to_master_json([validated])
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
+        if is_standard_master_bl(raw_text):
+            master_record = parse_standard_master_bl(raw_text)
+            if master_record:
+                validated = validate_and_correct(
+                    master_record,
+                    raw_text,
+                    enrichment_text=raw_text,
+                )
+                extraction_quality["document_type_detected"] = "standard_master_bl_pdf"
+                extraction_quality["record_routing"] = {
+                    "direct": 1,
+                    "azure_fallback": 0,
+                    "skipped": 0,
+                    "policy": "pdf_standard_master_bl",
+                    "mode": "single_master_bl",
+                }
+                crm_output = records_to_master_json([validated])
+                house_output = records_to_house_json([validated])
+                resolved_bl = normalize_bl_type(
+                    getattr(bl_type, "value", bl_type),
+                )
+                if resolved_bl == "house":
+                    bl_type = BlTypeQuery.master
+                    extraction_quality["bl_type_corrected"] = "master_standard_bl"
+                return _build_response(
+                    crm_output,
+                    raw_text,
+                    extraction_quality,
+                    post_to_dataverse,
+                    download,
+                    house_output,
+                    bl_type=bl_type,
+                )
+
         if is_cargo_manifest_hbl_blocks(raw_text):
             manifest = parse_cargo_manifest_hbl_blocks(raw_text)
             if manifest and len(manifest["house_records"]) >= 2:
@@ -1833,6 +1943,52 @@ def _build_response(
     )
 
 
+def _merge_puter_records_with_deterministic_pdf(
+    records: List[Dict[str, Any]],
+    raw_text: str,
+    extraction_quality: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    deterministic = best_deterministic_parse(raw_text)
+    if not deterministic:
+        return records
+
+    fallback_records = deterministic.reconciliation_records()
+    if not fallback_records:
+        return records
+
+    extraction_quality.update(
+        {
+            "deterministic_parser": deterministic.parser,
+            "deterministic_confidence": deterministic.confidence,
+            "deterministic_record_count": len(fallback_records),
+            "deterministic_layout": deterministic.layout,
+            "deterministic_document_type": deterministic.document_type,
+            "deterministic_reconciled": True,
+        }
+    )
+
+    if not records:
+        return list(fallback_records)
+
+    if len(records) == 1 and len(fallback_records) == 1 and deterministic.layout in {
+        "single_bl",
+        "single_house",
+    }:
+        return [
+            merge_record_fields(
+                records[0],
+                fallback_records[0],
+                prefer_secondary_keys=_PUTER_DETERMINISTIC_FORCE_KEYS,
+            )
+        ]
+
+    return reconcile_record_lists(
+        records,
+        fallback_records,
+        prefer_fallback_keys=_PUTER_DETERMINISTIC_FORCE_KEYS,
+    )
+
+
 @app.get("/puter/config", tags=["Extraction"])
 async def puter_config():
     """Return the browser-side Puter.js extraction prompt and model list."""
@@ -1842,7 +1998,9 @@ async def puter_config():
         + "\n\nReturn ONLY one valid JSON object matching this schema. "
         + "No markdown fences, no commentary, no extra text after the JSON:\n"
         + schema_hint
-        + "\n\nExtract all Bill(s) of Lading from this document text:\n\n"
+        + "\n\nThe attached PDF page images are the authoritative source. "
+        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
+        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
     )
     return {
         "provider": "puter",
@@ -1850,6 +2008,10 @@ async def puter_config():
         "models": list(GEMINI_MODELS),
         "prompt_prefix": prompt_prefix,
         "max_text_chars": settings.gemini_max_input_chars,
+        "max_visual_pages": 8,
+        "pdf_render_scale": 2.0,
+        "pdf_max_canvas_width": 1800,
+        "pdf_image_quality": 0.86,
     }
 
 
@@ -1863,6 +2025,13 @@ async def puter_format(request: PuterFormatRequest):
         if not isinstance(records, list):
             records = [payload] if payload else []
         records = [dict(rec) for rec in records if isinstance(rec, dict)]
+
+        deterministic_quality: Dict[str, Any] = {}
+        records = _merge_puter_records_with_deterministic_pdf(
+            records,
+            raw_text,
+            deterministic_quality,
+        )
         if not records:
             return ExtractResponse(success=False, error="Puter did not return any B/L records.")
 
@@ -1886,10 +2055,14 @@ async def puter_format(request: PuterFormatRequest):
         extraction_quality = {
             "source": "puter_js",
             "llm_provider": "puter",
-            "llm_model": settings.puter_model,
+            "llm_model": request.llm_model or settings.puter_model,
+            "visual_input": "pdf_page_images",
+            "visual_page_count": request.visual_page_count,
+            "pdf_page_count": request.pdf_page_count,
             "document_layout": payload.get("document_layout"),
             "record_count": len(validated_records),
         }
+        extraction_quality.update(deterministic_quality)
 
         if len(validated_records) > 1 and not one_master_with_houses:
             crm_masters = [records_to_master_json([rec]) for rec in validated_records]
@@ -2073,11 +2246,11 @@ async def extract_pdf(
         description="Post as Master B/L (886150001) or House B/L (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Query(
-        None,
+        LlmProviderQuery.puter,
         description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
     ),
     llm_model: Optional[GeminiModelQuery] = Query(
-        None,
+        GeminiModelQuery.gemini_3_pro_preview,
         description="Gemini model id when llm_provider=gemini (Puter.js-compatible ids)",
     ),
     post_to_dataverse: bool = Query(
@@ -2125,11 +2298,11 @@ async def extract_excel(
         description="B/L type: master (886150001) or house (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        None,
+        LlmProviderQuery.puter,
         description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
-        None,
+        GeminiModelQuery.gemini_3_pro_preview,
         description="Gemini model id when llm_provider=gemini",
     ),
     post_to_dataverse: bool = Form(

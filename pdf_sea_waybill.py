@@ -1,5 +1,5 @@
 """
-Direct parser for Arkas / ONE-style consolidation sea waybills.
+Direct parser for Arkas / ONE / COSCO-style consolidation sea waybills.
 
 These B/Ls reference cargo on an attached list (page 2+ may be image-only).
 When the LLM returns malformed JSON, regex extraction still yields a master record.
@@ -10,10 +10,14 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-_MBL_RE = re.compile(r"\b(IST\d{9,12}|NSA\d{9,12}|ARK[A-Z]?\d{8,12})\b", re.I)
+_MBL_RE = re.compile(r"\b(IST\d{9,12}|NSA\d{9,12}|ARK[A-Z]?\d{8,12}|COSU\d{9,12})\b", re.I)
 _CONTAINER_RE = re.compile(r"\b([A-Z]{4})\s*(\d{6,7})\b")
 _TOTAL_RE = re.compile(
     r"TOTAL\s*:\s*(\d+)\s+PALLET.*?GW:\s*([\d,.\s]+)",
+    re.I | re.S,
+)
+_COSCO_TOTAL_RE = re.compile(
+    r"\bN/M\s+(\d+)\s+(.+?)\s+([\d,.\s]+)\s*KGS?\s+([\d,.\s]+)\s*CBM",
     re.I | re.S,
 )
 _ACID_RE = re.compile(r"ACID\s*:?\s*(\d{10,25})", re.I)
@@ -49,10 +53,16 @@ def is_consolidation_sea_waybill(text: str) -> bool:
         return False
     upper = text.upper()
     sea_waybill = bool(
-        re.search(r"NON[- ]NEGOTIABLE\s+SEA\s+WAY\s+BILL", upper)
-        or re.search(r"SEA\s+WAY\s+BILL\s+OF\s+LADING", upper)
+        re.search(r"NON[- ]NEGOTIABLE\s+SEA\s+WAY\s*BILL", upper)
+        or re.search(r"SEA\s+WAY\s*BILL\s+OF\s+LADING", upper)
+        or re.search(r"\bSEA\s+WAYBILL\b", upper)
     )
-    consolidation = "CONSOLIDATION CARGO" in upper or "AS PER ATTACHED LIST" in upper
+    consolidation = (
+        "CONSOLIDATION CARGO" in upper
+        or "CONSOLIDATED CARGO" in upper
+        or "AS PER ATTACHED LIST" in upper
+        or "TO BE CONTINUED ON ATTACHED LIST" in upper
+    )
     arkas = "ARKAS" in upper and _MBL_RE.search(text)
     return (sea_waybill and consolidation) or (arkas and consolidation)
 
@@ -78,6 +88,35 @@ def _extract_master_bl(text: str) -> Optional[str]:
 
 def _extract_shipper(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     block = _block_order_section(text)
+    cosco = re.search(
+        r"1\.\s*Shipper[^\n]*\n(?P<body>.*?)(?:\nSea\s+Waybill\s+No\.|\nBooking\s+No\.|\nExport\s+References|\n2\.\s*Consignee)",
+        block,
+        re.I | re.S,
+    )
+    if cosco:
+        shipper_lines = [
+            ln.strip()
+            for ln in cosco.group("body").splitlines()
+            if ln.strip()
+            and not re.search(r"^(Booking\s+No\.|Sea\s+Waybill\s+No\.|Export\s+References)$", ln, re.I)
+        ]
+        if shipper_lines:
+            name_lines: List[str] = []
+            address_lines: List[str] = []
+            for ln in shipper_lines:
+                upper = ln.upper()
+                if not address_lines and (
+                    "LTD" in upper
+                    or "LIMITED" in upper
+                    or len(name_lines) < 2 and not re.search(r"\d", ln)
+                ):
+                    name_lines.append(ln)
+                else:
+                    address_lines.append(ln)
+            name = re.sub(r"\s+", " ", " ".join(name_lines or shipper_lines[:1])).strip()
+            address = re.sub(r"\s+", " ", ", ".join(address_lines or shipper_lines[1:6])).strip()
+            return name[:100], name[:100], address[:250] if address else None
+
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
     if lines and _MBL_RE.fullmatch(lines[0]):
         lines = lines[1:]
@@ -146,8 +185,27 @@ def _extract_route_vessel(text: str) -> Tuple[Optional[str], Optional[str], Opti
         voyage = vm.group(2).strip().upper()
 
     block = _block_order_section(text)
+    cosco_vessel = re.search(
+        r"Ocean\s+Vessel\s+Voy\.\s*No\.\s*\n\s*([A-Z][A-Z0-9 ]+?)\s+([A-Z0-9]{6,12})\b",
+        block,
+        re.I,
+    )
+    if cosco_vessel:
+        vessel = re.sub(r"\s+", " ", cosco_vessel.group(1)).strip()
+        voyage = cosco_vessel.group(2).strip().upper()
+
+    cosco_pol = re.search(r"Port\s+of\s+Loading\s*\n\s*([^\n]+)", block, re.I)
+    cosco_pod = re.search(r"Port\s+of\s+Discharge\s*\n\s*([^\n]+)", block, re.I)
+    if cosco_pol:
+        pol = re.sub(r"\s+", " ", cosco_pol.group(1)).strip().replace("/", ", ")
+    else:
+        pol = None
+    if cosco_pod:
+        pod = re.sub(r"\s+", " ", cosco_pod.group(1)).strip().replace("/", ", ")
+    else:
+        pod = None
+
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
-    pol = pod = None
     for i, ln in enumerate(lines):
         upper = ln.upper()
         if upper == "ISTANBUL":
@@ -401,13 +459,17 @@ def master_record_without_house_cargo(master_rec: Dict[str, Any]) -> Dict[str, A
 
 
 def _extract_container(text: str) -> Optional[Dict[str, str]]:
+    mbl = _extract_master_bl(text) or ""
     for m in _CONTAINER_RE.finditer(text):
         prefix, digits = m.group(1).upper(), m.group(2)
         if prefix in ("PAGE", "TEL", "FAX", "POST", "CODE", "TAX"):
             continue
+        candidate = f"{prefix}{digits}"
+        if mbl and candidate in mbl:
+            continue
         if len(digits) >= 6:
             return {
-                "container_number": f"{prefix}{digits}",
+                "container_number": candidate,
                 "container_type": "40HC",
             }
     return None
@@ -431,13 +493,13 @@ def _normalize_weight(value: str) -> Optional[float]:
 
 def _build_cargo_description(text: str, packages: Optional[int], gross: Optional[float]) -> str:
     parts: List[str] = []
-    if re.search(r"AS\s+PER\s+ATTACHED\s+LIST", text, re.I):
+    if re.search(r"AS\s+PER\s+ATTACHED\s+LIST|TO\s+BE\s+CONTINUED\s+ON\s+ATTACHED\s+LIST", text, re.I):
         parts.append("AS PER ATTACHED LIST")
     route_m = _CONSOLIDATION_ROUTE_RE.search(text)
     if route_m:
         parts.append(re.sub(r"\s+", " ", route_m.group(0)).strip()[:400])
-    elif re.search(r"CONSOLIDATION\s+CARGO", text, re.I):
-        parts.append("CONSOLIDATION CARGO")
+    elif re.search(r"CONSOLIDAT(?:ION|ED)\s+CARGO", text, re.I):
+        parts.append("CONSOLIDATED CARGO")
     if packages:
         parts.append(f"{packages} PALLETS")
     if gross:
@@ -458,6 +520,15 @@ def parse_consolidation_sea_waybill(text: str) -> Optional[Dict[str, Any]]:
     total_m = _TOTAL_RE.search(text)
     packages = int(total_m.group(1)) if total_m else None
     gross = _normalize_weight(total_m.group(2)) if total_m else None
+    volume: Optional[float] = None
+    cosco_total = _COSCO_TOTAL_RE.search(text)
+    if cosco_total:
+        packages = int(cosco_total.group(1))
+        goods = re.sub(r"\s+", " ", cosco_total.group(2)).strip()
+        gross = _normalize_weight(cosco_total.group(3))
+        volume = _normalize_weight(cosco_total.group(4))
+    else:
+        goods = ""
 
     record: Dict[str, Any] = {
         "document_type": "consolidation_sea_waybill",
@@ -491,6 +562,8 @@ def parse_consolidation_sea_waybill(text: str) -> Optional[Dict[str, Any]]:
         record["cr401_totalpackages"] = packages
     if gross is not None:
         record["cr401_totalgrossweight"] = gross
+    if volume is not None:
+        record["cr401_totalvolume"] = volume
     if container:
         record["container_number"] = container["container_number"]
         record["containers"] = [container]
@@ -509,6 +582,8 @@ def parse_consolidation_sea_waybill(text: str) -> Optional[Dict[str, Any]]:
 
     if re.search(r"ARKAS", text, re.I):
         record["mesco_shippingline"] = "ARKAS DENIZCILIK VE NAKLIYAT A.S."
+    elif re.search(r"COSCO\s+SHIPPING", text, re.I):
+        record["mesco_shippingline"] = "COSCO SHIPPING LINES CO.,LTD."
 
     record.update({k: v for k, v in agent.items() if v})
 
@@ -521,6 +596,13 @@ def parse_consolidation_sea_waybill(text: str) -> Optional[Dict[str, Any]]:
 
     if mbl:
         record["mesco_bookingnumber"] = mbl
+    booking_m = re.search(r"Booking\s+No\.\s*\n\s*([A-Z0-9-]{5,30})", _block_order_section(text), re.I)
+    if booking_m:
+        record["mesco_bookingnumber"] = booking_m.group(1).strip()
+    if goods:
+        record["mesco_cargodescription"] = "\n".join(
+            part for part in (goods, record.get("mesco_cargodescription")) if part
+        )[:1200]
 
     if not record.get("mesco_masterblno"):
         return None
