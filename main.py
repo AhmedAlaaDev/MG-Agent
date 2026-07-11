@@ -2794,24 +2794,72 @@ async def extract_invoice(
                 except Exception as search_err:
                     logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
 
-        # Auto-create Operation if not found and post_to_dataverse is True
+        # Auto-create Operation structure if not found and post_to_dataverse is True
         if not resolved_op_id and post_to_dataverse and client and (extracted_mbl or extracted_hbl):
             try:
-                op_bl = extracted_mbl or extracted_hbl
-                op_fields = {
-                    "mesco_name": op_bl,
-                    "mesco_code": op_bl,
-                    "mesco_masterblno": op_bl,
-                    "mesco_bltype": 886150001,  # Master B/L
-                }
-                resolved_op_id = _create_entity(client, "mesco_operations", op_fields)
-                resolved_op_code = op_bl
-                resolved_op_bl = op_bl
-                is_master = True
-                op_bl_number = op_bl
-                logger.info("Auto-created Master Operation record: %s for B/L %s", resolved_op_id, op_bl)
+                master_id = None
+                
+                # 1. Resolve or create Master Operation if MBL is present
+                if extracted_mbl:
+                    # Search for existing Master Operation
+                    mbl_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_xollsp_TariffQuote&$filter=mesco_masterblno eq '{extracted_mbl}' and mesco_bltype eq 886150001&$top=1"
+                    mbl_resp = client.get(mbl_url)
+                    if mbl_resp.status_code == 200:
+                        mbl_results = mbl_resp.json().get("value", [])
+                        if mbl_results:
+                            master_id = mbl_results[0]["mesco_operationid"]
+                            tariff_quote_id = mbl_results[0].get("_mesco_xollsp_tariffquote_value")
+                    
+                    if not master_id:
+                        # Create Master Operation
+                        op_fields = {
+                            "mesco_name": extracted_mbl,
+                            "mesco_code": extracted_mbl,
+                            "mesco_masterblno": extracted_mbl,
+                            "mesco_bltype": 886150001,  # Master B/L
+                        }
+                        master_id = _create_entity(client, "mesco_operations", op_fields)
+                        logger.info("Auto-created Master Operation record: %s for MBL %s", master_id, extracted_mbl)
+                
+                # 2. Resolve or create House Operation if HBL is present
+                if extracted_hbl:
+                    house_id = None
+                    hbl_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_xollsp_TariffQuote&$filter=mesco_masterblno eq '{extracted_hbl}' and mesco_bltype eq 886150002&$top=1"
+                    hbl_resp = client.get(hbl_url)
+                    if hbl_resp.status_code == 200:
+                        hbl_results = hbl_resp.json().get("value", [])
+                        if hbl_results:
+                            house_id = hbl_results[0]["mesco_operationid"]
+                            tariff_quote_id = hbl_results[0].get("_mesco_xollsp_tariffquote_value")
+                    
+                    if not house_id:
+                        # Create House Operation
+                        op_fields = {
+                            "mesco_name": extracted_hbl,
+                            "mesco_code": extracted_hbl,
+                            "mesco_masterblno": extracted_hbl,
+                            "mesco_bltype": 886150002,  # House B/L
+                        }
+                        if master_id:
+                            op_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({master_id})"
+                        house_id = _create_entity(client, "mesco_operations", op_fields)
+                        logger.info("Auto-created House Operation record: %s for HBL %s", house_id, extracted_hbl)
+                    
+                    resolved_op_id = house_id
+                    resolved_op_code = extracted_hbl
+                    resolved_op_bl = extracted_hbl
+                    is_master = False
+                    op_bl_number = extracted_hbl
+                else:
+                    # No HBL, use the Master Operation
+                    resolved_op_id = master_id
+                    resolved_op_code = extracted_mbl
+                    resolved_op_bl = extracted_mbl
+                    is_master = True
+                    op_bl_number = extracted_mbl
+                    
             except Exception as create_err:
-                logger.exception("Failed to auto-create Master Operation record: %s", create_err)
+                logger.exception("Failed to auto-create Operation structure: %s", create_err)
 
         # Fetch operation details if not resolved yet (e.g. if operation_id was passed explicitly)
         if resolved_op_id and client and not resolved_op_code:
