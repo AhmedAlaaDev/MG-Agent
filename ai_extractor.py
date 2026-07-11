@@ -944,3 +944,139 @@ def extract_invoice_with_llm(
         file_bytes=None,
         filename=filename,
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-HBL Invoice / Debit Note Extraction
+# ---------------------------------------------------------------------------
+
+MULTI_INVOICE_JSON_SCHEMA = {
+    "name": "multi_invoice_extraction",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "vendor_name": {"type": ["string", "null"]},
+            "vendor_invoice_number": {"type": ["string", "null"]},
+            "master_bl_number": {"type": ["string", "null"]},
+            "container_number": {
+                "type": ["string", "null"],
+                "description": "Container number (e.g. EGSU9903117). If container and seal are combined like EGSU9903117/EMCPUL8444, put only the container here.",
+            },
+            "seal_number": {"type": ["string", "null"]},
+            "currency": {
+                "type": ["string", "null"],
+                "description": "3-letter ISO currency code (USD, EGP, EUR, etc.)",
+            },
+            "groups": {
+                "type": "array",
+                "description": "One group per House B/L (HBL). If the document has no HBL grouping, return a single group with house_bl_number set to null.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "house_bl_number": {
+                            "type": ["string", "null"],
+                            "description": "The House B/L number this group of charges belongs to.",
+                        },
+                        "cbm": {
+                            "type": ["number", "null"],
+                            "description": "Cubic meters for this HBL shipment, if shown.",
+                        },
+                        "kgs": {
+                            "type": ["number", "null"],
+                            "description": "Weight in KG for this HBL shipment, if shown.",
+                        },
+                        "line_items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "service_description": {"type": ["string", "null"]},
+                                    "quantity": {"type": ["number", "null"]},
+                                    "unit_price": {"type": ["number", "null"]},
+                                    "total_amount": {"type": ["number", "null"]},
+                                },
+                                "required": ["service_description", "quantity", "unit_price", "total_amount"],
+                            },
+                        },
+                    },
+                    "required": ["house_bl_number", "line_items"],
+                },
+            },
+        },
+        "required": [
+            "vendor_name",
+            "vendor_invoice_number",
+            "master_bl_number",
+            "container_number",
+            "seal_number",
+            "currency",
+            "groups",
+        ],
+    },
+}
+
+MULTI_INVOICE_SYSTEM_PROMPT = """\
+You are a professional invoice and debit note data extraction engine for shipping and logistics.
+
+This document may contain charges for MULTIPLE House B/L (HBL) shipments under a single invoice/debit note.
+
+Your task:
+1. Extract the shared header fields: vendor name, invoice/debit note number, Master B/L number, container number, seal number, and currency.
+2. Group the line items by their House B/L (HBL) number. Each row in the invoice typically shows which HBL it belongs to — look for columns labeled "HBL", "HBL/CNT", "B/L(H)", or the HBL number appearing in the same row as the charge.
+3. For each HBL group, extract:
+   - house_bl_number: The House B/L identifier (e.g. "AMIGL260110746A")
+   - cbm: Cubic meters if shown
+   - kgs: Weight in KG if shown
+   - line_items: Each charge row with service_description, quantity, unit_price, and total_amount
+4. If the document does NOT have multiple HBLs (it's a simple single-invoice), return exactly one group with house_bl_number set to null and all line items in that single group.
+5. Do NOT merge or aggregate charges across HBLs. Keep each charge row under its correct HBL group.
+6. For quantity: use the numeric value shown. If not specified, default to 1.
+7. For unit_price: use the per-unit cost shown.
+8. For total_amount: use the total charge for that row (usually quantity × unit_price).
+
+Field identification tips:
+- Vendor/Supplier: The company name at the top of the document issuing the charges.
+- Invoice Number: Labeled "INV NO", "INVOICE NUMBER", "DEBIT NOTE NO", etc.
+- Master B/L: Labeled "MB/L NO", "MBL", "Master B/L No.", etc.
+- Container: Labeled "CONTAINER NO", "Cont No.", etc. Format: 4 letters + 7 digits (e.g. EGSU9903117).
+- Seal: Often combined with container as "CONTAINER/SEAL" — extract separately.
+"""
+
+
+def extract_multi_invoice_with_llm(
+    extracted_text: str,
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Extract a multi-HBL invoice/debit note into grouped line items."""
+    text = normalize_text(extracted_text)
+    if not text:
+        raise ValueError("No text was extracted from the document.")
+
+    system = MULTI_INVOICE_SYSTEM_PROMPT
+    user_prefix = "Extract all HBL groups and their line items from this invoice/debit note:\n\n"
+    budget = _input_char_budget()
+    mime = _native_mime_for_file(file_bytes, filename)
+    native_file = _should_send_native_file(mime, page_scope=False)
+
+    if native_file:
+        return _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_INVOICE_JSON_SCHEMA,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+
+    return _call_llm_json(
+        system,
+        user_prefix + text[:budget],
+        MULTI_INVOICE_JSON_SCHEMA,
+        file_bytes=None,
+        filename=filename,
+    )
+

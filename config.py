@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     ocr_dpi: int = Field(default=300, alias="OCR_DPI")
     tesseract_lang: str = Field(default="eng", alias="TESSERACT_LANG")
-    tesseract_cmd: str = Field(default=None, alias="TESSERACT_CMD")
+    tesseract_cmd: str = Field(default="", alias="TESSERACT_CMD")
 
     max_input_chars: int = Field(default=90000, alias="MAX_INPUT_CHARS")
     native_min_chars: int = Field(default=600, alias="NATIVE_MIN_CHARS")
