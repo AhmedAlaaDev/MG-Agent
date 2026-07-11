@@ -1,11 +1,13 @@
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from config import normalize_azure_openai_endpoint, settings
-from llm_context import effective_llm_model, uses_gemini, uses_puter
-from pdf_extractor import normalize_text
+logger = logging.getLogger(__name__)
 
+from config import normalize_azure_openai_endpoint, settings
+from llm_context import effective_llm_model, effective_llm_provider, uses_gemini, uses_puter
+from pdf_extractor import normalize_text
 
 def _bl_record_properties() -> Dict[str, Any]:
     return {
@@ -555,13 +557,38 @@ def _call_llm_json(
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if uses_puter():
-        raise RuntimeError(
-            "Puter is a browser-side AI provider. Open /puter and use the "
-            "Puter.js extractor, or choose llm_provider=azure/gemini for "
-            "server-side API extraction."
-        )
-    if uses_gemini():
+    provider = effective_llm_provider()
+    
+    # Auto fallback logic if the requested provider is not configured/supported on the server
+    if provider == "puter":
+        if (settings.azure_openai_api_key or "").strip():
+            provider = "azure"
+            from llm_context import _llm_provider, _llm_model
+            _llm_provider.set("azure")
+            _llm_model.set(settings.azure_openai_deployment)
+        elif (settings.gemini_api_key or "").strip():
+            provider = "gemini"
+            from llm_context import _llm_provider, _llm_model
+            _llm_provider.set("gemini")
+            _llm_model.set(settings.gemini_model)
+        else:
+            raise RuntimeError(
+                "Puter is a browser-side AI provider. Open /puter and use the "
+                "Puter.js extractor, or configure AZURE_OPENAI_API_KEY/GEMINI_API_KEY "
+                "in .env for server-side API extraction."
+            )
+            
+    if provider == "gemini" and not (settings.gemini_api_key or "").strip():
+        if (settings.azure_openai_api_key or "").strip():
+            logger.warning("Gemini is not configured. Falling back to Azure OpenAI.")
+            provider = "azure"
+            from llm_context import _llm_provider, _llm_model
+            _llm_provider.set("azure")
+            _llm_model.set(settings.azure_openai_deployment)
+        else:
+            raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
+            
+    if provider == "gemini":
         return _call_gemini_json(
             system, user, schema, file_bytes=file_bytes, filename=filename
         )
@@ -800,3 +827,87 @@ def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
         first["confidence"] = {**(first.get("confidence") or {}), **payload["confidence"]}
     first["_document_layout"] = payload.get("document_layout")
     return first
+
+INVOICE_JSON_SCHEMA = {
+    "name": "invoice_extraction",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "vendor_name": {"type": ["string", "null"]},
+            "vendor_invoice_number": {"type": ["string", "null"]},
+            "master_bl_number": {"type": ["string", "null"]},
+            "house_bl_number": {"type": ["string", "null"]},
+            "container_number": {"type": ["string", "null"]},
+            "seal_number": {"type": ["string", "null"]},
+            "currency": {"type": ["string", "null"], "description": "3-letter ISO code like USD, EGP, EUR"},
+            "line_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "service_description": {"type": ["string", "null"]},
+                        "quantity": {"type": ["number", "null"]},
+                        "unit_price": {"type": ["number", "null"]},
+                        "total_amount": {"type": ["number", "null"]}
+                    },
+                    "required": ["service_description", "quantity", "unit_price", "total_amount"]
+                }
+            }
+        },
+        "required": ["vendor_name", "vendor_invoice_number", "master_bl_number", "house_bl_number", "container_number", "seal_number", "currency", "line_items"]
+    }
+}
+
+INVOICE_SYSTEM_PROMPT = """
+You are a professional invoice and debit note data extraction engine for shipping and logistics.
+
+Analyze the raw text and visual layout of the invoice/debit note to extract:
+1. Vendor/Supplier Name: The company billing the charges.
+2. Vendor Invoice/Debit Note Number: Labeled as INV NO, INVOICE NUMBER, DEBIT NOTE NO, DEBIT NOTE NUMBER, etc.
+3. Master B/L Number: Labeled as "Master B/L No.", "MBL", "Master Bill of Lading", "M/BL", etc. (e.g. COSU6501303560).
+4. House B/L Number: Labeled as "B/L(H)", "HBL", "House Bill of Lading", "House B/L No.", "H/BL", "ALYHHSE6050007Z", etc.
+5. Container Number: Locate container number reference (e.g. CSGU7177299, DFSU1234567). Labeled as "Container No.", "Cont No.", etc.
+6. Seal Number: Locate seal number reference (e.g. CW889907, EGY123456). Labeled as "Seal No.", "Seal Number", etc.
+7. Currency: Extract the main currency used for line items, returned as a 3-letter ISO code (e.g. USD, EGP, EUR).
+8. Line Items: Extract each charge/particular line item including:
+   - service_description: Description of the fee or service (e.g., "REFUND DOCS", "Ocean Freight", "Handling").
+   - quantity: Number of units or count of services. If not specified, default to 1.
+   - unit_price: The cost per unit.
+   - total_amount: The total charge for this row.
+"""
+
+
+def extract_invoice_with_llm(
+    extracted_text: str,
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    text = normalize_text(extracted_text)
+    if not text:
+        raise ValueError("No text was extracted from the document.")
+
+    system = INVOICE_SYSTEM_PROMPT
+    user_prefix = "Extract all line items and headers from this invoice/debit note:\n\n"
+    budget = _input_char_budget()
+    mime = _native_mime_for_file(file_bytes, filename)
+    native_file = _should_send_native_file(mime, page_scope=False)
+
+    if native_file:
+        return _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            INVOICE_JSON_SCHEMA,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+
+    return _call_llm_json(
+        system,
+        user_prefix + text[:budget],
+        INVOICE_JSON_SCHEMA,
+        file_bytes=None,
+        filename=filename,
+    )
