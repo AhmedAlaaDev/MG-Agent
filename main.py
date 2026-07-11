@@ -3576,6 +3576,19 @@ async def extract_invoice_multi(
                             group_is_master = hop.get("mesco_bltype") == 886150001
                             if hop.get("_mesco_xollsp_tariffquote_value"):
                                 group_tariff_quote_id = hop["_mesco_xollsp_tariffquote_value"]
+                            
+                            # Patch existing operation with extracted CBM/KGS if applicable
+                            if post_to_dataverse and not group_is_master:
+                                patch_fields = {}
+                                if group.get("cbm") is not None:
+                                    patch_fields["cr401_totalvolume"] = float(group["cbm"])
+                                if group.get("kgs") is not None:
+                                    patch_fields["cr401_totalgrossweight"] = float(group["kgs"])
+                                if patch_fields:
+                                    try:
+                                        client.patch(f"mesco_operations({group_op_id})", json=patch_fields)
+                                    except Exception as patch_e:
+                                        logger.warning("Failed to patch CBM/KGS for HBL %s: %s", hbl, patch_e)
                 except Exception as e:
                     logger.warning("Failed to resolve operation for HBL %s: %s", hbl, e)
 
@@ -3587,6 +3600,11 @@ async def extract_invoice_multi(
                         "mesco_masterblno": hbl,
                         "mesco_bltype": 886150002,  # House B/L
                     }
+                    if group.get("cbm") is not None:
+                        group_fields["cr401_totalvolume"] = float(group["cbm"])
+                    if group.get("kgs") is not None:
+                        group_fields["cr401_totalgrossweight"] = float(group["kgs"])
+
                     if fallback_op_id:
                         group_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({fallback_op_id})"
                     group_op_id = _create_entity(client, "mesco_operations", group_fields)
