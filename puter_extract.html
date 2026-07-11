@@ -138,6 +138,13 @@
       <label for="fileInput">PDF, Excel, or CSV document</label>
       <input id="fileInput" type="file" accept="application/pdf,.pdf,.xlsx,.xls,.csv,text/csv">
 
+      <label for="docTypeSelect">Document Type</label>
+      <select id="docTypeSelect">
+        <option value="bl">Bill of Lading</option>
+        <option value="invoice">Single-HBL Invoice</option>
+        <option value="multi_invoice">Multi-HBL Invoice / Debit Note</option>
+      </select>
+
       <label for="modelSelect">Puter Gemini model</label>
       <select id="modelSelect"></select>
 
@@ -370,8 +377,14 @@
         const textOutro = documentInput.inputKind === "spreadsheet"
           ? "\n[Browser spreadsheet text ends]"
           : "\n[Browser text hint ends]";
+
+        const docType = $("docTypeSelect").value;
+        let pPrefix = puterConfig.prompt_prefix;
+        if (docType === "invoice") pPrefix = puterConfig.invoice_prompt_prefix;
+        if (docType === "multi_invoice") pPrefix = puterConfig.multi_invoice_prompt_prefix;
+
         const prompt =
-          puterConfig.prompt_prefix +
+          pPrefix +
           "Source filename: " + (file.name || "upload") + "\n" +
           "Source kind: " + documentInput.inputKind + "\n\n" +
           textIntro +
@@ -393,31 +406,45 @@
         $("puterOutput").textContent = pretty(puterPayload);
 
         setStatus("Validating and mapping to Dataverse CRM JSON...");
-        const formatResponse = await fetch("/puter/format", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({
-            puter_payload: puterPayload,
-            raw_text: rawText,
-            bl_type: $("houseToggle").checked ? "house" : "master",
-            post_to_dataverse: $("postToggle").checked,
-            llm_model: model,
-            visual_page_count: documentInput.pageImages.length,
-            pdf_page_count: documentInput.pageCount,
-            input_kind: documentInput.inputKind,
-            source_filename: file.name || null
-          })
-        });
+        let formatResponse;
+        if (docType === "bl") {
+          formatResponse = await fetch("/puter/format", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({
+              puter_payload: puterPayload,
+              raw_text: rawText,
+              bl_type: $("houseToggle").checked ? "house" : "master",
+              post_to_dataverse: $("postToggle").checked,
+              llm_model: model,
+              visual_page_count: documentInput.pageImages.length,
+              pdf_page_count: documentInput.pageCount,
+              input_kind: documentInput.inputKind,
+              source_filename: file.name || null
+            })
+          });
+        } else {
+          const endpoint = docType === "invoice" ? "/extract/invoice" : "/extract/invoice/multi";
+          const formData = new FormData();
+          formData.append("extracted_data_json", JSON.stringify(puterPayload));
+          formData.append("post_to_dataverse", $("postToggle").checked);
+          formatResponse = await fetch(endpoint, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            body: formData
+          });
+        }
+
         const formatted = await formatResponse.json();
         if (!formatResponse.ok || !formatted.success) {
           throw new Error(formatted.error || "The Puter result could not be mapped.");
         }
 
-        lastCrmJson = formatted.data;
+        lastCrmJson = formatted.data || formatted.groups || formatted;
         $("crmOutput").textContent = pretty(formatted);
         $("copyBtn").disabled = false;
 
-        const masterId = formatted.dataverse_result && formatted.dataverse_result.master_id;
+        const masterId = (formatted.dataverse_result && formatted.dataverse_result.master_id) || formatted.resolved_operation_id;
         if (masterId) {
           $("links").innerHTML =
             "Dataverse upload complete. <a href=\"/dynamics/operation/" +

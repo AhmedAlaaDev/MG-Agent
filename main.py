@@ -2020,6 +2020,7 @@ def _merge_puter_records_with_deterministic_pdf(
 @app.get("/puter/config", tags=["Extraction"])
 async def puter_config():
     """Return the browser-side Puter.js extraction prompt and model list."""
+    from ai_extractor import INVOICE_JSON_SCHEMA, INVOICE_SYSTEM_PROMPT, MULTI_INVOICE_JSON_SCHEMA, MULTI_INVOICE_SYSTEM_PROMPT
     schema_hint = json.dumps(MULTI_BL_JSON_SCHEMA.get("schema") or MULTI_BL_JSON_SCHEMA)
     prompt_prefix = (
         SYSTEM_PROMPT
@@ -2030,11 +2031,36 @@ async def puter_config():
         + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
         + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
     )
+
+    inv_schema_hint = json.dumps(INVOICE_JSON_SCHEMA.get("schema") or INVOICE_JSON_SCHEMA)
+    inv_prompt_prefix = (
+        INVOICE_SYSTEM_PROMPT
+        + "\n\nReturn ONLY one valid JSON object matching this schema. "
+        + "No markdown fences, no commentary, no extra text after the JSON:\n"
+        + inv_schema_hint
+        + "\n\nThe attached PDF page images are the authoritative source. "
+        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
+        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
+    )
+
+    multi_inv_schema_hint = json.dumps(MULTI_INVOICE_JSON_SCHEMA.get("schema") or MULTI_INVOICE_JSON_SCHEMA)
+    multi_inv_prompt_prefix = (
+        MULTI_INVOICE_SYSTEM_PROMPT
+        + "\n\nReturn ONLY one valid JSON object matching this schema. "
+        + "No markdown fences, no commentary, no extra text after the JSON:\n"
+        + multi_inv_schema_hint
+        + "\n\nThe attached PDF page images are the authoritative source. "
+        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
+        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
+    )
+
     return {
         "provider": "puter",
         "default_model": settings.puter_model,
         "models": list(GEMINI_MODELS),
         "prompt_prefix": prompt_prefix,
+        "invoice_prompt_prefix": inv_prompt_prefix,
+        "multi_invoice_prompt_prefix": multi_inv_prompt_prefix,
         "max_text_chars": settings.gemini_max_input_chars,
         "max_visual_pages": 8,
         "pdf_render_scale": 2.0,
@@ -2937,7 +2963,7 @@ def _find_existing_invoice_cost_line(
 
 @app.post("/extract/invoice", response_model=InvoiceExtractResponse, tags=["Invoice Extraction"])
 async def extract_invoice(
-    file: UploadFile = File(..., description="PDF or Image invoice file"),
+    file: Optional[UploadFile] = File(None, description="PDF or Image invoice file"),
     operation_id: Optional[str] = Form(None, description="Dynamics operation ID to post cost lines under"),
     current_bl: Optional[str] = Form(None, description="Current operation BL number to match against"),
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
@@ -2949,19 +2975,36 @@ async def extract_invoice(
         None,
         description="Gemini model id when llm_provider=gemini",
     ),
+    extracted_data_json: Optional[str] = Form(
+        None,
+        description="Optional pre-extracted JSON data (e.g. from Puter browser). If provided, LLM extraction is skipped."
+    ),
 ):
     provider_val = llm_provider.value if llm_provider else None
     model_val = llm_model.value if llm_model else None
     try:
+        import json
         from ai_extractor import extract_invoice_with_llm
-        file_bytes = await file.read()
-        extracted = extract_document_text_professionally(file_bytes, file.filename)
-        raw_text = extracted.get("text", "")
-        if not raw_text.strip():
-            return InvoiceExtractResponse(success=False, error="No text extracted from file.")
         
-        with llm_request_overrides(provider_val, model_val):
-            extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=file.filename)
+        file_bytes = None
+        filename = "browser_extracted.pdf"
+        if file:
+            file_bytes = await file.read()
+            filename = file.filename
+            extracted = extract_document_text_professionally(file_bytes, filename)
+            raw_text = extracted.get("text", "")
+            if not raw_text.strip() and not extracted_data_json:
+                return InvoiceExtractResponse(success=False, error="No text extracted from file.")
+        else:
+            raw_text = ""
+            if not extracted_data_json:
+                return InvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
+        
+        if extracted_data_json:
+            extracted_data = json.loads(extracted_data_json)
+        else:
+            with llm_request_overrides(provider_val, model_val):
+                extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
         
         extracted_mbl = extracted_data.get("master_bl_number") or ""
         extracted_hbl = extracted_data.get("house_bl_number") or ""
@@ -3347,7 +3390,7 @@ class MultiInvoiceExtractResponse(BaseModel):
 
 @app.post("/extract/invoice/multi", response_model=MultiInvoiceExtractResponse, tags=["Invoice Extraction"])
 async def extract_invoice_multi(
-    file: UploadFile = File(..., description="PDF or Image invoice/debit note file"),
+    file: Optional[UploadFile] = File(None, description="PDF or Image invoice/debit note file"),
     operation_id: Optional[str] = Form(None, description="Fallback Dynamics operation ID if HBL lookup fails"),
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
@@ -3358,21 +3401,37 @@ async def extract_invoice_multi(
         None,
         description="Gemini model id when llm_provider=gemini",
     ),
+    extracted_data_json: Optional[str] = Form(
+        None,
+        description="Optional pre-extracted JSON data (e.g. from Puter browser). If provided, LLM extraction is skipped."
+    ),
 ):
     """Extract a multi-HBL invoice/debit note and post cost lines per HBL group."""
     provider_val = llm_provider.value if llm_provider else None
     model_val = llm_model.value if llm_model else None
     try:
+        import json
         from ai_extractor import extract_multi_invoice_with_llm
 
-        file_bytes = await file.read()
-        extracted = extract_document_text_professionally(file_bytes, file.filename)
-        raw_text = extracted.get("text", "")
-        if not raw_text.strip():
-            return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+        file_bytes = None
+        filename = "browser_extracted.pdf"
+        if file:
+            file_bytes = await file.read()
+            filename = file.filename
+            extracted = extract_document_text_professionally(file_bytes, filename)
+            raw_text = extracted.get("text", "")
+            if not raw_text.strip() and not extracted_data_json:
+                return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+        else:
+            raw_text = ""
+            if not extracted_data_json:
+                return MultiInvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
 
-        with llm_request_overrides(provider_val, model_val):
-            extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=file.filename)
+        if extracted_data_json:
+            extracted_data = json.loads(extracted_data_json)
+        else:
+            with llm_request_overrides(provider_val, model_val):
+                extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
 
         vendor_name = extracted_data.get("vendor_name")
         vendor_invoice_number = extracted_data.get("vendor_invoice_number")
