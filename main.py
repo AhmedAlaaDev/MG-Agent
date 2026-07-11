@@ -2719,6 +2719,222 @@ def _ensure_invoice_container(
     }
 
 
+def _clean_invoice_bl(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def _parse_invoice_charge_rows(raw_text: str) -> List[Dict[str, Any]]:
+    """Parse table-style invoice charge rows that include an HBL/CNT column."""
+    rows: List[Dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    lines = [line.strip() for line in raw_text.splitlines()]
+    in_table = False
+    pending_desc: List[str] = []
+    index = 0
+
+    def parse_row(line: str) -> Optional[Dict[str, Any]]:
+        tokens = line.split()
+        if len(tokens) < 9:
+            return None
+        hbl = tokens[0].upper()
+        if not re.fullmatch(r"[A-Z]{3,}\d{5,}[A-Z0-9]*", hbl):
+            return None
+        try:
+            kgs = float(tokens[1])
+            cbm = float(tokens[2])
+            credit = float(tokens[-1])
+            debit = float(tokens[-2])
+            currency = tokens[-3].upper()
+            unit_price = float(tokens[-4])
+            quantity = float(tokens[-5])
+            unit = tokens[-6].upper()
+        except (IndexError, ValueError):
+            return None
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            return None
+        return {
+            "house_bl_number": hbl,
+            "kgs": kgs,
+            "cbm": cbm,
+            "service_description": re.sub(r"\s+", " ", " ".join(tokens[3:-6])).strip().upper(),
+            "unit": unit,
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "currency": currency,
+            "total_amount": debit,
+            "credit_amount": credit,
+        }
+
+    def is_table_noise(line: str) -> bool:
+        upper = line.upper()
+        return (
+            not line
+            or upper.startswith("[")
+            or upper.startswith("HBL/CNT")
+            or upper.startswith("SUB TOTAL")
+            or upper.startswith("TOTAL:")
+            or upper.startswith("WWW.")
+            or "COPYRIGHT" in upper
+        )
+
+    while index < len(lines):
+        line = lines[index]
+        if "HBL/CNT" in line.upper() and "DEBIT" in line.upper():
+            in_table = True
+            pending_desc = []
+            index += 1
+            continue
+        if in_table and line.upper().startswith(("SUB TOTAL", "TOTAL:")):
+            in_table = False
+            pending_desc = []
+            index += 1
+            continue
+        if not in_table:
+            index += 1
+            continue
+
+        parsed = parse_row(line)
+        if parsed:
+            desc_parts = [part for part in pending_desc if part]
+            if parsed["service_description"]:
+                desc_parts.append(parsed["service_description"])
+            pending_desc = []
+
+            lookahead = index + 1
+            while lookahead < len(lines):
+                next_line = lines[lookahead]
+                if parse_row(next_line) or is_table_noise(next_line):
+                    break
+                desc_parts.append(next_line)
+                lookahead += 1
+
+            if desc_parts:
+                parsed["service_description"] = re.sub(
+                    r"\s+",
+                    " ",
+                    " ".join(desc_parts),
+                ).strip().upper()
+
+            signature = (
+                parsed["house_bl_number"],
+                parsed["service_description"],
+                parsed["quantity"],
+                parsed["unit_price"],
+                parsed["total_amount"],
+            )
+            if signature not in seen:
+                seen.add(signature)
+                rows.append(parsed)
+            index = lookahead
+            continue
+
+        if not is_table_noise(line):
+            pending_desc.append(line)
+        index += 1
+
+    return rows
+
+
+def _apply_operation_invoice_scope(
+    extracted_data: Dict[str, Any],
+    raw_text: str,
+    operation_bl: Optional[str],
+) -> Dict[str, Any]:
+    """When an invoice contains many HBLs, keep only rows for the selected operation."""
+    target_bl = _clean_invoice_bl(operation_bl)
+    if not target_bl:
+        return extracted_data
+
+    rows = _parse_invoice_charge_rows(raw_text)
+    matching_rows = [
+        row for row in rows
+        if _clean_invoice_bl(row.get("house_bl_number")) == target_bl
+    ]
+    if not matching_rows:
+        return extracted_data
+
+    scoped = dict(extracted_data)
+    scoped["house_bl_number"] = operation_bl
+    scoped["currency"] = matching_rows[0].get("currency") or scoped.get("currency")
+    scoped["line_items"] = [
+        {
+            "service_description": row["service_description"],
+            "quantity": row["quantity"],
+            "unit_price": row["unit_price"],
+            "total_amount": row["total_amount"],
+        }
+        for row in matching_rows
+    ]
+    scoped["invoice_scope"] = {
+        "operation_bl": operation_bl,
+        "source": "deterministic_hbl_table_filter",
+        "original_line_items_count": len(extracted_data.get("line_items") or []),
+        "matched_line_items_count": len(scoped["line_items"]),
+        "document_hbl_count": len({_clean_invoice_bl(row.get("house_bl_number")) for row in rows}),
+    }
+    return scoped
+
+
+def _invoice_groups_from_table(raw_text: str) -> List[Dict[str, Any]]:
+    rows = _parse_invoice_charge_rows(raw_text)
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        hbl = row["house_bl_number"]
+        group = grouped.setdefault(
+            hbl,
+            {
+                "house_bl_number": hbl,
+                "cbm": row.get("cbm"),
+                "kgs": row.get("kgs"),
+                "line_items": [],
+            },
+        )
+        group["line_items"].append({
+            "service_description": row["service_description"],
+            "quantity": row["quantity"],
+            "unit_price": row["unit_price"],
+            "total_amount": row["total_amount"],
+        })
+    return list(grouped.values())
+
+
+def _invoice_cost_signature(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": str(item.get("service_description") or "Invoice Charge").strip(),
+        "quantity": float(item.get("quantity") or 1),
+        "unit_price": float(item.get("unit_price") or 0),
+    }
+
+
+def _find_existing_invoice_cost_line(
+    client: DataverseClientService,
+    operation_id: str,
+    is_master: bool,
+    vendor_invoice_number: Optional[str],
+    item: Dict[str, Any],
+) -> Optional[str]:
+    if not vendor_invoice_number:
+        return None
+    sig = _invoice_cost_signature(item)
+    op_field = "_mesco_master3_value" if is_master else "_mesco_operation_value"
+    name = sig["name"].replace("'", "''")
+    invoice = str(vendor_invoice_number).replace("'", "''")
+    query = (
+        "xollsp_quotecostlines?"
+        "$select=xollsp_quotecostlineid"
+        f"&$filter={op_field} eq {operation_id} "
+        f"and mesco_vendorinvoicenumber eq '{invoice}' "
+        f"and xollsp_name eq '{name}' "
+        f"and xollsp_quantity eq {sig['quantity']} "
+        f"and xollsp_unitamount eq {sig['unit_price']}"
+        "&$top=1"
+    )
+    rows = client.get(query).json().get("value", [])
+    if not rows:
+        return None
+    return rows[0].get("xollsp_quotecostlineid")
+
+
 @app.post("/extract/invoice", response_model=InvoiceExtractResponse, tags=["Invoice Extraction"])
 async def extract_invoice(
     file: UploadFile = File(..., description="PDF or Image invoice file"),
@@ -2765,34 +2981,56 @@ async def extract_invoice(
         except Exception:
             pass
 
-        # If no operation_id is provided, look it up in Dynamics using extracted B/L numbers
-        if not resolved_op_id and client and (extracted_mbl or extracted_hbl):
-            queries = []
-            if extracted_hbl:
-                queries.append(f"mesco_masterblno eq '{extracted_hbl}'")
-                queries.append(f"mesco_code eq '{extracted_hbl}'")
-            if extracted_mbl:
-                queries.append(f"mesco_masterblno eq '{extracted_mbl}'")
-                queries.append(f"mesco_code eq '{extracted_mbl}'")
-            
-            if queries:
-                filter_str = " or ".join(queries)
-                search_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote&$filter={filter_str}&$top=1"
-                try:
-                    search_resp = client.get(search_url)
-                    if search_resp.status_code == 200:
-                        search_results = search_resp.json().get("value", [])
-                        if search_results:
-                            op = search_results[0]
-                            resolved_op_id = op["mesco_operationid"]
-                            resolved_op_code = op.get("mesco_code")
-                            resolved_op_bl = op.get("mesco_masterblno")
-                            is_master = op.get("mesco_bltype") == 886150001
-                            op_bl_number = resolved_op_bl
-                            if op.get("_mesco_xollsp_tariffquote_value"):
-                                tariff_quote_id = op["_mesco_xollsp_tariffquote_value"]
-                except Exception as search_err:
-                    logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
+        # If no operation_id is provided, resolve by B/L in a deterministic order.
+        # Prefer House B/L over Master B/L so multi-HBL debit notes do not post
+        # every invoice row to the master operation.
+        if not resolved_op_id and client and (current_bl or extracted_hbl or extracted_mbl):
+            def find_operation_by_bl(bl_value: str, bl_type: Optional[int] = None) -> Optional[Dict[str, Any]]:
+                safe_bl = str(bl_value or "").replace("'", "''").strip()
+                if not safe_bl:
+                    return None
+                conditions = [
+                    f"(mesco_masterblno eq '{safe_bl}' or mesco_code eq '{safe_bl}')",
+                ]
+                if bl_type is not None:
+                    conditions.append(f"mesco_bltype eq {bl_type}")
+                filter_str = " and ".join(conditions)
+                url = (
+                    "mesco_operations?"
+                    "$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                    f"&$filter={filter_str}&$top=1"
+                )
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    return None
+                rows = resp.json().get("value", [])
+                return rows[0] if rows else None
+
+            try:
+                candidates: List[tuple[str, Optional[int]]] = []
+                if current_bl:
+                    candidates.append((current_bl, None))
+                if extracted_hbl:
+                    candidates.append((extracted_hbl, 886150002))
+                    candidates.append((extracted_hbl, None))
+                if extracted_mbl:
+                    candidates.append((extracted_mbl, 886150001))
+                    candidates.append((extracted_mbl, None))
+
+                for bl_value, bl_type in candidates:
+                    op = find_operation_by_bl(bl_value, bl_type)
+                    if not op:
+                        continue
+                    resolved_op_id = op["mesco_operationid"]
+                    resolved_op_code = op.get("mesco_code")
+                    resolved_op_bl = op.get("mesco_masterblno")
+                    is_master = op.get("mesco_bltype") == 886150001
+                    op_bl_number = resolved_op_bl
+                    if op.get("_mesco_xollsp_tariffquote_value"):
+                        tariff_quote_id = op["_mesco_xollsp_tariffquote_value"]
+                    break
+            except Exception as search_err:
+                logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
 
         # Auto-create Operation structure if not found and post_to_dataverse is True
         if not resolved_op_id and post_to_dataverse and client and (extracted_mbl or extracted_hbl):
@@ -2813,7 +3051,6 @@ async def extract_invoice(
                     if not master_id:
                         # Create Master Operation
                         op_fields = {
-                            "mesco_name": extracted_mbl,
                             "mesco_code": extracted_mbl,
                             "mesco_masterblno": extracted_mbl,
                             "mesco_bltype": 886150001,  # Master B/L
@@ -2835,7 +3072,6 @@ async def extract_invoice(
                     if not house_id:
                         # Create House Operation
                         op_fields = {
-                            "mesco_name": extracted_hbl,
                             "mesco_code": extracted_hbl,
                             "mesco_masterblno": extracted_hbl,
                             "mesco_bltype": 886150002,  # House B/L
@@ -2876,6 +3112,13 @@ async def extract_invoice(
                         tariff_quote_id = op_data["_mesco_xollsp_tariffquote_value"]
             except Exception as metadata_err:
                 logger.warning("Failed to fetch resolved operation details: %s", metadata_err)
+
+        if resolved_op_bl:
+            extracted_data = _apply_operation_invoice_scope(
+                extracted_data,
+                raw_text,
+                resolved_op_bl,
+            )
 
         # Build direct web URL to the Operation record in Dynamics
         dynamics_url = None
@@ -2925,21 +3168,23 @@ async def extract_invoice(
                     if not q:
                         return None
                     q_clean = re.sub(r"[^a-z0-9]", "", q.lower())
+                    if not q_clean:
+                        return None
                     for opt in options:
                         lbl = opt.get(key_name) or ""
                         lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                        if lbl_clean == q_clean:
+                        if lbl_clean and lbl_clean == q_clean:
                             return opt[key_id]
                         if second_key and opt.get(second_key):
                             scnd = opt[second_key]
                             scnd_clean = re.sub(r"[^a-z0-9]", "", scnd.lower())
-                            if scnd_clean == q_clean:
+                            if scnd_clean and scnd_clean == q_clean:
                                 return opt[key_id]
                     # Partial match
                     for opt in options:
                         lbl = opt.get(key_name) or ""
                         lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                        if q_clean in lbl_clean or lbl_clean in q_clean:
+                        if lbl_clean and (q_clean in lbl_clean or lbl_clean in q_clean):
                             return opt[key_id]
                     return options[0][key_id] if fallback_first and options else None
 
@@ -3001,21 +3246,47 @@ async def extract_invoice(
                     else:
                         payload["mesco_Operation@odata.bind"] = f"/mesco_operations({resolved_op_id})"
                     
-                    post_resp = client.post("xollsp_quotecostlines", json=payload)
-                    if post_resp.status_code in (200, 201):
-                        dataverse_results.append(post_resp.json())
-                    elif post_resp.status_code == 204:
+                    existing_cost_line_id = _find_existing_invoice_cost_line(
+                        client,
+                        resolved_op_id,
+                        is_master,
+                        extracted_data.get("vendor_invoice_number"),
+                        item,
+                    )
+                    if existing_cost_line_id:
+                        update_payload = dict(payload)
+                        if not matched_srv:
+                            update_payload["xollsp_LogisticService@odata.bind"] = None
+                        patch_resp = client.patch(
+                            f"xollsp_quotecostlines({existing_cost_line_id})",
+                            json=update_payload,
+                        )
                         dataverse_results.append({
                             "success": True,
-                            "status_code": post_resp.status_code,
-                            "entity_url": post_resp.headers.get("OData-EntityId"),
+                            "status_code": patch_resp.status_code,
+                            "action": "updated",
+                            "id": existing_cost_line_id,
                         })
                     else:
-                        dataverse_results.append({
-                            "success": False,
-                            "status_code": post_resp.status_code,
-                            "error": post_resp.text,
-                        })
+                        post_resp = client.post("xollsp_quotecostlines", json=payload)
+                        if post_resp.status_code in (200, 201):
+                            created_body = post_resp.json()
+                            created_body.setdefault("success", True)
+                            created_body.setdefault("action", "created")
+                            dataverse_results.append(created_body)
+                        elif post_resp.status_code == 204:
+                            dataverse_results.append({
+                                "success": True,
+                                "status_code": post_resp.status_code,
+                                "action": "created",
+                                "entity_url": post_resp.headers.get("OData-EntityId"),
+                            })
+                        else:
+                            dataverse_results.append({
+                                "success": False,
+                                "status_code": post_resp.status_code,
+                                "error": post_resp.text,
+                            })
             except Exception as e:
                 response = getattr(e, "response", None)
                 response_text = getattr(response, "text", None)
@@ -3110,6 +3381,15 @@ async def extract_invoice_multi(
         seal_number = extracted_data.get("seal_number")
         currency = extracted_data.get("currency")
         groups_raw = extracted_data.get("groups") or []
+        deterministic_groups = _invoice_groups_from_table(raw_text)
+        if deterministic_groups:
+            groups_raw = deterministic_groups
+            extracted_data["groups"] = deterministic_groups
+            extracted_data["invoice_scope"] = {
+                "source": "deterministic_hbl_table_groups",
+                "groups_count": len(deterministic_groups),
+                "line_items_count": sum(len(g.get("line_items") or []) for g in deterministic_groups),
+            }
 
         total_line_items = sum(len(g.get("line_items", [])) for g in groups_raw)
 
@@ -3164,7 +3444,6 @@ async def extract_invoice_multi(
         if not fallback_op_id and post_to_dataverse and client and master_bl_number:
             try:
                 op_fields = {
-                    "mesco_name": master_bl_number,
                     "mesco_code": master_bl_number,
                     "mesco_masterblno": master_bl_number,
                     "mesco_bltype": 886150001,  # Master B/L
@@ -3201,19 +3480,21 @@ async def extract_invoice_multi(
                 if not q:
                     return None
                 q_clean = re.sub(r"[^a-z0-9]", "", q.lower())
+                if not q_clean:
+                    return None
                 for opt in options:
                     lbl = opt.get(key_name) or ""
                     lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                    if lbl_clean == q_clean:
+                    if lbl_clean and lbl_clean == q_clean:
                         return opt[key_id]
                     if second_key and opt.get(second_key):
                         scnd_clean = re.sub(r"[^a-z0-9]", "", opt[second_key].lower())
-                        if scnd_clean == q_clean:
+                        if scnd_clean and scnd_clean == q_clean:
                             return opt[key_id]
                 for opt in options:
                     lbl = opt.get(key_name) or ""
                     lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                    if q_clean in lbl_clean or lbl_clean in q_clean:
+                    if lbl_clean and (q_clean in lbl_clean or lbl_clean in q_clean):
                         return opt[key_id]
                 return options[0][key_id] if fallback_first and options else None
 
@@ -3271,7 +3552,6 @@ async def extract_invoice_multi(
             if not group_op_id and post_to_dataverse and client and hbl:
                 try:
                     group_fields = {
-                        "mesco_name": hbl,
                         "mesco_code": hbl,
                         "mesco_masterblno": hbl,
                         "mesco_bltype": 886150002,  # House B/L
@@ -3343,12 +3623,30 @@ async def extract_invoice_multi(
                         else:
                             payload["mesco_Operation@odata.bind"] = f"/mesco_operations({group_op_id})"
 
-                        post_resp = client.post("xollsp_quotecostlines", json=payload)
-                        if post_resp.status_code in (200, 201, 204):
+                        existing_cost_line_id = _find_existing_invoice_cost_line(
+                            client,
+                            group_op_id,
+                            group_is_master,
+                            vendor_invoice_number,
+                            item,
+                        )
+                        if existing_cost_line_id:
+                            update_payload = dict(payload)
+                            if not matched_srv:
+                                update_payload["xollsp_LogisticService@odata.bind"] = None
+                            client.patch(
+                                f"xollsp_quotecostlines({existing_cost_line_id})",
+                                json=update_payload,
+                            )
                             gr.posted_count += 1
                             total_posted += 1
                         else:
-                            gr.errors.append(f"POST {desc}: {post_resp.status_code} {post_resp.text[:200]}")
+                            post_resp = client.post("xollsp_quotecostlines", json=payload)
+                            if post_resp.status_code not in (200, 201, 204):
+                                gr.errors.append(f"POST {desc}: {post_resp.status_code} {post_resp.text[:200]}")
+                                continue
+                            gr.posted_count += 1
+                            total_posted += 1
                     except Exception as e:
                         gr.errors.append(f"POST {desc}: {e}")
 
