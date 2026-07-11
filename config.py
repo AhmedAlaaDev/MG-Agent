@@ -76,6 +76,8 @@ class Settings(BaseSettings):
         default=True, alias="CUSTOM_BUSINESS_RULES_ENABLED"
     )
 
+    base_url: str = Field(default="", alias="BASE_URL")
+
     class Config:
         env_file = ".env"
         extra = "ignore"

@@ -22,7 +22,16 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
 from dataverse.client_service import DataverseClientService, RetryConfig
-from dataverse_uploader import _ENTITY, _CONTAINER_ENTITY, _CARGO_ENTITY
+from dataverse_uploader import (
+    _CARGO_ENTITY,
+    _CONTAINER_ENTITY,
+    _ENTITY,
+    _create_entity,
+    _find_existing_container,
+    _normalize_container_number,
+    _resolve_containerno_lookup,
+    _update_entity,
+)
 from dataverse_field_limits import cap_nested_payload
 
 from spreadsheet_extractor import extract_document_text_professionally
@@ -2605,6 +2614,365 @@ async def compare_dynamics(request: CompareRequest):
         )
     except Exception as exc:
         return CompareResponse(success=False, master_id=request.master_id, error=str(exc))
+
+
+class InvoiceExtractResponse(BaseModel):
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    is_bl_matched: Optional[bool] = None
+    error: Optional[str] = None
+    dataverse_results: Optional[List[Dict[str, Any]]] = None
+    dataverse_error: Optional[str] = None
+    resolved_operation_id: Optional[str] = None
+    resolved_operation_code: Optional[str] = None
+    resolved_operation_bl: Optional[str] = None
+    dynamics_url: Optional[str] = None
+
+
+def _invoice_container_parts(extracted_data: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Normalize container/seal/type values extracted from an invoice."""
+    raw_container = str(extracted_data.get("container_number") or "").strip()
+    raw_seal = str(extracted_data.get("seal_number") or "").strip()
+    container_type = str(
+        extracted_data.get("container_type")
+        or extracted_data.get("container_size")
+        or ""
+    ).strip()
+
+    parts = [p.strip() for p in re.split(r"[/,;|]", raw_container) if p.strip()]
+    container_no = ""
+    for part in parts or [raw_container]:
+        candidate = _normalize_container_number(part)
+        if re.fullmatch(r"[A-Z]{4}\d{7}", candidate):
+            container_no = candidate
+            break
+
+    if not container_no:
+        container_no = _normalize_container_number(raw_container)
+
+    if not raw_seal and len(parts) > 1:
+        for part in parts[1:]:
+            if not re.search(r"\d+\s*x\s*\d+", part, re.I):
+                raw_seal = part.strip()
+                break
+
+    if not container_type and len(parts) > 1:
+        for part in parts[1:]:
+            compact = re.sub(r"\s+", "", part.upper())
+            match = re.search(r"(?:\d+X)?(20|40|45)(HC|HQ|GP|DV|DC|RF|OT|FR)?", compact)
+            if match:
+                container_type = "".join(g for g in match.groups() if g)
+                break
+
+    return {
+        "container_no": container_no or None,
+        "seal_no": raw_seal or None,
+        "container_type": container_type or None,
+    }
+
+
+def _ensure_invoice_container(
+    client: DataverseClientService,
+    operation_id: str,
+    extracted_data: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Create or update the operation container found on an invoice."""
+    parts = _invoice_container_parts(extracted_data)
+    container_no = parts["container_no"]
+    if not container_no:
+        return None
+
+    container_no_id = _resolve_containerno_lookup(
+        client,
+        container_no,
+        parts.get("container_type"),
+    )
+    if not container_no_id:
+        logger.warning("Could not resolve/create ContainerNo lookup for %s", container_no)
+        return None
+
+    fields: Dict[str, Any] = {
+        "mesco_name": container_no,
+        "mesco_containernumber": container_no,
+        "mesco_ContainerNo@odata.bind": f"/mesco_containernos({container_no_id})",
+        "mesco_MasterOperation@odata.bind": f"/mesco_operations({operation_id})",
+    }
+    if parts.get("seal_no"):
+        fields["mesco_carrierseal"] = parts["seal_no"]
+
+    existing_id = _find_existing_container(client, operation_id, container_no)
+    if existing_id:
+        _update_entity(client, _CONTAINER_ENTITY, existing_id, fields)
+        return {
+            "id": existing_id,
+            "container_no": container_no,
+            "reused": True,
+            "seal_no": parts.get("seal_no"),
+        }
+
+    container_id = _create_entity(client, _CONTAINER_ENTITY, fields)
+    return {
+        "id": container_id,
+        "container_no": container_no,
+        "reused": False,
+        "seal_no": parts.get("seal_no"),
+    }
+
+
+@app.post("/extract/invoice", response_model=InvoiceExtractResponse, tags=["Invoice Extraction"])
+async def extract_invoice(
+    file: UploadFile = File(..., description="PDF or Image invoice file"),
+    operation_id: Optional[str] = Form(None, description="Dynamics operation ID to post cost lines under"),
+    current_bl: Optional[str] = Form(None, description="Current operation BL number to match against"),
+    post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
+    llm_provider: Optional[LlmProviderQuery] = Form(
+        None,
+        description="AI backend: puter (browser page), azure, or gemini (defaults to LLM_PROVIDER in .env)",
+    ),
+    llm_model: Optional[GeminiModelQuery] = Form(
+        None,
+        description="Gemini model id when llm_provider=gemini",
+    ),
+):
+    provider_val = llm_provider.value if llm_provider else None
+    model_val = llm_model.value if llm_model else None
+    try:
+        from ai_extractor import extract_invoice_with_llm
+        file_bytes = await file.read()
+        extracted = extract_document_text_professionally(file_bytes, file.filename)
+        raw_text = extracted.get("text", "")
+        if not raw_text.strip():
+            return InvoiceExtractResponse(success=False, error="No text extracted from file.")
+        
+        with llm_request_overrides(provider_val, model_val):
+            extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=file.filename)
+        
+        extracted_mbl = extracted_data.get("master_bl_number") or ""
+        extracted_hbl = extracted_data.get("house_bl_number") or ""
+        
+        # Initialize variables for lookup
+        resolved_op_id = operation_id
+        resolved_op_code = None
+        resolved_op_bl = current_bl
+        op_bl_number = current_bl
+        is_master = True
+        tariff_quote_id = None
+        
+        from dataverse.client_service import DataverseClientService
+        client = None
+        try:
+            client = DataverseClientService.get_instance()
+        except Exception:
+            pass
+
+        # If no operation_id is provided, look it up in Dynamics using extracted B/L numbers
+        if not resolved_op_id and client and (extracted_mbl or extracted_hbl):
+            queries = []
+            if extracted_hbl:
+                queries.append(f"mesco_masterblno eq '{extracted_hbl}'")
+                queries.append(f"mesco_code eq '{extracted_hbl}'")
+            if extracted_mbl:
+                queries.append(f"mesco_masterblno eq '{extracted_mbl}'")
+                queries.append(f"mesco_code eq '{extracted_mbl}'")
+            
+            if queries:
+                filter_str = " or ".join(queries)
+                search_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote&$filter={filter_str}&$top=1"
+                try:
+                    search_resp = client.get(search_url)
+                    if search_resp.status_code == 200:
+                        search_results = search_resp.json().get("value", [])
+                        if search_results:
+                            op = search_results[0]
+                            resolved_op_id = op["mesco_operationid"]
+                            resolved_op_code = op.get("mesco_code")
+                            resolved_op_bl = op.get("mesco_masterblno")
+                            is_master = op.get("mesco_bltype") == 886150001
+                            op_bl_number = resolved_op_bl
+                            if op.get("_mesco_xollsp_tariffquote_value"):
+                                tariff_quote_id = op["_mesco_xollsp_tariffquote_value"]
+                except Exception as search_err:
+                    logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
+
+        # Fetch operation details if not resolved yet (e.g. if operation_id was passed explicitly)
+        if resolved_op_id and client and not resolved_op_code:
+            try:
+                op_url = f"mesco_operations({resolved_op_id})?$select=mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                op_resp = client.get(op_url)
+                if op_resp.status_code == 200:
+                    op_data = op_resp.json()
+                    resolved_op_code = op_data.get("mesco_code")
+                    resolved_op_bl = op_data.get("mesco_masterblno")
+                    op_bl_number = resolved_op_bl
+                    is_master = op_data.get("mesco_bltype") == 886150001
+                    if op_data.get("_mesco_xollsp_tariffquote_value"):
+                        tariff_quote_id = op_data["_mesco_xollsp_tariffquote_value"]
+            except Exception as metadata_err:
+                logger.warning("Failed to fetch resolved operation details: %s", metadata_err)
+
+        # Build direct web URL to the Operation record in Dynamics
+        dynamics_url = None
+        if resolved_op_id:
+            dynamics_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={resolved_op_id}"
+
+        # Compare BL number
+        is_matched = None
+        if op_bl_number:
+            clean_curr = re.sub(r"[^a-z0-9]", "", op_bl_number.lower())
+            clean_mbl = re.sub(r"[^a-z0-9]", "", extracted_mbl.lower()) if extracted_mbl else ""
+            clean_hbl = re.sub(r"[^a-z0-9]", "", extracted_hbl.lower()) if extracted_hbl else ""
+            
+            is_matched = (
+                (clean_mbl and (clean_mbl in clean_curr or clean_curr in clean_mbl)) or
+                (clean_hbl and (clean_hbl in clean_curr or clean_curr in clean_hbl))
+            )
+        
+        dataverse_results = []
+        dataverse_error = None
+        
+        if post_to_dataverse and resolved_op_id and client:
+            try:
+                invoice_container = _ensure_invoice_container(
+                    client,
+                    resolved_op_id,
+                    extracted_data,
+                )
+                if invoice_container:
+                    dataverse_results.append({
+                        "type": "container",
+                        "success": True,
+                        **invoice_container,
+                    })
+                
+                # Fetch currencies list and services list from crm to map
+                services_resp = client.get("xollsp_servicedefinitions?$select=xollsp_servicedefinitionid,xollsp_name")
+                services_list = services_resp.json().get("value", [])
+                
+                currencies_resp = client.get("transactioncurrencies?$select=transactioncurrencyid,currencyname,isocurrencycode,exchangerate")
+                currencies_list = currencies_resp.json().get("value", [])
+                
+                vendors_resp = client.get("mesco_shippinglines?$select=mesco_shippinglineid,mesco_name")
+                vendors_list = vendors_resp.json().get("value", [])
+                
+                def fuzzy_match(q, options, key_id, key_name, second_key=None, fallback_first=False):
+                    if not q:
+                        return None
+                    q_clean = re.sub(r"[^a-z0-9]", "", q.lower())
+                    for opt in options:
+                        lbl = opt.get(key_name) or ""
+                        lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
+                        if lbl_clean == q_clean:
+                            return opt[key_id]
+                        if second_key and opt.get(second_key):
+                            scnd = opt[second_key]
+                            scnd_clean = re.sub(r"[^a-z0-9]", "", scnd.lower())
+                            if scnd_clean == q_clean:
+                                return opt[key_id]
+                    # Partial match
+                    for opt in options:
+                        lbl = opt.get(key_name) or ""
+                        lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
+                        if q_clean in lbl_clean or lbl_clean in q_clean:
+                            return opt[key_id]
+                    return options[0][key_id] if fallback_first and options else None
+
+                # Extract and post each item
+                ext_currency = extracted_data.get("currency")
+                currency_id = fuzzy_match(
+                    ext_currency,
+                    currencies_list,
+                    "transactioncurrencyid",
+                    "isocurrencycode",
+                    "currencyname",
+                    fallback_first=True,
+                )
+                
+                # Find exchange rate
+                ex_rate = 1.0
+                if currency_id:
+                    for cur in currencies_list:
+                        if cur.get("transactioncurrencyid") == currency_id:
+                            ex_rate = float(cur.get("exchangerate") or 1.0)
+                            break
+
+                ext_vendor = extracted_data.get("vendor_name")
+                vendor_id = fuzzy_match(ext_vendor, vendors_list, "mesco_shippinglineid", "mesco_name")
+
+                for item in extracted_data.get("line_items", []):
+                    desc = item.get("service_description") or "Invoice Charge"
+                    matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name")
+                    
+                    qty = float(item.get("quantity") or 1)
+                    u_price = float(item.get("unit_price") or 0)
+                    
+                    payload = {
+                        "xollsp_name": desc,
+                        "xollsp_quantity": qty,
+                        "xollsp_unitamount": u_price,
+                        "xollsp_unitamountbase": u_price / ex_rate if ex_rate else u_price,
+                        "xollsp_fixedamount": 0,
+                        "xollsp_fixedamountbase": 0,
+                        "mesco_servicecategory": 886150006, # Others
+                        "mesco_vendorinvoicenumber": extracted_data.get("vendor_invoice_number"),
+                    }
+                    
+                    # Bind lookups
+                    if matched_srv:
+                        payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
+                    if currency_id:
+                        payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                        payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                    if vendor_id:
+                        payload["mesco_invoicevendor_shippingline@odata.bind"] = f"/mesco_shippinglines({vendor_id})"
+                    if tariff_quote_id:
+                        payload["xollsp_TariffQuote@odata.bind"] = f"/xollsp_tariffquotes({tariff_quote_id})"
+                    if invoice_container and invoice_container.get("id"):
+                        payload["mesco_Container@odata.bind"] = f"/mesco_containers({invoice_container['id']})"
+                    
+                    if is_master:
+                        payload["mesco_Master3@odata.bind"] = f"/mesco_operations({resolved_op_id})"
+                    else:
+                        payload["mesco_Operation@odata.bind"] = f"/mesco_operations({resolved_op_id})"
+                    
+                    post_resp = client.post("xollsp_quotecostlines", json=payload)
+                    if post_resp.status_code in (200, 201):
+                        dataverse_results.append(post_resp.json())
+                    elif post_resp.status_code == 204:
+                        dataverse_results.append({
+                            "success": True,
+                            "status_code": post_resp.status_code,
+                            "entity_url": post_resp.headers.get("OData-EntityId"),
+                        })
+                    else:
+                        dataverse_results.append({
+                            "success": False,
+                            "status_code": post_resp.status_code,
+                            "error": post_resp.text,
+                        })
+            except Exception as e:
+                response = getattr(e, "response", None)
+                response_text = getattr(response, "text", None)
+                dataverse_error = f"{e}: {response_text}" if response_text else str(e)
+                logger.exception("Failed to post cost lines to Dynamics")
+        
+        # Include resolved_op_id in response metadata if needed
+        if resolved_op_id and not extracted_data.get("operation_id"):
+            extracted_data["resolved_operation_id"] = resolved_op_id
+        
+        return InvoiceExtractResponse(
+            success=True,
+            data=extracted_data,
+            is_bl_matched=is_matched,
+            dataverse_results=dataverse_results,
+            dataverse_error=dataverse_error,
+            resolved_operation_id=resolved_op_id,
+            resolved_operation_code=resolved_op_code,
+            resolved_operation_bl=resolved_op_bl,
+            dynamics_url=dynamics_url,
+        )
+    except Exception as exc:
+        logger.exception("Invoice extraction endpoint failed")
+        return InvoiceExtractResponse(success=False, error=str(exc))
 
 
 if __name__ == "__main__":
