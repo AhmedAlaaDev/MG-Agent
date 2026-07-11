@@ -2766,6 +2766,25 @@ async def extract_invoice(
                 except Exception as search_err:
                     logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
 
+        # Auto-create Operation if not found and post_to_dataverse is True
+        if not resolved_op_id and post_to_dataverse and client and (extracted_mbl or extracted_hbl):
+            try:
+                op_bl = extracted_mbl or extracted_hbl
+                op_fields = {
+                    "mesco_name": op_bl,
+                    "mesco_code": op_bl,
+                    "mesco_masterblno": op_bl,
+                    "mesco_bltype": 886150001,  # Master B/L
+                }
+                resolved_op_id = _create_entity(client, "mesco_operations", op_fields)
+                resolved_op_code = op_bl
+                resolved_op_bl = op_bl
+                is_master = True
+                op_bl_number = op_bl
+                logger.info("Auto-created Master Operation record: %s for B/L %s", resolved_op_id, op_bl)
+            except Exception as create_err:
+                logger.exception("Failed to auto-create Master Operation record: %s", create_err)
+
         # Fetch operation details if not resolved yet (e.g. if operation_id was passed explicitly)
         if resolved_op_id and client and not resolved_op_code:
             try:
@@ -2947,6 +2966,337 @@ async def extract_invoice(
         return InvoiceExtractResponse(success=False, error=str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Multi-HBL Invoice / Debit Note Extraction Endpoint
+# ---------------------------------------------------------------------------
+
+class MultiInvoiceGroupResult(BaseModel):
+    house_bl_number: Optional[str] = None
+    cbm: Optional[float] = None
+    kgs: Optional[float] = None
+    line_items_count: int = 0
+    resolved_operation_id: Optional[str] = None
+    resolved_operation_code: Optional[str] = None
+    dynamics_url: Optional[str] = None
+    posted_count: int = 0
+    errors: List[str] = []
+
+
+class MultiInvoiceExtractResponse(BaseModel):
+    success: bool
+    vendor_name: Optional[str] = None
+    vendor_invoice_number: Optional[str] = None
+    master_bl_number: Optional[str] = None
+    container_number: Optional[str] = None
+    seal_number: Optional[str] = None
+    currency: Optional[str] = None
+    groups_count: int = 0
+    total_line_items: int = 0
+    total_posted: int = 0
+    groups: List[MultiInvoiceGroupResult] = []
+    error: Optional[str] = None
+    dataverse_error: Optional[str] = None
+
+
+@app.post("/extract/invoice/multi", response_model=MultiInvoiceExtractResponse, tags=["Invoice Extraction"])
+async def extract_invoice_multi(
+    file: UploadFile = File(..., description="PDF or Image invoice/debit note file"),
+    operation_id: Optional[str] = Form(None, description="Fallback Dynamics operation ID if HBL lookup fails"),
+    post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
+    llm_provider: Optional[LlmProviderQuery] = Form(
+        None,
+        description="AI backend: puter (browser page), azure, or gemini (defaults to LLM_PROVIDER in .env)",
+    ),
+    llm_model: Optional[GeminiModelQuery] = Form(
+        None,
+        description="Gemini model id when llm_provider=gemini",
+    ),
+):
+    """Extract a multi-HBL invoice/debit note and post cost lines per HBL group."""
+    provider_val = llm_provider.value if llm_provider else None
+    model_val = llm_model.value if llm_model else None
+    try:
+        from ai_extractor import extract_multi_invoice_with_llm
+
+        file_bytes = await file.read()
+        extracted = extract_document_text_professionally(file_bytes, file.filename)
+        raw_text = extracted.get("text", "")
+        if not raw_text.strip():
+            return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+
+        with llm_request_overrides(provider_val, model_val):
+            extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=file.filename)
+
+        vendor_name = extracted_data.get("vendor_name")
+        vendor_invoice_number = extracted_data.get("vendor_invoice_number")
+        master_bl_number = extracted_data.get("master_bl_number") or ""
+        container_number = extracted_data.get("container_number")
+        seal_number = extracted_data.get("seal_number")
+        currency = extracted_data.get("currency")
+        groups_raw = extracted_data.get("groups") or []
+
+        total_line_items = sum(len(g.get("line_items", [])) for g in groups_raw)
+
+        # Initialize Dataverse client
+        from dataverse.client_service import DataverseClientService
+        client = None
+        try:
+            client = DataverseClientService.get_instance()
+        except Exception:
+            pass
+
+        # Resolve fallback operation from MBL or provided operation_id
+        fallback_op_id = operation_id
+        fallback_op_code = None
+        fallback_is_master = True
+        fallback_tariff_quote_id = None
+
+        if client and (fallback_op_id or master_bl_number):
+            if fallback_op_id and not fallback_op_code:
+                try:
+                    op_url = f"mesco_operations({fallback_op_id})?$select=mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                    op_resp = client.get(op_url)
+                    if op_resp.status_code == 200:
+                        op_data = op_resp.json()
+                        fallback_op_code = op_data.get("mesco_code")
+                        fallback_is_master = op_data.get("mesco_bltype") == 886150001
+                        if op_data.get("_mesco_xollsp_tariffquote_value"):
+                            fallback_tariff_quote_id = op_data["_mesco_xollsp_tariffquote_value"]
+                except Exception:
+                    pass
+
+            if not fallback_op_id and master_bl_number:
+                try:
+                    search_url = (
+                        f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                        f"&$filter=mesco_masterblno eq '{master_bl_number}'&$top=1"
+                    )
+                    search_resp = client.get(search_url)
+                    if search_resp.status_code == 200:
+                        results = search_resp.json().get("value", [])
+                        if results:
+                            op = results[0]
+                            fallback_op_id = op["mesco_operationid"]
+                            fallback_op_code = op.get("mesco_code")
+                            fallback_is_master = op.get("mesco_bltype") == 886150001
+                            if op.get("_mesco_xollsp_tariffquote_value"):
+                                fallback_tariff_quote_id = op["_mesco_xollsp_tariffquote_value"]
+                except Exception as e:
+                    logger.warning("Failed to lookup fallback operation by MBL: %s", e)
+
+        # Auto-create fallback Master Operation if not found and post_to_dataverse is True
+        if not fallback_op_id and post_to_dataverse and client and master_bl_number:
+            try:
+                op_fields = {
+                    "mesco_name": master_bl_number,
+                    "mesco_code": master_bl_number,
+                    "mesco_masterblno": master_bl_number,
+                    "mesco_bltype": 886150001,  # Master B/L
+                }
+                fallback_op_id = _create_entity(client, "mesco_operations", op_fields)
+                fallback_op_code = master_bl_number
+                fallback_is_master = True
+                logger.info("Auto-created fallback Master Operation record: %s for B/L %s", fallback_op_id, master_bl_number)
+            except Exception as create_err:
+                logger.exception("Failed to auto-create fallback Master Operation record: %s", create_err)
+
+        # Pre-fetch reference lists for Dataverse posting
+        services_list = []
+        currencies_list = []
+        vendors_list = []
+        currency_id = None
+        vendor_id = None
+        ex_rate = 1.0
+
+        if post_to_dataverse and client:
+            try:
+                services_resp = client.get("xollsp_servicedefinitions?$select=xollsp_servicedefinitionid,xollsp_name")
+                services_list = services_resp.json().get("value", [])
+
+                currencies_resp = client.get("transactioncurrencies?$select=transactioncurrencyid,currencyname,isocurrencycode,exchangerate")
+                currencies_list = currencies_resp.json().get("value", [])
+
+                vendors_resp = client.get("mesco_shippinglines?$select=mesco_shippinglineid,mesco_name")
+                vendors_list = vendors_resp.json().get("value", [])
+            except Exception as e:
+                logger.warning("Failed to pre-fetch reference lists: %s", e)
+
+            def fuzzy_match(q, options, key_id, key_name, second_key=None, fallback_first=False):
+                if not q:
+                    return None
+                q_clean = re.sub(r"[^a-z0-9]", "", q.lower())
+                for opt in options:
+                    lbl = opt.get(key_name) or ""
+                    lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
+                    if lbl_clean == q_clean:
+                        return opt[key_id]
+                    if second_key and opt.get(second_key):
+                        scnd_clean = re.sub(r"[^a-z0-9]", "", opt[second_key].lower())
+                        if scnd_clean == q_clean:
+                            return opt[key_id]
+                for opt in options:
+                    lbl = opt.get(key_name) or ""
+                    lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
+                    if q_clean in lbl_clean or lbl_clean in q_clean:
+                        return opt[key_id]
+                return options[0][key_id] if fallback_first and options else None
+
+            currency_id = fuzzy_match(currency, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname", fallback_first=True)
+            if currency_id:
+                for cur in currencies_list:
+                    if cur.get("transactioncurrencyid") == currency_id:
+                        ex_rate = float(cur.get("exchangerate") or 1.0)
+                        break
+
+            vendor_id = fuzzy_match(vendor_name, vendors_list, "mesco_shippinglineid", "mesco_name")
+
+        # Process each HBL group
+        group_results: List[MultiInvoiceGroupResult] = []
+        total_posted = 0
+        dataverse_error = None
+
+        for group in groups_raw:
+            hbl = group.get("house_bl_number")
+            line_items = group.get("line_items") or []
+            gr = MultiInvoiceGroupResult(
+                house_bl_number=hbl,
+                cbm=group.get("cbm"),
+                kgs=group.get("kgs"),
+                line_items_count=len(line_items),
+            )
+
+            # Resolve operation for this HBL
+            group_op_id = None
+            group_op_code = None
+            group_is_master = True
+            group_tariff_quote_id = None
+
+            if client and hbl:
+                try:
+                    hbl_filter = f"mesco_masterblno eq '{hbl}'"
+                    hbl_url = (
+                        f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                        f"&$filter={hbl_filter}&$top=1"
+                    )
+                    hbl_resp = client.get(hbl_url)
+                    if hbl_resp.status_code == 200:
+                        hbl_results = hbl_resp.json().get("value", [])
+                        if hbl_results:
+                            hop = hbl_results[0]
+                            group_op_id = hop["mesco_operationid"]
+                            group_op_code = hop.get("mesco_code")
+                            group_is_master = hop.get("mesco_bltype") == 886150001
+                            if hop.get("_mesco_xollsp_tariffquote_value"):
+                                group_tariff_quote_id = hop["_mesco_xollsp_tariffquote_value"]
+                except Exception as e:
+                    logger.warning("Failed to resolve operation for HBL %s: %s", hbl, e)
+
+            # Auto-create House Operation if not found and post_to_dataverse is True
+            if not group_op_id and post_to_dataverse and client and hbl:
+                try:
+                    group_fields = {
+                        "mesco_name": hbl,
+                        "mesco_code": hbl,
+                        "mesco_masterblno": hbl,
+                        "mesco_bltype": 886150002,  # House B/L
+                    }
+                    if fallback_op_id:
+                        group_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({fallback_op_id})"
+                    group_op_id = _create_entity(client, "mesco_operations", group_fields)
+                    group_op_code = hbl
+                    group_is_master = False
+                    logger.info("Auto-created House Operation record: %s for HBL %s", group_op_id, hbl)
+                except Exception as create_err:
+                    logger.exception("Failed to auto-create House Operation record: %s", create_err)
+
+            # Fallback to MBL/provided operation
+            if not group_op_id:
+                group_op_id = fallback_op_id
+                group_op_code = fallback_op_code
+                group_is_master = fallback_is_master
+                group_tariff_quote_id = fallback_tariff_quote_id
+
+            gr.resolved_operation_id = group_op_id
+            gr.resolved_operation_code = group_op_code
+            if group_op_id:
+                gr.dynamics_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={group_op_id}"
+
+            # Post cost lines for this group
+            if post_to_dataverse and group_op_id and client:
+                # Ensure container for this group
+                container_data = {"container_number": container_number, "seal_number": seal_number}
+                invoice_container = None
+                try:
+                    invoice_container = _ensure_invoice_container(client, group_op_id, container_data)
+                except Exception as e:
+                    gr.errors.append(f"Container creation failed: {e}")
+
+                for item in line_items:
+                    desc = item.get("service_description") or "Invoice Charge"
+                    try:
+                        matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name") if services_list else None
+
+                        qty = float(item.get("quantity") or 1)
+                        u_price = float(item.get("unit_price") or 0)
+
+                        payload = {
+                            "xollsp_name": desc,
+                            "xollsp_quantity": qty,
+                            "xollsp_unitamount": u_price,
+                            "xollsp_unitamountbase": u_price / ex_rate if ex_rate else u_price,
+                            "xollsp_fixedamount": 0,
+                            "xollsp_fixedamountbase": 0,
+                            "mesco_servicecategory": 886150006,
+                            "mesco_vendorinvoicenumber": vendor_invoice_number,
+                        }
+
+                        if matched_srv:
+                            payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
+                        if currency_id:
+                            payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                            payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                        if vendor_id:
+                            payload["mesco_invoicevendor_shippingline@odata.bind"] = f"/mesco_shippinglines({vendor_id})"
+                        if group_tariff_quote_id:
+                            payload["xollsp_TariffQuote@odata.bind"] = f"/xollsp_tariffquotes({group_tariff_quote_id})"
+                        if invoice_container and invoice_container.get("id"):
+                            payload["mesco_Container@odata.bind"] = f"/mesco_containers({invoice_container['id']})"
+
+                        if group_is_master:
+                            payload["mesco_Master3@odata.bind"] = f"/mesco_operations({group_op_id})"
+                        else:
+                            payload["mesco_Operation@odata.bind"] = f"/mesco_operations({group_op_id})"
+
+                        post_resp = client.post("xollsp_quotecostlines", json=payload)
+                        if post_resp.status_code in (200, 201, 204):
+                            gr.posted_count += 1
+                            total_posted += 1
+                        else:
+                            gr.errors.append(f"POST {desc}: {post_resp.status_code} {post_resp.text[:200]}")
+                    except Exception as e:
+                        gr.errors.append(f"POST {desc}: {e}")
+
+            group_results.append(gr)
+
+        return MultiInvoiceExtractResponse(
+            success=True,
+            vendor_name=vendor_name,
+            vendor_invoice_number=vendor_invoice_number,
+            master_bl_number=master_bl_number,
+            container_number=container_number,
+            seal_number=seal_number,
+            currency=currency,
+            groups_count=len(group_results),
+            total_line_items=total_line_items,
+            total_posted=total_posted,
+            groups=group_results,
+        )
+    except Exception as exc:
+        logger.exception("Multi-invoice extraction endpoint failed")
+        return MultiInvoiceExtractResponse(success=False, error=str(exc))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
