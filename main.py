@@ -2991,10 +2991,14 @@ async def extract_invoice(
         if file:
             file_bytes = await file.read()
             filename = file.filename
-            extracted = extract_document_text_professionally(file_bytes, filename)
-            raw_text = extracted.get("text", "")
-            if not raw_text.strip() and not extracted_data_json:
-                return InvoiceExtractResponse(success=False, error="No text extracted from file.")
+            
+            if not extracted_data_json:
+                extracted = extract_document_text_professionally(file_bytes, filename)
+                raw_text = extracted.get("text", "")
+                if not raw_text.strip():
+                    return InvoiceExtractResponse(success=False, error="No text extracted from file.")
+            else:
+                raw_text = ""
         else:
             raw_text = ""
             if not extracted_data_json:
@@ -3418,10 +3422,14 @@ async def extract_invoice_multi(
         if file:
             file_bytes = await file.read()
             filename = file.filename
-            extracted = extract_document_text_professionally(file_bytes, filename)
-            raw_text = extracted.get("text", "")
-            if not raw_text.strip() and not extracted_data_json:
-                return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+            
+            if not extracted_data_json:
+                extracted = extract_document_text_professionally(file_bytes, filename)
+                raw_text = extracted.get("text", "")
+                if not raw_text.strip():
+                    return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+            else:
+                raw_text = ""
         else:
             raw_text = ""
             if not extracted_data_json:
