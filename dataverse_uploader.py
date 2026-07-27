@@ -633,6 +633,11 @@ _LOOKUP_LABEL_HINTS: Dict[str, Dict[str, List[str]]] = {
             "ARKAS DENIZCILIK",
             "ARKAS DENIZCILIK VE NAKLIYAT",
         ],
+        "TP CARGO": [
+            "TRANS PACIFIC CARGO LIMITED",
+            "TRANS PACIFIC CARGO",
+            "TRANS PACIFIC",
+        ],
     },
     "mesco_agent": {
         "TRANS PACIFIC CARGO LIMITED (SHENZHEN)": [
@@ -914,9 +919,14 @@ def _lookup_search_variants(logical_name: str, name_value: str) -> List[str]:
         if "ALEXANDRIA" in upper and "ALEXANDRIA" not in seen:
             add("ALEXANDRIA")
 
-    if logical_name == "mesco_shippingline" and "EVERGREEN" in upper:
-        add("EVERGREEN LINE")
-        add("EVERGREEN")
+    if logical_name == "mesco_shippingline":
+        if "EVERGREEN" in upper:
+            add("EVERGREEN LINE")
+            add("EVERGREEN")
+        if "TRANS PACIFIC" in upper or "TP CARGO" in upper:
+            add("TRANS PACIFIC CARGO LIMITED")
+            add("TP CARGO")
+            add("TRANS PACIFIC CARGO")
 
     return variants
 

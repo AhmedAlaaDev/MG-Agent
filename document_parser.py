@@ -137,9 +137,11 @@ def _enrichment_text_for_record(raw_text: str, record: Dict[str, Any]) -> str:
 def _enrich_canonical_with_per_page_azure(
     canonical: List[Dict[str, Any]],
     raw_text: str,
+    quality: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """One Azure call per canonical page; merge into deterministic base (no extra records)."""
     enriched: List[Dict[str, Any]] = []
+    usages: List[Dict[str, Any]] = []
     calls = 0
     for fb in canonical:
         page_no = fb.get("_page_number")
@@ -150,6 +152,8 @@ def _enrich_canonical_with_per_page_azure(
             scoped = f"--- PAGE {page_no} ---\n{page_text}"
             try:
                 payload = extract_records_with_azure_openai(scoped, page_scope=True)
+                if payload.get("_llm_usage"):
+                    usages.append(payload["_llm_usage"])
                 recs = payload.get("records") or []
                 if recs:
                     az_rec = dict(recs[0])
@@ -163,6 +167,13 @@ def _enrich_canonical_with_per_page_azure(
         merged["_page_number"] = page_no
         merged["_page_text"] = page_text
         enriched.append(merged)
+    if quality is not None:
+        from ai_extractor import _merge_llm_usage
+
+        usage = _merge_llm_usage(usages)
+        if usage:
+            quality["llm_usage"] = usage
+            quality["llm_usage_available"] = True
     return enriched
 
 
@@ -316,7 +327,7 @@ def parse_document_intelligently(
             )
         else:
             try:
-                azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text)
+                azure_records = _enrich_canonical_with_per_page_azure(canonical, raw_text, quality)
                 quality["llm_attempted"] = True
                 quality["azure_attempted"] = True
                 quality["per_page_llm_calls"] = len(canonical)
@@ -346,6 +357,9 @@ def parse_document_intelligently(
                 document_layout = payload.get("document_layout") or "unknown"
                 azure_records = [dict(r) for r in (payload.get("records") or [])]
                 azure_warnings = list(payload.get("warnings") or [])
+                if payload.get("_llm_usage"):
+                    quality["llm_usage"] = payload["_llm_usage"]
+                    quality["llm_usage_available"] = True
                 quality["azure_document_layout"] = document_layout
                 quality["azure_record_count"] = len(azure_records)
             except Exception as exc:

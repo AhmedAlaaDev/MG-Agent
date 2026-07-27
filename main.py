@@ -1673,36 +1673,41 @@ async def _extract_file_inner_impl(
         if is_standard_master_bl(raw_text):
             master_record = parse_standard_master_bl(raw_text)
             if master_record:
-                validated = validate_and_correct(
-                    master_record,
-                    raw_text,
-                    enrichment_text=raw_text,
-                )
-                extraction_quality["document_type_detected"] = "standard_master_bl_pdf"
-                extraction_quality["record_routing"] = {
-                    "direct": 1,
-                    "azure_fallback": 0,
-                    "skipped": 0,
-                    "policy": "pdf_standard_master_bl",
-                    "mode": "single_master_bl",
-                }
-                crm_output = records_to_master_json([validated])
-                house_output = records_to_house_json([validated])
                 resolved_bl = normalize_bl_type(
                     getattr(bl_type, "value", bl_type),
                 )
+                # When user explicitly sets bl_type=house, skip the deterministic
+                # master parser and let LLM/intelligent parsing extract the house.
                 if resolved_bl == "house":
+                    extraction_quality["deterministic_master_parser_skipped"] = \
+                        "bl_type=house overrides standard master BL detection"
+                else:
+                    validated = validate_and_correct(
+                        master_record,
+                        raw_text,
+                        enrichment_text=raw_text,
+                    )
+                    extraction_quality["document_type_detected"] = "standard_master_bl_pdf"
+                    extraction_quality["record_routing"] = {
+                        "direct": 1,
+                        "azure_fallback": 0,
+                        "skipped": 0,
+                        "policy": "pdf_standard_master_bl",
+                        "mode": "single_master_bl",
+                    }
+                    crm_output = records_to_master_json([validated])
+                    house_output = records_to_house_json([validated])
                     bl_type = BlTypeQuery.master
                     extraction_quality["bl_type_corrected"] = "master_standard_bl"
-                return _build_response(
-                    crm_output,
-                    raw_text,
-                    extraction_quality,
-                    post_to_dataverse,
-                    download,
-                    house_output,
-                    bl_type=bl_type,
-                )
+                    return _build_response(
+                        crm_output,
+                        raw_text,
+                        extraction_quality,
+                        post_to_dataverse,
+                        download,
+                        house_output,
+                        bl_type=bl_type,
+                    )
 
         if is_cargo_manifest_hbl_blocks(raw_text):
             manifest = parse_cargo_manifest_hbl_blocks(raw_text)
@@ -1864,17 +1869,27 @@ def _build_response(
     dataverse_result = None
     dataverse_error = None
     masters = crm_records if crm_records else None
+    resolved_bl = getattr(bl_type, "value", bl_type)
 
     from custom_business_rules import apply_crm_payload_rules, custom_rules_enabled
 
+    # When user explicitly sets bl_type=house for a single record, use
+    # standalone house payload instead of master-level payload with nested
+    # houses. This prevents cargo/containers from being placed on the wrong
+    # operation level and avoids creating an extra empty nested house.
+    if resolved_bl == "house" and isinstance(house_output, dict):
+        house_values = house_output.get("value") or []
+        if len(house_values) == 1 and not masters:
+            crm_output = house_values[0]
+
     if isinstance(crm_output, dict) and crm_output:
-        apply_bl_type_to_crm_payload(crm_output, getattr(bl_type, "value", bl_type))
+        apply_bl_type_to_crm_payload(crm_output, resolved_bl)
     if custom_rules_enabled() and isinstance(crm_output, dict) and crm_output:
         apply_crm_payload_rules(crm_output)
     if masters:
         for m in masters:
             if isinstance(m, dict):
-                apply_bl_type_to_crm_payload(m, getattr(bl_type, "value", bl_type))
+                apply_bl_type_to_crm_payload(m, resolved_bl)
 
     # Final defensive guard: enforce Dataverse string-column length caps on
     # every master payload before either Dataverse POST or response download.
@@ -1921,6 +1936,19 @@ def _build_response(
             886150002 if resolved_bl_type == "house" else 886150001
         )
         extraction_quality.update(llm_meta())
+        if "llm_usage" not in extraction_quality:
+            if extraction_quality.get("llm_attempted"):
+                extraction_quality["llm_usage_available"] = False
+            else:
+                extraction_quality["llm_usage"] = {
+                    "provider": extraction_quality.get("llm_provider"),
+                    "model": extraction_quality.get("llm_model"),
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+                extraction_quality["llm_usage_available"] = True
 
     return ExtractResponse(
         success=True,

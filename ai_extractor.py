@@ -466,6 +466,81 @@ def _parse_json_response(content: str, provider: str) -> Dict[str, Any]:
     raise ValueError(f"{provider} returned invalid JSON (no parseable object).")
 
 
+def _response_usage_dict(response: Any, provider: str) -> Dict[str, Any]:
+    """Normalize provider token usage metadata into a small serializable dict."""
+    usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage") or response.get("usage_metadata")
+    if usage is None:
+        return {}
+
+    def _get(*names: str) -> Optional[int]:
+        for name in names:
+            value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    data: Dict[str, Any] = {
+        "provider": provider,
+        "model": effective_llm_model(),
+    }
+    prompt = _get("prompt_tokens", "prompt_token_count", "input_tokens")
+    completion = _get("completion_tokens", "candidates_token_count", "output_tokens")
+    total = _get("total_tokens", "total_token_count")
+    thoughts = _get("thoughts_token_count")
+    cached = _get("cached_content_token_count")
+
+    if prompt is not None:
+        data["prompt_tokens"] = prompt
+    if completion is not None:
+        data["completion_tokens"] = completion
+    if total is not None:
+        data["total_tokens"] = total
+    elif prompt is not None or completion is not None:
+        data["total_tokens"] = (prompt or 0) + (completion or 0)
+    if thoughts is not None:
+        data["thoughts_tokens"] = thoughts
+    if cached is not None:
+        data["cached_tokens"] = cached
+    return data
+
+
+def _attach_llm_usage(payload: Dict[str, Any], response: Any, provider: str, *, calls: int = 1) -> Dict[str, Any]:
+    usage = _response_usage_dict(response, provider)
+    if usage:
+        usage["calls"] = calls
+        payload["_llm_usage"] = usage
+    return payload
+
+
+def _merge_llm_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for usage in usages:
+        if not isinstance(usage, dict):
+            continue
+        if not merged:
+            merged = {
+                "provider": usage.get("provider"),
+                "model": usage.get("model"),
+                "calls": 0,
+            }
+        merged["calls"] = int(merged.get("calls") or 0) + int(usage.get("calls") or 1)
+        for key in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "thoughts_tokens",
+            "cached_tokens",
+        ):
+            if usage.get(key) is not None:
+                merged[key] = int(merged.get(key) or 0) + int(usage.get(key) or 0)
+    return merged
+
+
 def _call_azure_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     client = AzureClient.get_client()
     response = client.chat.completions.create(
@@ -478,7 +553,8 @@ def _call_azure_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str
         response_format={"type": "json_schema", "json_schema": schema},
     )
     content = response.choices[0].message.content or ""
-    return _parse_json_response(content, "Azure OpenAI")
+    payload = _parse_json_response(content, "Azure OpenAI")
+    return _attach_llm_usage(payload, response, "azure")
 
 
 def _gemini_file_part(file_bytes: bytes, mime_type: str):
@@ -560,8 +636,12 @@ def _call_gemini_json(
     response = _generate(contents)
     content = (response.text or "").strip()
     try:
-        return _parse_json_response(content, "Gemini")
+        payload = _parse_json_response(content, "Gemini")
+        return _attach_llm_usage(payload, response, "gemini")
     except ValueError:
+        first_usage = _response_usage_dict(response, "gemini")
+        if first_usage:
+            first_usage["calls"] = 1
         retry_note = (
             "\n\nSTRICT RETRY: return exactly one JSON object matching the schema. "
             "Do not include markdown, explanations, duplicate JSON objects, or trailing text."
@@ -577,7 +657,14 @@ def _call_gemini_json(
             retry_contents = contents + retry_note
         response = _generate(retry_contents)
         content = (response.text or "").strip()
-        return _parse_json_response(content, "Gemini")
+        payload = _parse_json_response(content, "Gemini")
+        second_usage = _response_usage_dict(response, "gemini")
+        if second_usage:
+            second_usage["calls"] = 1
+        merged_usage = _merge_llm_usage([first_usage, second_usage])
+        if merged_usage:
+            payload["_llm_usage"] = merged_usage
+        return payload
 
 
 def _call_llm_json(
@@ -721,6 +808,7 @@ def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
         "records": merged_records,
         "confidence": confidence,
         "warnings": warnings,
+        "_llm_usage": _merge_llm_usage([p.get("_llm_usage") or {} for p in payloads]),
     }
 
 

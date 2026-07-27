@@ -69,14 +69,26 @@ def _response_summary(value: Any) -> Dict[str, Any]:
         result_count = dataverse_result.get("count")
         if result_count is None and dataverse_result.get("master_id"):
             result_count = 1
+    quality = data.get("extraction_quality") or {}
+    llm_usage = quality.get("llm_usage") if isinstance(quality, dict) else None
     return {
         "success": data.get("success"),
         "error": data.get("error"),
         "dataverse_error": data.get("dataverse_error"),
         "operation_id": dataverse_result.get("master_id") if isinstance(dataverse_result, dict) else None,
         "result_count": result_count,
-        "quality": data.get("extraction_quality") or {},
+        "quality": quality,
+        "llm_usage": llm_usage or {},
     }
+
+
+def _token_value(usage: Any, key: str) -> Optional[int]:
+    if not isinstance(usage, dict) or usage.get(key) is None:
+        return None
+    try:
+        return int(usage[key])
+    except (TypeError, ValueError):
+        return None
 
 
 class UploadAuditStore:
@@ -141,12 +153,31 @@ class UploadAuditStore:
                     response_summary_json TEXT,
                     response_json TEXT,
                     error_message TEXT,
-                    duration_ms INTEGER
+                    duration_ms INTEGER,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    llm_calls INTEGER
                 )
                 """
             )
+            for column, definition in {
+                "prompt_tokens": "INTEGER",
+                "completion_tokens": "INTEGER",
+                "total_tokens": "INTEGER",
+                "llm_calls": "INTEGER",
+            }.items():
+                existing = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(upload_audit)").fetchall()
+                }
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE upload_audit ADD COLUMN {column} {definition}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_upload_audit_created_at ON upload_audit(created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_upload_audit_total_tokens ON upload_audit(total_tokens DESC)"
             )
 
     def _headers_identity(self, request: Optional[Request]) -> Dict[str, Optional[str]]:
@@ -233,6 +264,7 @@ class UploadAuditStore:
             return
         completed = _utc_now()
         summary = _response_summary(response)
+        usage = summary.get("llm_usage") or {}
         success = bool(summary.get("success")) and not summary.get("dataverse_error")
         status = "success" if success else "failed"
         error = summary.get("error") or summary.get("dataverse_error")
@@ -242,7 +274,9 @@ class UploadAuditStore:
                 """
                 UPDATE upload_audit
                 SET completed_at=?, status=?, response_summary_json=?,
-                    response_json=?, error_message=?, duration_ms=?
+                    response_json=?, error_message=?, duration_ms=?,
+                    prompt_tokens=?, completion_tokens=?, total_tokens=?,
+                    llm_calls=?
                 WHERE id=?
                 """,
                 (
@@ -252,6 +286,10 @@ class UploadAuditStore:
                     _truncate_json(response),
                     str(error) if error else None,
                     duration,
+                    _token_value(usage, "prompt_tokens"),
+                    _token_value(usage, "completion_tokens"),
+                    _token_value(usage, "total_tokens"),
+                    _token_value(usage, "calls"),
                     audit_id,
                 ),
             )

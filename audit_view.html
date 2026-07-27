@@ -600,6 +600,10 @@
           item.uploader_email,
           item.endpoint,
           item.bl_type,
+          item.prompt_tokens,
+          item.completion_tokens,
+          item.total_tokens,
+          item.llm_calls,
           operationId(item),
           rowMessage(item),
           item.id
@@ -665,6 +669,9 @@
       $("operationLink").href = opId ? apiUrl(`/dynamics/operation/${encodeURIComponent(opId)}/full`) : "#";
 
       const user = selected.uploader_name || selected.uploader_email || selected.uploader_id || selected.client_ip || "-";
+      const tokenSummary = selected.total_tokens == null
+        ? "-"
+        : `${selected.total_tokens} total (${selected.prompt_tokens || 0} in / ${selected.completion_tokens || 0} out)`;
       const rows = [
         ["Status", selected.status || "-"],
         ["Uploaded By", user],
@@ -675,6 +682,8 @@
         ["B/L Type", selected.bl_type || "-"],
         ["Dataverse", selected.post_to_dataverse ? "Post enabled" : "Extract only"],
         ["LLM", [selected.llm_provider, selected.llm_model].filter(Boolean).join(" / ") || "-"],
+        ["LLM Calls", selected.llm_calls == null ? "-" : selected.llm_calls],
+        ["Tokens", tokenSummary],
         ["File Size", fileSize(selected.file_size)],
         ["SHA-256", selected.sha256 || "-"],
         ["Client IP", selected.client_ip || "-"]
