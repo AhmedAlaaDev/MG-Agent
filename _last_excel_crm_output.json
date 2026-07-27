@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "data": null,
+  "house_data": null,
+  "records": null,
+  "error": "Puter is the default AI extractor and runs in the browser. Open /puter to upload the PDF with Puter.js, or submit this API request with llm_provider=azure or llm_provider=gemini for server-side extraction.",
+  "raw_text": null,
+  "extraction_quality": null,
+  "dataverse_result": null,
+  "dataverse_error": null
+}

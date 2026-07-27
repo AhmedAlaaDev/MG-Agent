@@ -1,0 +1,7 @@
+# Use when Debian mirrors fail with 403 Forbidden:
+#   docker compose -f docker-compose.yml -f docker-compose.ubuntu.yml up -d --build
+services:
+  intelligent-bl-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu

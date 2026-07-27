@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mesco AI | B/L Extractor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --secondary: #a855f7;
+            --bg: #0f172a;
+            --card: rgba(30, 41, 59, 0.7);
+            --text: #f8fafc;
+            --accent: #22d3ee;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Outfit', sans-serif; 
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container { max-width: 1200px; width: 100%; }
+        header { text-align: center; margin-bottom: 3rem; }
+        h1 { font-size: 3rem; background: linear-gradient(to right, var(--accent), var(--secondary)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem; }
+        p.subtitle { color: #94a3b8; font-size: 1.1rem; }
+
+        .upload-zone {
+            background: var(--card);
+            backdrop-filter: blur(12px);
+            border: 2px dashed rgba(255,255,255,0.1);
+            border-radius: 24px;
+            padding: 4rem 2rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            margin-bottom: 2rem;
+        }
+        .upload-zone:hover { border-color: var(--primary); background: rgba(30, 41, 59, 0.9); transform: translateY(-4px); }
+        .upload-zone.dragging { border-color: var(--accent); background: rgba(99, 102, 241, 0.1); }
+        
+        .btn {
+            background: linear-gradient(to right, var(--primary), var(--secondary));
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-top: 1rem;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .loading { display: none; margin-top: 2rem; }
+        .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .results { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 3rem; opacity: 0; transition: opacity 0.5s ease; }
+        .results.visible { opacity: 1; }
+        
+        .card { background: var(--card); border-radius: 20px; padding: 1.5rem; border: 1px solid rgba(255,255,255,0.05); }
+        .card h3 { margin-bottom: 1rem; color: var(--accent); border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem; }
+        
+        .field { display: flex; justify-content: space-between; margin-bottom: 0.8rem; font-size: 0.9rem; }
+        .field label { color: #94a3b8; font-weight: 500; }
+        .field span { color: #e2e8f0; text-align: right; max-width: 60%; word-break: break-all; }
+
+        pre { background: #000; padding: 1rem; border-radius: 12px; overflow-x: auto; color: #4ade80; font-family: 'Courier New', monospace; font-size: 0.85rem; max-height: 500px; }
+        
+        .container-list { margin-top: 1rem; }
+        .container-item { background: rgba(0,0,0,0.2); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; font-size: 0.85rem; }
+
+        .error-msg { color: #ef4444; background: rgba(239, 68, 68, 0.1); padding: 1rem; border-radius: 8px; margin-top: 1rem; display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Mesco Intelligent Extractor</h1>
+            <p class="subtitle">Next-gen Bill of Lading Analysis with Dual-PSM OCR & GPT-4o</p>
+        </header>
+
+        <div class="upload-zone" id="dropZone">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent); margin-bottom: 1rem;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <h3>Drag & Drop PDF</h3>
+            <p style="color: #94a3b8; margin: 0.5rem 0;">or click to browse your files</p>
+            <input type="file" id="fileInput" hidden accept=".pdf">
+        </div>
+
+        <div class="loading" id="loader">
+            <div class="spinner"></div>
+            <p style="text-align: center; margin-top: 1rem;">Analyzing document structure and extracting data...</p>
+        </div>
+
+        <div class="error-msg" id="errorMsg"></div>
+
+        <div class="results" id="results">
+            <div class="card">
+                <h3>Extracted Fields</h3>
+                <div id="fieldsList"></div>
+                
+                <h3 style="margin-top: 2rem;">Containers</h3>
+                <div id="containerList" class="container-list"></div>
+            </div>
+            
+            <div class="card">
+                <h3>OCR Raw Output</h3>
+                <pre id="rawText"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const loader = document.getElementById('loader');
+        const results = document.getElementById('results');
+        const errorMsg = document.getElementById('errorMsg');
+
+        dropZone.onclick = () => fileInput.click();
+        
+        fileInput.onchange = (e) => {
+            if (e.target.files.length > 0) handleUpload(e.target.files[0]);
+        };
+
+        dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragging'); };
+        dropZone.ondragleave = () => dropZone.classList.remove('dragging');
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragging');
+            if (e.dataTransfer.files.length > 0) handleUpload(e.dataTransfer.files[0]);
+        };
+
+        async function handleUpload(file) {
+            loader.style.display = 'block';
+            results.classList.remove('visible');
+            errorMsg.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('return_raw_text', 'true');
+
+            try {
+                const response = await fetch('/extract/pdf', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Extraction failed');
+                }
+
+                displayResults(data);
+            } catch (err) {
+                errorMsg.innerText = err.message;
+                errorMsg.style.display = 'block';
+            } finally {
+                loader.style.display = 'none';
+            }
+        }
+
+        function displayResults(data) {
+            const fields = data.extracted_fields;
+            const list = document.getElementById('fieldsList');
+            list.innerHTML = '';
+            
+            const skip = ['containers', 'confidence', 'warnings'];
+            Object.keys(fields).forEach(key => {
+                if (skip.includes(key) || fields[key] === null) return;
+                
+                const div = document.createElement('div');
+                div.className = 'field';
+                div.innerHTML = `<label>${key.replace('mesco_', '').replace('cr401_', '')}</label><span>${fields[key]}</span>`;
+                list.appendChild(div);
+            });
+
+            const cList = document.getElementById('containerList');
+            cList.innerHTML = '';
+            (fields.containers || []).forEach(c => {
+                const div = document.createElement('div');
+                div.className = 'container-item';
+                div.innerHTML = `<strong>${c.container_number || 'N/A'}</strong> - ${c.container_type || ''}<br><small>Seal: ${c.seal_number || 'N/A'}</small>`;
+                cList.appendChild(div);
+            });
+
+            document.getElementById('rawText').innerText = data.raw_text;
+            results.classList.add('visible');
+        }
+    </script>
+</body>
+</html>

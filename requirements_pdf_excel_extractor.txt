@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+pillow
+pytesseract
+numpy
+openai>=1.0.0
+pydantic-settings
+openpyxl
+xlrd>=2.0.1

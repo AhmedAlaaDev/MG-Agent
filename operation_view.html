@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Operation — Dataverse Review</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    :root {
+      --brand: #0b5cab;
+      --brand-dark: #08406f;
+      --bg: #eef1f5;
+      --card: #ffffff;
+      --border: #d9dee5;
+      --muted: #5b6573;
+      --label: #6b7280;
+      --ok: #0d7a3f;
+      --warn: #b54708;
+      --accent: #eaf2fb;
+      --lookup: #6b3fa0;
+      --chip: #eef2f7;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: "Segoe UI", Roboto, Arial, sans-serif; margin: 0; background: var(--bg); color: #1a1f29; }
+    a { color: var(--brand); }
+    .topbar {
+      background: linear-gradient(180deg, var(--brand), var(--brand-dark));
+      color: #fff; padding: 14px 22px; display: flex; align-items: center; gap: 16px;
+      flex-wrap: wrap; position: sticky; top: 0; z-index: 20; box-shadow: 0 2px 6px rgba(0,0,0,.18);
+    }
+    .topbar h1 { font-size: 1.05rem; margin: 0; font-weight: 600; letter-spacing: .2px; white-space: nowrap; }
+    .topbar .spacer { flex: 1; }
+    .idbox { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .idbox input {
+      font-size: .9rem; padding: 8px 10px; border-radius: 6px; border: 1px solid #ffffff55;
+      width: 340px; max-width: 60vw; background: #ffffff; color: #1a1f29;
+    }
+    .idbox button {
+      font-size: .9rem; padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer;
+      background: #ffffff; color: var(--brand-dark); font-weight: 600;
+    }
+    .idbox button:disabled { opacity: .6; cursor: wait; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 18px; }
+
+    .summary { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+    .pill { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; min-width: 120px; }
+    .pill .k { font-size: .68rem; text-transform: uppercase; letter-spacing: .5px; color: var(--label); }
+    .pill .v { font-size: .98rem; font-weight: 600; margin-top: 2px; }
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: .72rem; font-weight: 600; }
+    .badge.master { background: #e4effd; color: var(--brand-dark); }
+    .badge.house { background: #fff0e0; color: var(--warn); }
+    .badge.direct { background: #e7f6ec; color: var(--ok); }
+
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
+    .tab {
+      padding: 9px 16px; cursor: pointer; border: none; background: transparent; font-size: .9rem;
+      color: var(--muted); border-bottom: 3px solid transparent; margin-bottom: -2px; font-weight: 600;
+    }
+    .tab:hover { color: var(--brand); }
+    .tab.active { color: var(--brand-dark); border-bottom-color: var(--brand); }
+    .tab .count { font-size: .72rem; color: #fff; background: var(--brand); border-radius: 10px; padding: 0 7px; margin-left: 6px; }
+
+    .section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+    .section > h2 {
+      font-size: .82rem; text-transform: uppercase; letter-spacing: .6px; margin: 0;
+      padding: 11px 16px; background: var(--accent); color: var(--brand-dark); border-bottom: 1px solid var(--border);
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0; }
+    .field { padding: 10px 16px; border-bottom: 1px solid #eef1f4; border-right: 1px solid #eef1f4; }
+    .field .lbl { font-size: .7rem; text-transform: uppercase; letter-spacing: .4px; color: var(--label); margin-bottom: 3px; }
+    .field .val { font-size: .92rem; white-space: pre-wrap; word-break: break-word; min-height: 1.1em; }
+    .field .val.empty { color: #b6bcc6; font-style: italic; }
+    .field .meta { font-size: .68rem; color: var(--muted); margin-top: 3px; }
+    .lookchip { display: inline-block; font-size: .62rem; background: #f1eafa; color: var(--lookup); border: 1px solid #e0d2f3;
+      border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+    .optchip { display: inline-block; font-size: .62rem; background: var(--chip); color: var(--muted); border: 1px solid var(--border);
+      border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+    .guid { font-family: ui-monospace, Consolas, monospace; font-size: .66rem; color: #98a0ac; }
+
+    table.tbl { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    table.tbl th { text-align: left; background: var(--accent); color: var(--brand-dark); padding: 8px 10px; font-size: .72rem;
+      text-transform: uppercase; letter-spacing: .4px; border-bottom: 1px solid var(--border); }
+    table.tbl td { padding: 8px 10px; border-bottom: 1px solid #eef1f4; vertical-align: top; }
+    table.tbl tr:hover td { background: #f8fafc; }
+    .empty-block { padding: 16px; color: var(--muted); font-style: italic; }
+
+    .house { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 14px; overflow: hidden; background: var(--card); }
+    .house > .hh { padding: 12px 16px; background: #fff7ef; border-bottom: 1px solid var(--border); cursor: pointer; display: flex;
+      align-items: center; gap: 12px; }
+    .house > .hh .arrow { transition: transform .15s; color: var(--warn); }
+    .house.open > .hh .arrow { transform: rotate(90deg); }
+    .house > .hh .hmain { font-weight: 700; }
+    .house > .hh .hsub { color: var(--muted); font-size: .82rem; }
+    .house .hbody { padding: 12px 14px; }
+
+    .statusline { padding: 30px; text-align: center; color: var(--muted); }
+    .error { background: #fdecea; border: 1px solid #f3c0b8; color: #9a2b1a; border-radius: 10px; padding: 16px; }
+    pre.raw { background: #0f1620; color: #d6e2f0; padding: 16px; border-radius: 10px; overflow: auto; max-height: 70vh; font-size: .76rem; }
+    .hint { color: var(--muted); font-size: .82rem; margin: 6px 0 16px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+/* ----------------------------------------------------------------------------
+ * Field metadata — mirrors the Dynamics 365 "Operation" (mesco_operation) form.
+ * Logical names match Dataverse exactly. `lookup`/`option` flags only affect the
+ * little chips shown next to a value; the value resolver below is generic.
+ * -------------------------------------------------------------------------- */
+const L = (key, label, opts = {}) => ({ key, label, ...opts });
+
+const SECTIONS = {
+  general: {
+    title: "General",
+    fields: [
+      L("mesco_code", "Operation code"),
+      L("mesco_bltype", "B/L type", { option: true }),
+      L("mesco_blstatus", "B/L status", { option: true }),
+      L("statuscode", "Status", { option: true }),
+      L("statecode", "State", { option: true }),
+      L("mesco_direction", "Direction", { option: true }),
+      L("mesco_transporttype", "Transport type", { option: true }),
+      L("mesco_loadtype", "Load type", { option: true }),
+      L("mesco_branch", "Branch", { lookup: true }),
+      L("mesco_servicetype", "Service type", { lookup: true }),
+      L("mesco_commodity", "Commodity", { lookup: true }),
+      L("mesco_operationperson", "Operation person", { lookup: true }),
+      L("mesco_salesman", "Sales man", { lookup: true }),
+    ],
+  },
+  references: {
+    title: "B/L & references",
+    fields: [
+      L("mesco_masterblno", "Master / House B/L no."),
+      L("mesco_masterbllinkno", "Linked master B/L"),
+      L("mesco_bookingnumber", "Booking no."),
+      L("mesco_nooforgbls", "No. of original B/Ls"),
+      L("mesco_customerreference", "Customer reference"),
+      L("mesco_supplierreference", "Supplier reference"),
+      L("mesco_ponumber", "PO number"),
+      L("mesco_quoteid", "Quote ID"),
+      L("mesco_xollsp_tariffquote", "Tariff quote", { lookup: true }),
+      L("mesco_originbl", "Origin B/L"),
+      L("mesco_oppositebl", "Opposite B/L"),
+      L("mesco_bookingterm", "Booking term", { option: true }),
+      L("mesco_telexrelease", "Telex release", { option: true }),
+      L("mesco_bldraftconfirmed", "B/L draft confirmed", { option: true }),
+    ],
+  },
+  routing: {
+    title: "Routing",
+    fields: [
+      L("mesco_origin", "Port of loading (POL)", { lookup: true }),
+      L("mesco_destination", "Port of discharge (POD)", { lookup: true }),
+      L("mesco_transhipmentport", "Transhipment port", { lookup: true }),
+      L("mesco_country", "Country", { lookup: true }),
+      L("mesco_countryoforigin", "Country of origin", { lookup: true }),
+      L("mesco_freightpayableat", "Freight payable at"),
+      L("mesco_routenotes", "Route notes"),
+    ],
+  },
+  carrier: {
+    title: "Vessel / carrier",
+    fields: [
+      L("mesco_vessel", "Vessel", { lookup: true }),
+      L("mesco_voytruckno", "Voyage / truck no."),
+      L("mesco_shippingline", "Shipping line", { lookup: true }),
+      L("mesco_agent", "Agent", { lookup: true }),
+      L("mesco_airline", "Airline", { lookup: true }),
+      L("mesco_flightno", "Flight no."),
+      L("mesco_flightdate", "Flight date"),
+      L("mesco_transitflightno", "Transit flight no."),
+      L("mesco_transitflightdate", "Transit flight date"),
+      L("mesco_roadno", "Road no."),
+      L("mesco_drivername", "Driver name"),
+      L("mesco_truckername", "Trucker name"),
+    ],
+  },
+  schedule: {
+    title: "Schedule & dates",
+    fields: [
+      L("mesco_etdorigin", "ETD origin"),
+      L("mesco_etaoriign", "ETA origin"),
+      L("mesco_etadestination", "ETA destination"),
+      L("mesco_atdorigin", "ATD origin"),
+      L("mesco_atadestination", "ATA destination"),
+      L("mesco_cutoffdate", "Cut-off date"),
+      L("mesco_closedate", "Close date"),
+      L("mesco_expectedpickupdate", "Expected pickup date"),
+      L("mesco_pickupdate", "Pickup date"),
+      L("mesco_dodate", "D/O date"),
+      L("mesco_releasedate", "Release date"),
+      L("mesco_receivedinwarehousedate", "Received in warehouse"),
+      L("mesco_freetimeorigin", "Free time origin"),
+      L("mesco_freetimedestination", "Free time destination"),
+    ],
+  },
+  shipper: {
+    title: "Shipper",
+    fields: [
+      L("mesco_shipper", "Shipper (account)", { lookup: true }),
+      L("mesco_shippernamecontactno", "Shipper name / contact"),
+      L("mesco_shipperaddress", "Shipper address"),
+      L("mesco_shippercontactname", "Shipper contact name"),
+      L("mesco_shippercontactnumber", "Shipper contact number"),
+      L("mesco_shippertoagent", "Ship to agent", { option: true }),
+    ],
+  },
+  consignee: {
+    title: "Consignee, notify & partners",
+    fields: [
+      L("mesco_consignee", "Consignee (account)", { lookup: true }),
+      L("mesco_consigneenamecontactno", "Consignee name / contact"),
+      L("mesco_consigneeaddress", "Consignee address"),
+      L("mesco_consigneecontactname", "Consignee contact name"),
+      L("mesco_consigneecontactnumber", "Consignee contact number"),
+      L("mesco_hideconsignee", "Hide consignee", { option: true }),
+      L("mesco_consignee2", "Consignee 2 (account)", { lookup: true }),
+      L("mesco_alternativeconsignee", "Alternative consignee", { option: true }),
+      L("mesco_notify1", "Notify party 1 (account)", { lookup: true }),
+      L("mesco_notify2", "Notify party 2 (account)", { lookup: true }),
+      L("mesco_notifyaddress", "Notify address"),
+      L("mesco_bookingpartner", "Booking partner (account)", { lookup: true }),
+      L("mesco_freightforwarder", "Freight forwarder (account)", { lookup: true }),
+      L("mesco_supplier", "Supplier (vendor)", { lookup: true }),
+    ],
+  },
+  cargo: {
+    title: "Cargo & totals",
+    fields: [
+      L("mesco_cargodescription", "Cargo description"),
+      L("mesco_handlinginformation", "Handling information"),
+      L("mesco_containertype", "Container type", { option: true }),
+      L("mesco_containertype2", "Container type 2", { option: true }),
+      L("mesco_containertype3", "Container type 3", { option: true }),
+      L("mesco_quantity", "Quantity"),
+      L("mesco_quantity2", "Quantity 2"),
+      L("mesco_quantity3", "Quantity 3"),
+      L("cr401_totalpackages", "Total packages"),
+      L("cr401_totalgrossweight", "Total gross weight (kg)"),
+      L("cr401_totalvolume", "Total volume (CBM)"),
+      L("cr401_totalteus", "Total TEUs"),
+      L("mesco_imoclass", "IMO class"),
+      L("mesco_unnumber", "UN number"),
+      L("mesco_consolidation", "Consolidation", { option: true }),
+    ],
+  },
+  customs: {
+    title: "Customs & ACID",
+    fields: [
+      L("mesco_acidnumber", "ACID number"),
+      L("mesco_aciddetails", "ACID details"),
+      L("mesco_importerstaxno", "Importer tax no."),
+      L("mesco_foreignsupplierregistrationnumber", "Foreign supplier reg. no."),
+      L("mesco_typeofregistrationnumber", "Type of registration number", { option: true }),
+      L("mesco_certificatenumber", "Certificate number"),
+      L("mesco_customsyard", "Customs yard", { option: true }),
+      L("mesco_dono", "D/O no."),
+      L("mesco_releasenumber", "Release number"),
+      L("mesco_releasevalue", "Release value"),
+      L("mesco_form13", "Form 13"),
+      L("mesco_form13date", "Form 13 date"),
+      L("mesco_form13delivered", "Form 13 delivered", { option: true }),
+    ],
+  },
+  financials: {
+    title: "Commercial & financials",
+    fields: [
+      L("mesco_incoterm", "Incoterm", { lookup: true }),
+      L("mesco_pcfreightterm", "Freight term", { option: true }),
+      L("transactioncurrencyid", "Currency", { lookup: true }),
+      L("mesco_currency", "Currency (alt)", { lookup: true }),
+      L("exchangerate", "Exchange rate"),
+      L("mesco_invoicevalue", "Invoice value"),
+      L("mesco_amountofinsurance", "Amount of insurance"),
+      L("mesco_declaredvalueforcarriage", "Declared value for carriage"),
+      L("mesco_declaredvalueforcustoms", "Declared value for customs"),
+      L("mesco_airothercharges", "Air other charges"),
+      L("mesco_totalotherchargesduecarrier", "Total other charges due carrier"),
+      L("mesco_totalcosts", "Total costs"),
+      L("mesco_totalsales", "Total sales"),
+      L("mesco_totalmargin", "Total margin"),
+      L("mesco_totalcostsmaster", "Total costs (master)"),
+      L("mesco_totalsalesmaster", "Total sales (master)"),
+      L("mesco_totalmarginmaster", "Total margin (master)"),
+      L("mesco_crossbooking", "Cross booking", { option: true }),
+    ],
+  },
+  addresses: {
+    title: "Addresses & notes",
+    fields: [
+      L("mesco_pickupaddress", "Pickup address"),
+      L("mesco_deliveryaddress", "Delivery address"),
+      L("mesco_locationoverride", "Location override"),
+      L("mesco_notes", "Notes"),
+    ],
+  },
+  system: {
+    title: "System",
+    fields: [
+      L("mesco_operationid", "Operation ID (GUID)"),
+      L("ownerid", "Owner", { lookup: true }),
+      L("owningbusinessunit", "Owning business unit", { lookup: true }),
+      L("createdby", "Created by", { lookup: true }),
+      L("createdon", "Created on"),
+      L("modifiedby", "Modified by", { lookup: true }),
+      L("modifiedon", "Modified on"),
+    ],
+  },
+};
+
+const TABS = [
+  { id: "summary",    label: "Summary",       sections: ["general", "references"] },
+  { id: "routing",    label: "Routing & schedule", sections: ["routing", "carrier", "schedule"] },
+  { id: "parties",    label: "Parties",       sections: ["shipper", "consignee", "addresses"] },
+  { id: "cargo",      label: "Cargo & containers", sections: ["cargo"], extra: "cargoTables" },
+  { id: "customs",    label: "Customs",       sections: ["customs"] },
+  { id: "financials", label: "Financials",    sections: ["financials"] },
+  { id: "houses",     label: "Houses",        extra: "houses" },
+  { id: "system",     label: "System",        sections: ["system"] },
+  { id: "raw",        label: "Raw JSON",      extra: "raw" },
+];
+
+const CONTAINER_COLUMNS = [
+  { key: "mesco_name", label: "Container ref" },
+  { key: "mesco_containerno", label: "Container no.", lookup: true },
+  { key: "mesco_containernumber", label: "Container number" },
+  { key: "mesco_containertype", label: "Type", option: true },
+  { key: "mesco_carrierseal", label: "Seal" },
+  { key: "mesco_noofpackages", label: "Packages" },
+  { key: "mesco_grosskg", label: "Gross kg" },
+  { key: "mesco_volcbm", label: "Vol CBM" },
+  { key: "mesco_warehouse", label: "Warehouse", lookup: true },
+];
+
+const CARGO_COLUMNS = [
+  { key: "mesco_id", label: "Cargo ID" },
+  { key: "mesco_descriptionofgoods", label: "Description of goods", wide: true },
+  { key: "mesco_noofpackages", label: "Packages" },
+  { key: "mesco_umpackages", label: "Unit", lookup: true },
+  { key: "mesco_grosskg", label: "Gross kg" },
+  { key: "mesco_volcbm", label: "Vol CBM" },
+  { key: "mesco_chargeableweight", label: "Chargeable wt" },
+  { key: "mesco_conainter", label: "Container", lookup: true },
+  { key: "mesco_houseoperation", label: "House", lookup: true },
+];
+
+const MASTER_CONTAINERS_KEY = "mesco_Container_MasterOperation_mesco_Operation";
+const MASTER_CARGO_KEY = "mesco_Cargo_MasterOperation_mesco_Operation";
+const MASTER_HOUSES_KEY = "mesco_Operation_mesco_Operation_mesco_Operation";
+const HOUSE_CONTAINERS_KEY = "mesco_Container_mesco_houses";
+const HOUSE_CARGO_KEY = "mesco_Cargo_HouseOperation_mesco_Operation";
+
+const FV = "@OData.Community.Display.V1.FormattedValue";
+const LLN = "@Microsoft.Dynamics.CRM.lookuplogicalname";
+
+/* Resolve any field generically from a raw Dataverse record. */
+function resolveField(rec, key) {
+  if (!rec) return { display: null, empty: true };
+  // Lookup field: value lives in _<key>_value
+  const lv = "_" + key + "_value";
+  if (Object.prototype.hasOwnProperty.call(rec, lv)) {
+    const guid = rec[lv];
+    if (guid === null || guid === undefined || guid === "") {
+      return { display: null, empty: true, isLookup: true };
+    }
+    return {
+      display: rec[lv + FV] || "(unnamed record)",
+      guid,
+      logicalName: rec[lv + LLN],
+      isLookup: true,
+      empty: false,
+    };
+  }
+  // Scalar / option-set / date: prefer the formatted value
+  if (Object.prototype.hasOwnProperty.call(rec, key)) {
+    const raw = rec[key];
+    if (raw === null || raw === undefined || raw === "") {
+      return { display: null, empty: true };
+    }
+    const formatted = rec[key + FV];
+    return { display: formatted != null ? String(formatted) : String(raw), raw, formatted, empty: false };
+  }
+  return { display: null, empty: true, missing: true };
+}
+
+function Field({ rec, def }) {
+  const r = resolveField(rec, def.key);
+  return (
+    <div className="field">
+      <div className="lbl">{def.label}</div>
+      <div className={"val" + (r.empty ? " empty" : "")}>
+        {r.empty ? "—" : r.display}
+        {def.lookup && !r.empty && r.logicalName ? <span className="lookchip">{r.logicalName}</span> : null}
+        {def.option && !r.empty && r.raw != null ? <span className="optchip">#{r.raw}</span> : null}
+      </div>
+      {def.lookup && r.guid ? <div className="meta"><span className="guid">{r.guid}</span></div> : null}
+    </div>
+  );
+}
+
+function Section({ rec, sectionKey }) {
+  const s = SECTIONS[sectionKey];
+  if (!s) return null;
+  return (
+    <div className="section">
+      <h2>{s.title}</h2>
+      <div className="grid">
+        {s.fields.map((def) => <Field key={def.key} rec={rec} def={def} />)}
+      </div>
+    </div>
+  );
+}
+
+function DataTable({ rows, columns, emptyLabel }) {
+  if (!rows || rows.length === 0) {
+    return <div className="empty-block">{emptyLabel}</div>;
+  }
+  return (
+    <div className="section">
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl">
+          <thead>
+            <tr>{columns.map((c) => <th key={c.key}>{c.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i}>
+                {columns.map((c) => {
+                  const r = resolveField(row, c.key);
+                  return (
+                    <td key={c.key} style={c.wide ? { minWidth: 280 } : null}>
+                      {r.empty ? "—" : r.display}
+                      {c.option && !r.empty && r.raw != null ? <span className="optchip">#{r.raw}</span> : null}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function blTypeBadge(rec) {
+  const r = resolveField(rec, "mesco_bltype");
+  const map = { 886150000: "direct", 886150001: "master", 886150002: "house" };
+  const cls = map[r.raw] || "master";
+  return <span className={"badge " + cls}>{r.display || "B/L"}</span>;
+}
+
+function HouseCard({ house, index }) {
+  const [open, setOpen] = useState(false);
+  const code = resolveField(house, "mesco_code").display;
+  const blno = resolveField(house, "mesco_masterblno").display;
+  const consignee = resolveField(house, "mesco_consignee").display;
+  const containers = house[HOUSE_CONTAINERS_KEY] || [];
+  const cargo = house[HOUSE_CARGO_KEY] || [];
+  return (
+    <div className={"house" + (open ? " open" : "")}>
+      <div className="hh" onClick={() => setOpen(!open)}>
+        <span className="arrow">▶</span>
+        {blTypeBadge(house)}
+        <span className="hmain">{code || "House " + (index + 1)} · {blno || "(no B/L no.)"}</span>
+        <span className="hsub">{consignee ? "Consignee: " + consignee : ""}</span>
+      </div>
+      {open ? (
+        <div className="hbody">
+          {["general", "references", "routing", "carrier", "schedule",
+            "shipper", "consignee", "cargo", "customs", "financials",
+            "addresses", "system"].map((sk) => (
+            <Section key={sk} rec={house} sectionKey={sk} />
+          ))}
+          <div className="section"><h2>House containers ({containers.length})</h2></div>
+          <DataTable rows={containers} columns={CONTAINER_COLUMNS} emptyLabel="No containers on this house." />
+          <div className="section"><h2>House cargo ({cargo.length})</h2></div>
+          <DataTable rows={cargo} columns={CARGO_COLUMNS} emptyLabel="No cargo on this house." />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function App() {
+  const params = new URLSearchParams(window.location.search);
+  const [id, setId] = useState(params.get("id") || "");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [tab, setTab] = useState("summary");
+
+  const load = useCallback(async (operationId) => {
+    if (!operationId) return;
+    setLoading(true); setError(null); setData(null);
+    try {
+      const resp = await fetch("/dynamics/operation/" + encodeURIComponent(operationId) + "/full");
+      const json = await resp.json();
+      if (!json.success) throw new Error(json.error || "Request failed");
+      setData(json.data);
+      const url = new URL(window.location);
+      url.searchParams.set("id", operationId);
+      window.history.replaceState({}, "", url);
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { if (params.get("id")) load(params.get("id")); }, []);
+
+  const houses = (data && data[MASTER_HOUSES_KEY]) || [];
+  const containers = (data && data[MASTER_CONTAINERS_KEY]) || [];
+  const cargo = (data && data[MASTER_CARGO_KEY]) || [];
+
+  const tabCount = (t) => {
+    if (t.id === "houses") return houses.length;
+    if (t.id === "cargo") return containers.length + cargo.length;
+    return null;
+  };
+
+  return (
+    <div>
+      <div className="topbar">
+        <h1>Operation · Dataverse Review</h1>
+        <div className="spacer" />
+        <div className="idbox">
+          <input
+            value={id}
+            placeholder="Operation GUID (master id)…"
+            onChange={(e) => setId(e.target.value.trim())}
+            onKeyDown={(e) => { if (e.key === "Enter") load(id); }}
+          />
+          <button disabled={loading || !id} onClick={() => load(id)}>
+            {loading ? "Loading…" : "Load"}
+          </button>
+        </div>
+      </div>
+
+      <div className="wrap">
+        {!data && !loading && !error ? (
+          <div>
+            <p className="hint">
+              Enter an Operation master GUID (e.g. <code>2920ffd1-3cdb-f011-8543-000d3abc7744</code>) and press Load,
+              or open this page with <code>?id=&lt;guid&gt;</code>. Data is fetched live from Dataverse with all
+              fields, lookups (with display names) and option-set labels — mirroring the Dynamics operation form.
+            </p>
+          </div>
+        ) : null}
+
+        {loading ? <div className="statusline">Loading operation from Dataverse…</div> : null}
+        {error ? <div className="error"><strong>Could not load operation.</strong><br />{error}</div> : null}
+
+        {data ? (
+          <div>
+            <div className="summary">
+              <div className="pill"><div className="k">Operation</div><div className="v">{resolveField(data, "mesco_code").display || "—"}</div></div>
+              <div className="pill"><div className="k">B/L type</div><div className="v">{blTypeBadge(data)}</div></div>
+              <div className="pill"><div className="k">Master B/L</div><div className="v">{resolveField(data, "mesco_masterblno").display || "—"}</div></div>
+              <div className="pill"><div className="k">Status</div><div className="v">{resolveField(data, "statuscode").display || "—"}</div></div>
+              <div className="pill"><div className="k">Direction</div><div className="v">{resolveField(data, "mesco_direction").display || "—"} / {resolveField(data, "mesco_transporttype").display || "—"} / {resolveField(data, "mesco_loadtype").display || "—"}</div></div>
+              <div className="pill"><div className="k">Houses</div><div className="v">{houses.length}</div></div>
+              <div className="pill"><div className="k">Containers / Cargo</div><div className="v">{containers.length} / {cargo.length}</div></div>
+            </div>
+
+            <div className="tabs">
+              {TABS.map((t) => {
+                const c = tabCount(t);
+                return (
+                  <button key={t.id} className={"tab" + (tab === t.id ? " active" : "")} onClick={() => setTab(t.id)}>
+                    {t.label}{c != null ? <span className="count">{c}</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+
+            {TABS.filter((t) => t.id === tab).map((t) => (
+              <div key={t.id}>
+                {(t.sections || []).map((sk) => <Section key={sk} rec={data} sectionKey={sk} />)}
+
+                {t.extra === "cargoTables" ? (
+                  <div>
+                    <div className="section"><h2>Containers ({containers.length})</h2></div>
+                    <DataTable rows={containers} columns={CONTAINER_COLUMNS} emptyLabel="No containers on this operation." />
+                    <div className="section"><h2>Cargo ({cargo.length})</h2></div>
+                    <DataTable rows={cargo} columns={CARGO_COLUMNS} emptyLabel="No cargo on this operation." />
+                  </div>
+                ) : null}
+
+                {t.extra === "houses" ? (
+                  houses.length === 0
+                    ? <div className="empty-block">No house operations linked to this master.</div>
+                    : houses.map((h, i) => <HouseCard key={h.mesco_operationid || i} house={h} index={i} />)
+                ) : null}
+
+                {t.extra === "raw" ? (
+                  <pre className="raw">{JSON.stringify(data, null, 2)}</pre>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

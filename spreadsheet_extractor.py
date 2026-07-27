@@ -1,0 +1,1041 @@
+import csv
+import io
+import os
+import re
+import xml.etree.ElementTree as ET
+import zipfile
+from datetime import date, datetime
+from itertools import zip_longest
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import json
+from config import settings
+from pdf_extractor import count_field_hits, normalize_text
+
+
+SUPPORTED_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+
+
+def _file_extension(filename: Optional[str]) -> str:
+    return Path(filename or "").suffix.lower()
+
+
+def normalize_spreadsheet_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S") if value.time() else value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return (f"{value:.10f}").rstrip("0").rstrip(".")
+    text = str(value).replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > settings.excel_max_cell_chars:
+        text = text[: settings.excel_max_cell_chars].rstrip() + "…"
+    return text
+
+
+def _is_meaningful_spreadsheet_row(values: List[str]) -> bool:
+    return any(v.strip() for v in values)
+
+
+def _row_has_business_terms(values: List[str]) -> bool:
+    row_text = " ".join(values).upper()
+    terms = (
+        "B/L", "BL", "BILL OF LADING", "BOOKING", "MBL", "HBL", "HOUSE", "MASTER",
+        "CONTAINER", "SEAL", "SHIPPER", "CONSIGNEE", "NOTIFY", "VESSEL", "VOYAGE",
+        "POL", "POD", "PORT", "ORIGIN", "DESTINATION", "GROSS", "WEIGHT", "CBM",
+        "MEAS", "PACKAGE", "PCS", "CTNS", "HS", "ACID", "FREIGHT", "PREPAID", "COLLECT",
+        "INVOICE", "MANIFEST", "ETA", "ETD", "CFS", "LCL", "FCL",
+    )
+    return any(term in row_text for term in terms)
+
+
+def _column_name(index_1_based: int) -> str:
+    name = ""
+    n = index_1_based
+    while n:
+        n, rem = divmod(n - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def _xlsx_col_to_index(col: str) -> int:
+    n = 0
+    for ch in col.upper():
+        if "A" <= ch <= "Z":
+            n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _xlsx_cell_ref_to_row_col(ref: str) -> Tuple[int, int]:
+    m = re.match(r"([A-Z]+)(\d+)", ref.upper())
+    if not m:
+        return 1, 1
+    return int(m.group(2)), _xlsx_col_to_index(m.group(1))
+
+
+def _xml_text(element: Optional[ET.Element]) -> str:
+    if element is None:
+        return ""
+    return "".join(element.itertext())
+
+
+def _detect_key_value_pairs_from_grid(grid: List[List[str]], sheet_name: str, max_pairs: int = 180) -> List[str]:
+    pairs: List[str] = []
+    label_regex = re.compile(
+        r"\b(B/L|BL|BILL OF LADING|BOOKING|MBL|HBL|SHIPPER|CONSIGNEE|NOTIFY|VESSEL|VOYAGE|"
+        r"POL|POD|PORT|ORIGIN|DESTINATION|CONTAINER|SEAL|GROSS|WEIGHT|CBM|MEAS|PACKAGE|"
+        r"ACID|HS|FREIGHT|ETA|ETD|INVOICE|REF|REFERENCE|TERMS)\b",
+        re.I,
+    )
+    for r_idx, row in enumerate(grid):
+        if len(pairs) >= max_pairs:
+            break
+        for c_idx, cell in enumerate(row):
+            if not cell or not label_regex.search(cell):
+                continue
+            candidates: List[str] = []
+            for k in range(c_idx + 1, min(len(row), c_idx + 5)):
+                if row[k]:
+                    candidates.append(row[k])
+            for rr in range(r_idx + 1, min(len(grid), r_idx + 5)):
+                if c_idx < len(grid[rr]) and grid[rr][c_idx]:
+                    candidates.append(grid[rr][c_idx])
+            if candidates:
+                address = f"{_column_name(c_idx + 1)}{r_idx + 1}"
+                pairs.append(f"{sheet_name}!{address}: {cell} => {' | '.join(candidates[:4])}")
+    return pairs
+
+
+def _grid_to_ai_text(sheet_name: str, grid: List[List[str]], max_cols: int) -> str:
+    lines: List[str] = []
+    non_empty_rows = 0
+    business_rows = 0
+    for row_no, row in enumerate(grid, start=1):
+        trimmed = row[:max_cols]
+        if not _is_meaningful_spreadsheet_row(trimmed):
+            continue
+        non_empty_rows += 1
+        if _row_has_business_terms(trimmed):
+            business_rows += 1
+        row_values = "\t".join(trimmed).rstrip()
+        addressed = " | ".join(
+            f"{_column_name(i + 1)}{row_no}={v}"
+            for i, v in enumerate(trimmed)
+            if v
+        )
+        lines.append(f"ROW {row_no}: {row_values}")
+        if addressed:
+            lines.append(f"CELLS {row_no}: {addressed}")
+    if not lines:
+        lines.append("[empty sheet]")
+    return "\n".join([
+        f"--- SHEET: {sheet_name} ---",
+        f"Non-empty rows included: {non_empty_rows}; business-keyword rows: {business_rows}",
+        *lines,
+    ])
+
+
+SPREADSHEET_RECORD_HEADER_TERMS = (
+    "H/BL", "HBL", "HOUSE", "B/L", "SHIPPER", "CONSIGNEE", "PLACE OF RECEIPT",
+    "PLACE OF DELIVERY", "POL", "POD", "PACKAGE", "PACKING", "GROSS", "WEIGHT",
+    "MEAS", "CBM", "CARGO", "DESCRIPTION", "ACID", "HS", "REMARK",
+    "STATUS", "TERM", "DELIVERY TERM", "NOMINATED", "FREE HAND", "GATE",
+    "NOS. OF", "NOS OF", "MEASUREM", "CARGO TYPE", "H/BL ACID", "RATE",
+)
+
+
+def _normalize_header_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").upper())
+
+
+def _spreadsheet_header_score(row: List[str]) -> int:
+    score = 0
+    seen = set()
+    for cell in row:
+        up = (cell or "").upper()
+        if not up:
+            continue
+        for term in SPREADSHEET_RECORD_HEADER_TERMS:
+            if term in up and term not in seen:
+                score += 1
+                seen.add(term)
+    return score
+
+
+def _looks_like_spreadsheet_data_identifier(value: str) -> bool:
+    text = (value or "").strip().upper()
+    if not text:
+        return False
+    compact = re.sub(r"[\s\-]", "", text)
+    return bool(
+        re.fullmatch(r"\d{1,6}", compact)
+        or re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*\d{4,}[A-Z0-9]*", compact)
+    )
+
+
+def _looks_like_total_or_summary_row(row: List[str]) -> bool:
+    row_text = " ".join(v for v in row if v).strip().upper()
+    if not row_text:
+        return True
+    if re.search(r"^\s*TOTAL\b", row_text):
+        return True
+    first = next((v.strip().upper() for v in row if v.strip()), "")
+    if re.match(r"^TOTAL\s*:?$|^SUBTOTAL\s*:?$|^GRAND\s+TOTAL\s*:?$", first):
+        return True
+    if first in {"TOTAL", "SUBTOTAL", "GRAND TOTAL"}:
+        return True
+    if re.fullmatch(r"TOTAL\s*:?(?:\s+[0-9.,]+)*", row_text):
+        return True
+    return False
+
+
+def _global_context_from_grid(sheet_name: str, grid: List[List[str]], header_row_index_0: int, max_lines: int = 12) -> List[str]:
+    lines: List[str] = []
+    for row_no, row in enumerate(grid[:header_row_index_0], start=1):
+        if not _is_meaningful_spreadsheet_row(row):
+            continue
+        row_values = "\t".join(row).rstrip()
+        addressed = " | ".join(f"{_column_name(i + 1)}{row_no}={v}" for i, v in enumerate(row) if v)
+        if row_values:
+            lines.append(f"{sheet_name} ROW {row_no}: {row_values}")
+        if addressed:
+            lines.append(f"{sheet_name} CELLS {row_no}: {addressed}")
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+
+def _is_data_row_not_header(row: List[str]) -> bool:
+    long_cells = sum(1 for v in row if len(v) > 40)
+    return long_cells >= 2
+
+
+def _extract_table_records_from_grid(sheet_name: str, grid: List[List[str]], max_records: int = 300) -> List[Dict[str, Any]]:
+    if not grid:
+        return []
+
+    header_candidates = []
+    for idx, row in enumerate(grid):
+        score = _spreadsheet_header_score(row)
+        if score >= 3:
+            headers = [h.strip() for h in row]
+            first_non_empty = next((h for h in headers if h), "")
+            if _looks_like_spreadsheet_data_identifier(first_non_empty):
+                continue
+            non_empty_header_count = sum(1 for h in headers if h and not re.match(r'^列\d+$', h))
+            if non_empty_header_count >= 4 and not _is_data_row_not_header(row):
+                header_candidates.append((idx, score))
+
+    if not header_candidates:
+        return []
+
+    records: List[Dict[str, Any]] = []
+
+    for section_num, (best_idx, _score) in enumerate(header_candidates):
+        headers = [h.strip() for h in grid[best_idx]]
+        global_context = _global_context_from_grid(sheet_name, grid, best_idx)
+
+        data_start = best_idx + 1
+        data_end = len(grid)
+        if section_num + 1 < len(header_candidates):
+            data_end = header_candidates[section_num + 1][0]
+
+        for row_idx in range(data_start, data_end):
+            row = grid[row_idx]
+            if not _is_meaningful_spreadsheet_row(row):
+                continue
+            if _looks_like_total_or_summary_row(row):
+                continue
+
+            values_by_header: Dict[str, str] = {}
+            filled_cells = 0
+            for col_idx, header in enumerate(headers):
+                if not header or col_idx >= len(row):
+                    continue
+                value = row[col_idx].strip()
+                if not value:
+                    continue
+                values_by_header[header] = value
+                filled_cells += 1
+
+            row_text_upper = " ".join(row).upper()
+            has_record_identifier = bool(
+                re.search(r"\b[A-Z]{2,}[A-Z0-9]*\d{4,}[A-Z0-9]*\b", row_text_upper)
+                or re.search(r"\b\d{10,19}\b", row_text_upper)
+                or any(h and v for h, v in values_by_header.items() if re.search(r"H\s*/?\s*BL|HOUSE|B/L|BL\s*NO", h, re.I))
+            )
+            has_party = any(re.search(r"SHIPPER|CONSIGNEE", h, re.I) for h in values_by_header)
+
+            if filled_cells < 3 or not (has_record_identifier or has_party):
+                continue
+
+            record_index = len(records) + 1
+            header_line = "\t".join(headers).rstrip()
+            row_line = "\t".join(row[:len(headers)]).rstrip()
+            mapped_lines = []
+            for header, value in values_by_header.items():
+                col_idx = headers.index(header)
+                mapped_lines.append(f"{_column_name(col_idx + 1)}{row_idx + 1} | {header} => {value}")
+
+            record_text = normalize_text("\n".join([
+                "[SPREADSHEET SINGLE RECORD]",
+                f"Sheet: {sheet_name}",
+                f"Record index: {record_index}",
+                f"Source Excel row: {row_idx + 1}",
+                "Instruction: Extract ONLY this one spreadsheet row as ONE Mesco CRM shipment/B/L payload. Do not mix values from other data rows.",
+                "[GLOBAL CONTEXT FROM ROWS ABOVE TABLE]",
+                *(global_context or ["No global context detected."]),
+                "[TABLE HEADER]",
+                f"ROW {best_idx + 1}: {header_line}",
+                "[THIS RECORD ROW]",
+                f"ROW {row_idx + 1}: {row_line}",
+                "[HEADER TO VALUE MAP FOR THIS RECORD]",
+                *mapped_lines,
+            ]))
+
+            records.append({
+                "record_index": record_index,
+                "sheet_name": sheet_name,
+                "header_row": best_idx + 1,
+                "source_row": row_idx + 1,
+                "values_by_header": values_by_header,
+                "text": record_text,
+            })
+            if len(records) >= max_records:
+                break
+
+        if len(records) >= max_records:
+            break
+
+    return records
+
+
+# Proxy Billing Extractor V2
+
+# Hardcoded column indices from actual WE-CAN file structure
+_PROXY_CIF_COLS_V2 = dict(
+    hbl=0, dest=1, pkgs=2, gw=3, cbm=4, charged_wm=5, term=6,
+    debit_agreement=7, debit_pcs=9, debit_lss=10,
+    debit_loading=11, debit_admin=12, debit_total=13,
+    credit_ts=14, credit_dest_local=15, credit_dap=16,
+    credit_custom=17,
+    credit_thc_cfs=19, credit_do_admin=20, credit_total=21,
+)
+
+_PROXY_FOB_COLS_V2 = dict(
+    hbl=0, dest=1, pkgs=2, gw=3, cbm=4, charged_wm=5, term=6,
+    ex_work=7, thc=9, fob_of=11,
+)
+
+
+def _proxy_get(row: List[str], col: int, default: str = "") -> str:
+    if col < 0 or col >= len(row):
+        return default
+    return row[col].strip()
+
+
+def _is_proxy_hbl(value: str) -> bool:
+    """True if the cell looks like a valid HBL number."""
+    return bool(re.search(r"[A-Z]{2,}\d{4,}", value.upper()))
+
+
+def _is_proxy_total_row_v2(row: List[str]) -> bool:
+    first = next((v.strip().upper() for v in row if v.strip()), "")
+    return first.startswith("TOTAL") or first.startswith("SUB")
+
+
+def _parse_proxy_global_header_v2(grid: List[List[str]]) -> Dict[str, str]:
+    """Extract vessel/MBL/container info from the top rows (v2)."""
+    meta: Dict[str, str] = {}
+    for row in grid[:2]:
+        text = " ".join(v for v in row if v)
+        if "WE-CAN" in text.upper():
+            meta["company"] = row[0].strip()
+
+    for row in grid[:4]:
+        text = " ".join(v for v in row if v)
+        if "CONSOL BOX" in text.upper():
+            meta["consol_description"] = row[0].strip()
+
+    def after(row, label):
+        ul = [v.upper() for v in row]
+        try:
+            idx = next(i for i, v in enumerate(ul) if label in v)
+            for v in row[idx + 1: idx + 5]:
+                if v:
+                    return v
+        except StopIteration:
+            pass
+        return ""
+
+    r4 = grid[3] if len(grid) > 3 else []
+    r5 = grid[4] if len(grid) > 4 else []
+    
+    raw_vessel = after(r4, "VSL")
+    if "/" in raw_vessel:
+        parts = raw_vessel.split("/", 1)
+        meta["vessel"] = parts[0].strip()
+        meta["voyage"] = parts[1].strip()
+    else:
+        meta["vessel"] = raw_vessel
+
+    meta["etd"] = after(r4, "ETD")
+    meta["container_no"] = after(r4, "CNTR")
+    meta["carrier"] = after(r4, "CARRIER")
+
+    for i, v in enumerate(r4):
+        if "OCEAN FREIGHT" in v.upper():
+            for vv in r4[i + 1: i + 5]:
+                if vv:
+                    meta["ocean_freight_rate"] = vv
+                    break
+
+    meta["mbl_no"] = after(r5, "MBL")
+    meta["container_type"] = after(r5, "TYPE OF CNTR")
+    meta["total_gw_kgs"] = after(r5, "TOTAL G.W")
+    meta["total_cbm"] = after(r5, "TOTAL VOLUME")
+
+    return {k: v for k, v in meta.items() if v}
+
+
+def _build_proxy_mesco_payload(rec: Dict[str, Any], meta: Dict[str, str]) -> Dict[str, Any]:
+    """Build Mesco CRM payload from one extracted record (v2 logic)."""
+    hbl = rec["hbl_no"]
+    dest = rec.get("dest", "").strip()
+    if not dest or re.match(r"^\d+$", dest):
+        dest = "Alexandria"
+
+    gw = rec.get("gw_kgs", "")
+    cbm = rec.get("volume_cbm", "")
+    pkgs = rec.get("pkgs", "")
+
+    container_no = meta.get("container_no", "")
+    container_type = meta.get("container_type", "")
+    term = rec.get("term", rec.get("cargo_type", ""))
+    vessel_full = meta.get("vessel", "")
+    voyage = meta.get("voyage", "")
+
+    return {
+        "document_type": "Bill of Lading",
+        "mesco_masterblno": meta.get("mbl_no"),
+        "mesco_houseblno": hbl,
+        "mesco_shippernamecontactno": meta.get("company") or None,
+        "mesco_vessel": vessel_full or None,
+        "mesco_voytruckno": voyage or None,
+        "mesco_destination": dest or None,
+        "mesco_cargodescription": meta.get("consol_description") or None,
+        "cr401_totalgrossweight": meta.get("total_gw_kgs") or None,
+        "cr401_totalvolume": meta.get("total_cbm") or None,
+        "cr401_totalpackages": pkgs or None,
+        "mesco_containertype": container_type or None,
+        "mesco_pcfreightterm": term or None,
+        "mesco_etdorigin": meta.get("etd") or None,
+        "mesco_incoterm": term or None,
+        "container_number": container_no or None,
+        "containers": [
+            {
+                "container_number": container_no or None,
+                "container_type": container_type or None,
+                "packages": pkgs or None,
+                "gross_weight_kg": gw or None,
+                "measurement_cbm": cbm or None,
+            }
+        ],
+        "extraction_method": "proxy_bill_xls_v2",
+        "_source_info": f"Sheet: Sheet1, Row: {rec['source_row']}, HBL: {hbl}",
+    }
+
+
+def _parse_proxy_section_v2(
+    grid: List[List[str]],
+    data_start: int,
+    data_end: int,
+    cols: Dict[str, int],
+    cargo_type: str,
+    sheet_name: str,
+    meta: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    records = []
+    for ri in range(data_start, data_end):
+        row = grid[ri]
+        if not any(v.strip() for v in row):
+            continue
+        if _is_proxy_total_row_v2(row):
+            continue
+        hbl = _proxy_get(row, cols["hbl"])
+        if not _is_proxy_hbl(hbl):
+            continue
+
+        rec: Dict[str, Any] = {
+            "cargo_type": cargo_type,
+            "source_row": ri + 1,
+            "hbl_no": hbl,
+            "dest": _proxy_get(row, cols["dest"]),
+            "pkgs": _proxy_get(row, cols["pkgs"]),
+            "gw_kgs": _proxy_get(row, cols["gw"]),
+            "volume_cbm": _proxy_get(row, cols["cbm"]),
+            "charged_wm": _proxy_get(row, cols["charged_wm"]),
+            "term": _proxy_get(row, cols["term"]),
+        }
+        
+        # Build Mesco Payload
+        mesco_payload = _build_proxy_mesco_payload(rec, meta)
+        
+        # Create text representation for AI (just in case AI is used, but payload is ready)
+        record_text = f"[PROXY BILL RECORD V2]\nSource Row: {ri + 1}\n"
+        for k, v in mesco_payload.items():
+            if k == "containers":
+                record_text += f"containers: {json.dumps(v)}\n"
+            else:
+                record_text += f"{k}: {v}\n"
+
+        records.append({
+            "record_index": len(records) + 1,
+            "sheet_name": sheet_name,
+            "source_row": ri + 1,
+            "values_by_header": mesco_payload, # Use Mesco Payload as values_by_header
+            "text": record_text,
+            "cargo_type": cargo_type,
+        })
+    return records
+
+
+def _flatten_proxy_financials(prefix: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in values.items()}
+
+
+def _adapt_wecan_proxy_record(
+    rec: Dict[str, Any],
+    sheet_name: str,
+    fallback_index: int,
+) -> Dict[str, Any]:
+    record = rec.get("record", {})
+    fp = rec.get("financial_processing", {})
+    mesco_payload = rec.get("mesco_payload", {})
+    debit = fp.get("debit", {}) if isinstance(fp.get("debit"), dict) else {}
+    credit = fp.get("credit", {}) if isinstance(fp.get("credit"), dict) else {}
+
+    values_by_header: Dict[str, Any] = {
+        **mesco_payload,
+        "cargo_type": record.get("cargo_type"),
+        "hbl_no": record.get("hbl_no"),
+        "dest": record.get("dest"),
+        "pkgs": record.get("pkgs"),
+        "gw_kgs": record.get("gw_kgs"),
+        "volume_cbm": record.get("volume_cbm"),
+        "charged_wm": record.get("charged_wm"),
+        "term": record.get("term"),
+        **_flatten_proxy_financials("debit", debit),
+        **_flatten_proxy_financials("credit", credit),
+    }
+    values_by_header = {k: v for k, v in values_by_header.items() if v not in (None, "")}
+
+    text_lines = [
+        "[WE-CAN PROXY BILL RECORD]",
+        f"Source Row: {record.get('source_row')}",
+    ]
+    for key, value in values_by_header.items():
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        text_lines.append(f"{key}: {value}")
+
+    return {
+        "record_index": rec.get("record_index", fallback_index),
+        "sheet_name": record.get("sheet_name") or sheet_name,
+        "source_row": record.get("source_row"),
+        "values_by_header": values_by_header,
+        "text": "\n".join(text_lines),
+        "cargo_type": record.get("cargo_type"),
+        "hbl_no": record.get("hbl_no"),
+        "financial_processing": fp,
+        "mesco_payload": mesco_payload,
+        "unique_key": rec.get("unique_key"),
+    }
+
+
+def _format_proxy_bill_summary(proxy_res: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    processing_summary = proxy_res.get("processing_summary") or {}
+    calculated_totals = proxy_res.get("calculated_totals_from_records") or {}
+    unique_bl_numbers = proxy_res.get("unique_bl_numbers") or []
+    duplicate_records = proxy_res.get("duplicate_records_skipped") or []
+
+    if unique_bl_numbers:
+        lines.append("Unique BL numbers: " + ", ".join(str(v) for v in unique_bl_numbers))
+    if processing_summary:
+        lines.append("Sheet totals/summary: " + json.dumps(processing_summary, ensure_ascii=False, sort_keys=True))
+    if calculated_totals:
+        lines.append("Calculated totals from records: " + json.dumps(calculated_totals, ensure_ascii=False, sort_keys=True))
+    if duplicate_records:
+        lines.append("Duplicate BL records skipped: " + ", ".join(str(v) for v in duplicate_records))
+
+    return "\n".join(lines)
+
+
+def extract_proxy_bill_logic(grid: List[List[str]], sheet_name: str) -> Dict[str, Any]:
+    """Extract WE-CAN proxy billing sheets with full CIF/FOB financial detail."""
+    try:
+        from wecan_proxy_bill_extractor import extract_wecan_proxy_bill_from_grid
+
+        result = extract_wecan_proxy_bill_from_grid(grid, sheet_name)
+        sheet_records = [
+            _adapt_wecan_proxy_record(rec, sheet_name, index)
+            for index, rec in enumerate(result.get("records", []), start=1)
+        ]
+        return {
+            "meta": result.get("meta", {}),
+            "records": sheet_records,
+            "record_count": len(sheet_records),
+            "processing_summary": result.get("processing_summary", {}),
+            "calculated_totals_from_records": result.get("calculated_totals_from_records", {}),
+            "unique_bl_numbers": result.get("unique_bl_numbers", []),
+            "duplicate_records_skipped": result.get("duplicate_records_skipped", []),
+        }
+    except Exception:
+        # Keep the older narrow extractor as a fallback so ordinary spreadsheet
+        # extraction still works if the specialized WE-CAN module is unavailable.
+        meta = _parse_proxy_global_header_v2(grid)
+        sheet_records: List[Dict[str, Any]] = []
+
+        cif_section_row = None
+        fob_section_row = None
+
+        for i, row in enumerate(grid):
+            joined = " ".join(v for v in row if v).upper()
+            if "CIF CARGO" in joined and cif_section_row is None:
+                cif_section_row = i
+            if "FOB CARGO" in joined and fob_section_row is None:
+                fob_section_row = i
+
+        if cif_section_row is not None:
+            data_start = cif_section_row + 4
+            data_end = fob_section_row if fob_section_row else len(grid)
+            cif_records = _parse_proxy_section_v2(grid, data_start, data_end, _PROXY_CIF_COLS_V2, "CIF", sheet_name, meta)
+            sheet_records.extend(cif_records)
+
+        if fob_section_row is not None:
+            data_start = fob_section_row + 2
+            data_end = len(grid)
+            fob_records = _parse_proxy_section_v2(grid, data_start, data_end, _PROXY_FOB_COLS_V2, "FOB", sheet_name, meta)
+            sheet_records.extend(fob_records)
+
+        return {
+            "meta": meta,
+            "records": sheet_records,
+            "record_count": len(sheet_records),
+        }
+
+
+def _is_proxy_bill(grid: List[List[str]]) -> bool:
+    """Detect if a grid looks like a Proxy Billing (WE-CAN Logistics) XLS."""
+    for row in grid[:15]:
+        joined = " ".join(v for v in row if v).upper()
+        if "WE-CAN" in joined and "LOGISTICS" in joined:
+            return True
+        if "CIF CARGO" in joined or "FOB CARGO" in joined:
+            return True
+    return False
+
+
+def extract_xlsx_text_zipxml(excel_bytes: bytes, filename: str, openpyxl_error: Optional[Exception] = None) -> Dict[str, Any]:
+
+    ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    ns_rel = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    rel_ns = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+    zf = zipfile.ZipFile(io.BytesIO(excel_bytes))
+
+    with zf:
+        names = set(zf.namelist())
+        shared_strings: List[str] = []
+        if "xl/sharedStrings.xml" in names:
+            try:
+                root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+                for si in root.findall(f"{ns_main}si"):
+                    shared_strings.append(_xml_text(si))
+            except Exception:
+                shared_strings = []
+
+        rel_map: Dict[str, str] = {}
+        if "xl/_rels/workbook.xml.rels" in names:
+            rel_root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            for rel in rel_root.findall(f"{rel_ns}Relationship"):
+                rid = rel.attrib.get("Id")
+                target = rel.attrib.get("Target", "")
+                if rid and "worksheet" in target:
+                    if not target.startswith("xl/"):
+                        target = "xl/" + target.lstrip("/")
+                    rel_map[rid] = target
+
+        sheets: List[Tuple[str, str]] = []
+        if "xl/workbook.xml" in names:
+            wb_root = ET.fromstring(zf.read("xl/workbook.xml"))
+            sheets_node = wb_root.find(f"{ns_main}sheets")
+            if sheets_node is not None:
+                for sheet in sheets_node.findall(f"{ns_main}sheet"):
+                    sheet_name = sheet.attrib.get("name", "Sheet")
+                    rid = sheet.attrib.get(f"{ns_rel}id")
+                    path = rel_map.get(rid or "")
+                    if path and path in names:
+                        sheets.append((sheet_name, path))
+
+        if not sheets:
+            sheet_paths = sorted(n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n))
+            sheets = [(f"Sheet{i}", path) for i, path in enumerate(sheet_paths, start=1)]
+
+        workbook_parts: List[str] = [
+            "[SPREADSHEET TEXT]",
+            f"Filename: {filename}",
+            f"Workbook sheets: {', '.join(name for name, _ in sheets)}",
+            "Reader: XLSX XML fallback",
+        ]
+        if openpyxl_error is not None:
+            workbook_parts.append(f"Openpyxl warning: {str(openpyxl_error)[:400]}")
+
+        sheet_summaries: List[Dict[str, Any]] = []
+        total_pairs = 0
+        all_records: List[Dict[str, Any]] = []
+
+        for sheet_name, sheet_path in sheets:
+            try:
+                root = ET.fromstring(zf.read(sheet_path))
+            except Exception as exc:
+                workbook_parts.append(f"--- SHEET: {sheet_name} ---\n[Could not parse sheet XML: {exc}]")
+                continue
+
+            rows_map: Dict[int, Dict[int, str]] = {}
+            formulas: List[str] = []
+            sheet_data = root.find(f"{ns_main}sheetData")
+            if sheet_data is not None:
+                for row in sheet_data.findall(f"{ns_main}row"):
+                    for cell in row.findall(f"{ns_main}c"):
+                        ref = cell.attrib.get("r", "A1")
+                        r_idx, c_idx = _xlsx_cell_ref_to_row_col(ref)
+                        if r_idx > settings.excel_max_rows_per_sheet or c_idx > settings.excel_max_cols_per_sheet:
+                            continue
+                        cell_type = cell.attrib.get("t")
+                        v_node = cell.find(f"{ns_main}v")
+                        f_node = cell.find(f"{ns_main}f")
+                        is_node = cell.find(f"{ns_main}is")
+                        value = ""
+                        if cell_type == "s" and v_node is not None:
+                            try:
+                                idx = int(v_node.text or "0")
+                                value = shared_strings[idx] if 0 <= idx < len(shared_strings) else ""
+                            except Exception:
+                                value = v_node.text or ""
+                        elif cell_type == "inlineStr":
+                            value = _xml_text(is_node)
+                        elif cell_type == "b" and v_node is not None:
+                            value = "TRUE" if (v_node.text or "") == "1" else "FALSE"
+                        elif v_node is not None:
+                            value = v_node.text or ""
+                        elif f_node is not None:
+                            value = "=" + (f_node.text or "")
+                        value = normalize_spreadsheet_cell(value)
+                        if value:
+                            rows_map.setdefault(r_idx, {})[c_idx] = value
+                        if f_node is not None and v_node is not None and len(formulas) < 80:
+                            formulas.append(f"{ref}: ={f_node.text or ''} => {normalize_spreadsheet_cell(v_node.text)}")
+
+            max_row = min(max(rows_map.keys(), default=1), settings.excel_max_rows_per_sheet)
+            max_col = min(max((max(cols.keys()) for cols in rows_map.values()), default=1), settings.excel_max_cols_per_sheet)
+            grid: List[List[str]] = []
+            for r in range(1, max_row + 1):
+                row_map = rows_map.get(r, {})
+                grid.append([row_map.get(c, "") for c in range(1, max_col + 1)])
+
+            # Specialized extraction for Proxy Bills if detected
+            if _is_proxy_bill(grid):
+                proxy_res = extract_proxy_bill_logic(grid, sheet_name)
+                records = proxy_res["records"]
+                if proxy_res["meta"]:
+                    workbook_parts.append(f"[PROXY BILL META - {sheet_name}]\n" + "\n".join(f"{k}: {v}" for k, v in proxy_res["meta"].items()))
+                proxy_summary = _format_proxy_bill_summary(proxy_res)
+                if proxy_summary:
+                    workbook_parts.append(f"[PROXY BILL SUMMARY - {sheet_name}]\n{proxy_summary}")
+            else:
+                records = _extract_table_records_from_grid(sheet_name, grid)
+
+            all_records.extend(records)
+            pairs = _detect_key_value_pairs_from_grid(grid, sheet_name)
+            total_pairs += len(pairs)
+            workbook_parts.append(_grid_to_ai_text(sheet_name, grid, max_col))
+            if records:
+                workbook_parts.append("[DETECTED SPREADSHEET RECORDS]\n" + "\n".join(
+                    f"Record {r['record_index']} from {r['sheet_name']} row {r['source_row']}: "
+                    + " | ".join(f"{k}={v}" for k, v in list(r['values_by_header'].items())[:8])
+                    for r in records[:50]
+                ))
+            if pairs:
+                workbook_parts.append("[DETECTED KEY/VALUE PAIRS]\n" + "\n".join(pairs[:120]))
+            if formulas:
+                workbook_parts.append("[FORMULA RESULTS]\n" + "\n".join(formulas[:80]))
+            sheet_summaries.append({
+                "sheet_name": sheet_name,
+                "max_row_seen": max_row,
+                "max_col_seen": max_col,
+                "non_empty_rows": sum(1 for row in grid if _is_meaningful_spreadsheet_row(row)),
+                "detected_key_value_pairs": len(pairs),
+                "reader": "xlsx_xml_fallback",
+            })
+
+    text = normalize_text("\n\n".join(workbook_parts))
+    return {
+        "method": "excel_xlsx_xml_fallback",
+        "text": text,
+        "quality": {
+            "document_type_detected": "spreadsheet",
+            "sheet_count": len(sheets),
+            "sheets": sheet_summaries,
+            "char_count": len(text),
+            "field_hits": count_field_hits(text),
+            "detected_key_value_pairs": total_pairs,
+            "detected_record_count": len(all_records),
+            "openpyxl_fallback_reason": str(openpyxl_error)[:500] if openpyxl_error is not None else None,
+        },
+        "records": all_records,
+    }
+
+
+def extract_xlsx_text(excel_bytes: bytes, filename: str) -> Dict[str, Any]:
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise ImportError("Missing dependency for .xlsx files. Install: pip install openpyxl") from exc
+
+    try:
+        wb_values = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True, read_only=True)
+        wb_formulas = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=False, read_only=True)
+    except Exception as exc:
+        return extract_xlsx_text_zipxml(excel_bytes, filename, openpyxl_error=exc)
+
+    workbook_parts: List[str] = [
+        "[SPREADSHEET TEXT]",
+        f"Filename: {filename}",
+        f"Workbook sheets: {', '.join(wb_values.sheetnames)}",
+        "Instructions for AI: Values are presented with row numbers and cell addresses. Use explicit labels and nearby values.",
+    ]
+    all_pairs: List[str] = []
+    all_records: List[Dict[str, Any]] = []
+    sheet_summaries: List[Dict[str, Any]] = []
+
+    for sheet_name in wb_values.sheetnames:
+        ws = wb_values[sheet_name]
+        ws_formula = wb_formulas[sheet_name]
+        max_row = min(ws.max_row or 1, settings.excel_max_rows_per_sheet)
+        max_col = min(ws.max_column or 1, settings.excel_max_cols_per_sheet)
+        grid: List[List[str]] = []
+        formula_notes: List[str] = []
+
+        value_rows = ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)
+        formula_rows = ws_formula.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)
+
+        for r, (value_row, formula_row) in enumerate(zip_longest(value_rows, formula_rows, fillvalue=()), start=1):
+            row_vals: List[str] = []
+            for c in range(1, max_col + 1):
+                raw_value = value_row[c - 1] if c - 1 < len(value_row) else None
+                formula_value = formula_row[c - 1] if c - 1 < len(formula_row) else None
+                value = normalize_spreadsheet_cell(raw_value)
+                if isinstance(formula_value, str) and formula_value.startswith("=") and value:
+                    if len(formula_notes) < 80:
+                        formula_notes.append(f"{_column_name(c)}{r}: {formula_value} => {value}")
+                row_vals.append(value)
+            grid.append(row_vals)
+
+        # Specialized extraction for Proxy Bills if detected
+        if _is_proxy_bill(grid):
+            proxy_res = extract_proxy_bill_logic(grid, sheet_name)
+            records = proxy_res["records"]
+            if proxy_res["meta"]:
+                workbook_parts.append(f"[PROXY BILL META - {sheet_name}]\n" + "\n".join(f"{k}: {v}" for k, v in proxy_res["meta"].items()))
+            proxy_summary = _format_proxy_bill_summary(proxy_res)
+            if proxy_summary:
+                workbook_parts.append(f"[PROXY BILL SUMMARY - {sheet_name}]\n{proxy_summary}")
+        else:
+            records = _extract_table_records_from_grid(sheet_name, grid)
+
+        all_records.extend(records)
+        pairs = _detect_key_value_pairs_from_grid(grid, sheet_name)
+        all_pairs.extend(pairs)
+        workbook_parts.append(_grid_to_ai_text(sheet_name, grid, max_col))
+        if records:
+            workbook_parts.append("[DETECTED SPREADSHEET RECORDS]\n" + "\n".join(
+                f"Record {r['record_index']} from {r['sheet_name']} row {r['source_row']}: "
+                + " | ".join(f"{k}={v}" for k, v in list(r['values_by_header'].items())[:8])
+                for r in records[:50]
+            ))
+        if pairs:
+            workbook_parts.append("[DETECTED KEY/VALUE PAIRS]\n" + "\n".join(pairs[:120]))
+        if formula_notes:
+            workbook_parts.append("[FORMULA RESULTS]\n" + "\n".join(formula_notes[:80]))
+
+        sheet_summaries.append({
+            "sheet_name": sheet_name,
+            "max_row_seen": max_row,
+            "max_col_seen": max_col,
+            "non_empty_rows": sum(1 for row in grid if _is_meaningful_spreadsheet_row(row)),
+            "detected_key_value_pairs": len(pairs),
+        })
+
+    text = normalize_text("\n\n".join(workbook_parts))
+    return {
+        "method": "excel_xlsx",
+        "text": text,
+        "quality": {
+            "document_type_detected": "spreadsheet",
+            "sheet_count": len(wb_values.sheetnames),
+            "sheets": sheet_summaries,
+            "char_count": len(text),
+            "field_hits": count_field_hits(text),
+            "detected_key_value_pairs": len(all_pairs),
+            "detected_record_count": len(all_records),
+        },
+        "records": all_records,
+    }
+
+
+def extract_xls_text(excel_bytes: bytes, filename: str) -> Dict[str, Any]:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise ImportError("Missing dependency for .xls files. Install: pip install xlrd") from exc
+
+    book = xlrd.open_workbook(file_contents=excel_bytes)
+
+    workbook_parts: List[str] = [
+        "[SPREADSHEET TEXT]",
+        f"Filename: {filename}",
+        f"Workbook sheets: {', '.join(book.sheet_names())}",
+        "Instructions for AI: Values are presented with row numbers and cell addresses. Use explicit labels and nearby values.",
+    ]
+    sheet_summaries: List[Dict[str, Any]] = []
+    total_pairs = 0
+    all_records: List[Dict[str, Any]] = []
+
+    for sheet in book.sheets():
+        max_row = min(sheet.nrows, settings.excel_max_rows_per_sheet)
+        max_col = min(sheet.ncols, settings.excel_max_cols_per_sheet)
+        grid: List[List[str]] = []
+        for r in range(max_row):
+            row_vals: List[str] = []
+            for c in range(max_col):
+                cell = sheet.cell(r, c)
+                value: Any = cell.value
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        value = xlrd.xldate.xldate_as_datetime(value, book.datemode)
+                    except Exception:
+                        pass
+                row_vals.append(normalize_spreadsheet_cell(value))
+            grid.append(row_vals)
+
+        # Specialized extraction for Proxy Bills if detected
+        if _is_proxy_bill(grid):
+            proxy_res = extract_proxy_bill_logic(grid, sheet.name)
+            records = proxy_res["records"]
+            # Add proxy meta to the workbook parts if needed
+            if proxy_res["meta"]:
+                workbook_parts.append(f"[PROXY BILL META - {sheet.name}]\n" + "\n".join(f"{k}: {v}" for k, v in proxy_res["meta"].items()))
+            proxy_summary = _format_proxy_bill_summary(proxy_res)
+            if proxy_summary:
+                workbook_parts.append(f"[PROXY BILL SUMMARY - {sheet.name}]\n{proxy_summary}")
+        else:
+            records = _extract_table_records_from_grid(sheet.name, grid)
+
+        all_records.extend(records)
+        pairs = _detect_key_value_pairs_from_grid(grid, sheet.name)
+        total_pairs += len(pairs)
+        workbook_parts.append(_grid_to_ai_text(sheet.name, grid, max_col))
+        if records:
+            workbook_parts.append("[DETECTED SPREADSHEET RECORDS]\n" + "\n".join(
+                f"Record {r['record_index']} from {r['sheet_name']} row {r['source_row']}: "
+                + " | ".join(f"{k}={v}" for k, v in list(r['values_by_header'].items())[:8])
+                for r in records[:50]
+            ))
+        if pairs:
+            workbook_parts.append("[DETECTED KEY/VALUE PAIRS]\n" + "\n".join(pairs[:120]))
+        sheet_summaries.append({
+            "sheet_name": sheet.name,
+            "max_row_seen": max_row,
+            "max_col_seen": max_col,
+            "non_empty_rows": sum(1 for row in grid if _is_meaningful_spreadsheet_row(row)),
+            "detected_key_value_pairs": len(pairs),
+        })
+
+    text = normalize_text("\n\n".join(workbook_parts))
+    return {
+        "method": "excel_xls",
+        "text": text,
+        "quality": {
+            "document_type_detected": "spreadsheet",
+            "sheet_count": book.nsheets,
+            "sheets": sheet_summaries,
+            "char_count": len(text),
+            "field_hits": count_field_hits(text),
+            "detected_key_value_pairs": total_pairs,
+            "detected_record_count": len(all_records),
+        },
+        "records": all_records,
+    }
+
+
+def extract_csv_text(csv_bytes: bytes, filename: str) -> Dict[str, Any]:
+    text_raw = csv_bytes.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text_raw))
+    rows = []
+    for i, row in enumerate(reader, start=1):
+        if i > settings.excel_max_rows_per_sheet:
+            break
+        clean = [normalize_spreadsheet_cell(v) for v in row[: settings.excel_max_cols_per_sheet]]
+        if _is_meaningful_spreadsheet_row(clean):
+            rows.append(f"ROW {i}: " + "\t".join(clean))
+    text = normalize_text("\n".join([
+        "[SPREADSHEET TEXT]",
+        f"Filename: {filename}",
+        "--- SHEET: CSV ---",
+        *rows,
+    ]))
+    return {
+        "method": "csv",
+        "text": text,
+        "quality": {
+            "document_type_detected": "spreadsheet",
+            "sheet_count": 1,
+            "char_count": len(text),
+            "field_hits": count_field_hits(text),
+            "detected_record_count": 0,
+        },
+        "records": [],
+    }
+
+
+def extract_spreadsheet_text_professionally(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    ext = _file_extension(filename)
+    if ext == ".xlsx":
+        return extract_xlsx_text(file_bytes, filename)
+    if ext == ".xls":
+        return extract_xls_text(file_bytes, filename)
+    if ext == ".csv":
+        return extract_csv_text(file_bytes, filename)
+    raise ValueError(f"Unsupported spreadsheet type: {ext}")
+
+
+def extract_document_text_professionally(file_bytes: bytes, filename: str, force_ocr: bool = False) -> Dict[str, Any]:
+    from pdf_extractor import extract_pdf_text_professionally
+
+    ext = _file_extension(filename)
+    if ext == ".pdf":
+        result = extract_pdf_text_professionally(file_bytes, force_ocr=force_ocr)
+        result["source_file_type"] = "pdf"
+        return result
+    if ext in SUPPORTED_SPREADSHEET_EXTENSIONS:
+        result = extract_spreadsheet_text_professionally(file_bytes, filename)
+        result["source_file_type"] = "spreadsheet"
+        return result
+    raise ValueError(f"Unsupported file type '{ext}'. Upload PDF, XLSX, XLS, or CSV.")

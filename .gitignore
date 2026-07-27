@@ -160,3 +160,4 @@ cython_debug/
 *.png
 *.jpeg
 test_azure.py
+upload_audit/
