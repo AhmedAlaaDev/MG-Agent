@@ -159,7 +159,12 @@ cython_debug/
 *.jpg
 *.png
 *.jpeg
+!Invoices/**
 test_azure.py
 upload_audit/
 .vercel
 .env*
+!.env.example
+scratch/
+logs/
+tmp/

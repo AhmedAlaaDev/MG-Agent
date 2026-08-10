@@ -64,9 +64,8 @@ class Settings(BaseSettings):
     excel_max_cols_per_sheet: int = Field(default=80, alias="EXCEL_MAX_COLS_PER_SHEET")
     excel_max_cell_chars: int = Field(default=500, alias="EXCEL_MAX_CELL_CHARS")
 
-    # Default AI extractor. "puter" runs in the browser through Puter.js (/puter).
-    # Server-side API extraction can still use "azure" or explicit "gemini".
-    llm_provider: str = Field(default="puter", alias="LLM_PROVIDER")
+    # Default AI extractor ("gemini", "puter", or "azure").
+    llm_provider: str = Field(default="gemini", alias="LLM_PROVIDER")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-3-pro-preview", alias="GEMINI_MODEL")
     puter_model: str = Field(default="gemini-3-pro-preview", alias="PUTER_MODEL")

@@ -505,7 +505,7 @@ async def list_llm_models():
     """Gemini model ids available for per-request selection (same ids as Puter.js)."""
     return {
         "providers": ["puter", "azure", "gemini"],
-        "default_provider": (settings.llm_provider or "azure").strip().lower(),
+        "default_provider": (settings.llm_provider or "gemini").strip().lower(),
         "default_puter_model": settings.puter_model,
         "default_gemini_model": settings.gemini_model,
         "default_azure_deployment": settings.azure_openai_deployment,
@@ -521,7 +521,7 @@ class CrmExtractRequest(BaseModel):
 class ExtractRequest(BaseModel):
     ocr_text: str
     bl_type: BlTypeQuery = BlTypeQuery.master
-    llm_provider: Optional[LlmProviderQuery] = None
+    llm_provider: Optional[LlmProviderQuery] = LlmProviderQuery.gemini
     llm_model: Optional[str] = None
 
 
@@ -1269,8 +1269,8 @@ async def extract_file(
         description="B/L type: master (886150001) or house (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        None,
-        description="AI backend: puter (browser page), azure, or gemini (defaults to LLM_PROVIDER in .env)",
+        LlmProviderQuery.gemini,
+        description="AI backend: gemini (default), puter, or azure",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
@@ -2300,8 +2300,8 @@ async def extract_pdf(
         description="Post as Master B/L (886150001) or House B/L (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Query(
-        LlmProviderQuery.puter,
-        description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
+        LlmProviderQuery.gemini,
+        description="AI backend: gemini (default), puter, or azure",
     ),
     llm_model: Optional[GeminiModelQuery] = Query(
         GeminiModelQuery.gemini_3_pro_preview,
@@ -2352,8 +2352,8 @@ async def extract_excel(
         description="B/L type: master (886150001) or house (886150002)",
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        LlmProviderQuery.puter,
-        description="AI backend: puter browser page, azure, or gemini (defaults to LLM_PROVIDER in .env)",
+        LlmProviderQuery.gemini,
+        description="AI backend: gemini (default), puter, or azure",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         GeminiModelQuery.gemini_3_pro_preview,
@@ -2968,8 +2968,8 @@ async def extract_invoice(
     current_bl: Optional[str] = Form(None, description="Current operation BL number to match against"),
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        None,
-        description="AI backend: puter (browser page), azure, or gemini (defaults to LLM_PROVIDER in .env)",
+        LlmProviderQuery.gemini,
+        description="AI backend: gemini (default), puter, or azure",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
@@ -2986,6 +2986,13 @@ async def extract_invoice(
         import json
         from ai_extractor import extract_invoice_with_llm
         
+        if extracted_data_json and extracted_data_json.strip() == "string":
+            extracted_data_json = None
+        if operation_id and operation_id.strip() == "string":
+            operation_id = None
+        if current_bl and current_bl.strip() == "string":
+            current_bl = None
+
         file_bytes = None
         filename = "browser_extracted.pdf"
         if file:
@@ -3005,7 +3012,13 @@ async def extract_invoice(
                 return InvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
         
         if extracted_data_json:
-            extracted_data = json.loads(extracted_data_json)
+            try:
+                extracted_data = json.loads(extracted_data_json)
+            except json.JSONDecodeError:
+                return InvoiceExtractResponse(
+                    success=False, 
+                    error=f"Failed to parse AI response. Raw response: {extracted_data_json[:500]}"
+                )
         else:
             with llm_request_overrides(provider_val, model_val):
                 extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
@@ -3179,7 +3192,7 @@ async def extract_invoice(
             clean_mbl = re.sub(r"[^a-z0-9]", "", extracted_mbl.lower()) if extracted_mbl else ""
             clean_hbl = re.sub(r"[^a-z0-9]", "", extracted_hbl.lower()) if extracted_hbl else ""
             
-            is_matched = (
+            is_matched = bool(
                 (clean_mbl and (clean_mbl in clean_curr or clean_curr in clean_mbl)) or
                 (clean_hbl and (clean_hbl in clean_curr or clean_curr in clean_hbl))
             )
@@ -3366,9 +3379,21 @@ async def extract_invoice(
 
 class MultiInvoiceGroupResult(BaseModel):
     house_bl_number: Optional[str] = None
+    vendor_invoice_number: Optional[str] = None
+    invoice_date: Optional[str] = None
+    currency: Optional[str] = None
+    subtotal_amount: Optional[float] = None
+    tax_amount: Optional[float] = None
+    total_amount: Optional[float] = None
     cbm: Optional[float] = None
     kgs: Optional[float] = None
+    packages: Optional[float] = None
+    shipment_ref: Optional[str] = None
+    container_number: Optional[str] = None
+    container_type: Optional[str] = None
+    seal_number: Optional[str] = None
     line_items_count: int = 0
+    line_items: List[Dict[str, Any]] = []
     resolved_operation_id: Optional[str] = None
     resolved_operation_code: Optional[str] = None
     dynamics_url: Optional[str] = None
@@ -3387,6 +3412,9 @@ class MultiInvoiceExtractResponse(BaseModel):
     groups_count: int = 0
     total_line_items: int = 0
     total_posted: int = 0
+    master_operation_id: Optional[str] = None
+    master_operation_code: Optional[str] = None
+    master_dynamics_url: Optional[str] = None
     groups: List[MultiInvoiceGroupResult] = []
     error: Optional[str] = None
     dataverse_error: Optional[str] = None
@@ -3398,8 +3426,8 @@ async def extract_invoice_multi(
     operation_id: Optional[str] = Form(None, description="Fallback Dynamics operation ID if HBL lookup fails"),
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
-        None,
-        description="AI backend: puter (browser page), azure, or gemini (defaults to LLM_PROVIDER in .env)",
+        LlmProviderQuery.gemini,
+        description="AI backend: gemini (default), puter, or azure",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
@@ -3416,6 +3444,11 @@ async def extract_invoice_multi(
     try:
         import json
         from ai_extractor import extract_multi_invoice_with_llm
+
+        if extracted_data_json and extracted_data_json.strip() == "string":
+            extracted_data_json = None
+        if operation_id and operation_id.strip() == "string":
+            operation_id = None
 
         file_bytes = None
         filename = "browser_extracted.pdf"
@@ -3436,7 +3469,13 @@ async def extract_invoice_multi(
                 return MultiInvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
 
         if extracted_data_json:
-            extracted_data = json.loads(extracted_data_json)
+            try:
+                extracted_data = json.loads(extracted_data_json)
+            except json.JSONDecodeError:
+                return MultiInvoiceExtractResponse(
+                    success=False, 
+                    error=f"Failed to parse AI response. Raw response: {extracted_data_json[:500]}"
+                )
         else:
             with llm_request_overrides(provider_val, model_val):
                 extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
@@ -3449,7 +3488,7 @@ async def extract_invoice_multi(
         currency = extracted_data.get("currency")
         groups_raw = extracted_data.get("groups") or []
         deterministic_groups = _invoice_groups_from_table(raw_text)
-        if deterministic_groups:
+        if deterministic_groups and not groups_raw:
             groups_raw = deterministic_groups
             extracted_data["groups"] = deterministic_groups
             extracted_data["invoice_scope"] = {
@@ -3581,12 +3620,26 @@ async def extract_invoice_multi(
 
         for group in groups_raw:
             hbl = group.get("house_bl_number")
+            group_vendor_inv = group.get("vendor_invoice_number") or vendor_invoice_number
+            group_curr = group.get("currency") or currency
             line_items = group.get("line_items") or []
             gr = MultiInvoiceGroupResult(
                 house_bl_number=hbl,
+                vendor_invoice_number=group_vendor_inv,
+                invoice_date=group.get("invoice_date"),
+                currency=group_curr,
+                subtotal_amount=group.get("subtotal_amount"),
+                tax_amount=group.get("tax_amount"),
+                total_amount=group.get("total_amount"),
                 cbm=group.get("cbm"),
                 kgs=group.get("kgs"),
+                packages=group.get("packages"),
+                shipment_ref=group.get("shipment_ref"),
+                container_number=group.get("container_number") or container_number,
+                container_type=group.get("container_type"),
+                seal_number=group.get("seal_number") or seal_number,
                 line_items_count=len(line_items),
+                line_items=line_items,
             )
 
             # Resolve operation for this HBL
@@ -3674,28 +3727,38 @@ async def extract_invoice_multi(
 
                 for item in line_items:
                     desc = item.get("service_description") or "Invoice Charge"
+                    item_curr_str = item.get("currency") or group_curr or currency
+                    item_curr_id = fuzzy_match(item_curr_str, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname", fallback_first=True) if currencies_list else currency_id
+                    item_ex_rate = ex_rate
+                    if item_curr_id and currencies_list:
+                        for cur in currencies_list:
+                            if cur.get("transactioncurrencyid") == item_curr_id:
+                                item_ex_rate = float(cur.get("exchangerate") or 1.0)
+                                break
                     try:
                         matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name") if services_list else None
 
                         qty = float(item.get("quantity") or 1)
                         u_price = float(item.get("unit_price") or 0)
+                        if not u_price and item.get("total_amount"):
+                            u_price = float(item["total_amount"])
 
                         payload = {
                             "xollsp_name": desc,
                             "xollsp_quantity": qty,
                             "xollsp_unitamount": u_price,
-                            "xollsp_unitamountbase": u_price / ex_rate if ex_rate else u_price,
+                            "xollsp_unitamountbase": u_price / item_ex_rate if item_ex_rate else u_price,
                             "xollsp_fixedamount": 0,
                             "xollsp_fixedamountbase": 0,
                             "mesco_servicecategory": 886150006,
-                            "mesco_vendorinvoicenumber": vendor_invoice_number,
+                            "mesco_vendorinvoicenumber": group_vendor_inv,
                         }
 
                         if matched_srv:
                             payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
-                        if currency_id:
-                            payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({currency_id})"
-                            payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                        if item_curr_id:
+                            payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({item_curr_id})"
+                            payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({item_curr_id})"
                         if vendor_id:
                             payload["mesco_invoicevendor_shippingline@odata.bind"] = f"/mesco_shippinglines({vendor_id})"
                         if group_tariff_quote_id:
@@ -3707,12 +3770,14 @@ async def extract_invoice_multi(
                             payload["mesco_Master3@odata.bind"] = f"/mesco_operations({group_op_id})"
                         else:
                             payload["mesco_Operation@odata.bind"] = f"/mesco_operations({group_op_id})"
+                            if fallback_op_id:
+                                payload["mesco_Master3@odata.bind"] = f"/mesco_operations({fallback_op_id})"
 
                         existing_cost_line_id = _find_existing_invoice_cost_line(
                             client,
                             group_op_id,
                             group_is_master,
-                            vendor_invoice_number,
+                            group_vendor_inv,
                             item,
                         )
                         if existing_cost_line_id:
@@ -3737,6 +3802,10 @@ async def extract_invoice_multi(
 
             group_results.append(gr)
 
+        master_dyn_url = None
+        if fallback_op_id:
+            master_dyn_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={fallback_op_id}"
+
         return MultiInvoiceExtractResponse(
             success=True,
             vendor_name=vendor_name,
@@ -3748,6 +3817,9 @@ async def extract_invoice_multi(
             groups_count=len(group_results),
             total_line_items=total_line_items,
             total_posted=total_posted,
+            master_operation_id=fallback_op_id,
+            master_operation_code=fallback_op_code,
+            master_dynamics_url=master_dyn_url,
             groups=group_results,
         )
     except Exception as exc:

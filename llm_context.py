@@ -13,7 +13,7 @@ _llm_model: ContextVar[Optional[str]] = ContextVar("llm_model", default=None)
 
 
 def normalize_llm_provider(provider: Optional[str]) -> str:
-    normalized = (provider or settings.llm_provider or "azure").strip().lower()
+    normalized = (provider or settings.llm_provider or "gemini").strip().lower()
     if normalized in ("puter", "puterjs", "puter.js"):
         return "puter"
     if normalized in ("gemini", "google"):

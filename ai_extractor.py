@@ -625,15 +625,27 @@ def _call_gemini_json(
             contents = user
 
     def _generate(payload: Any):
-        return client.models.generate_content(
-            model=effective_llm_model(),
-            contents=payload,
-            config=types.GenerateContentConfig(
-                system_instruction=combined_system,
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-        )
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return client.models.generate_content(
+                    model=effective_llm_model(),
+                    contents=payload,
+                    config=types.GenerateContentConfig(
+                        system_instruction=combined_system,
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
+                )
+            except Exception as exc:
+                exc_str = str(exc)
+                if ("503" in exc_str or "UNAVAILABLE" in exc_str or "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str) and attempt < max_retries - 1:
+                    wait_sec = (attempt + 1) * 3
+                    logger.warning("Gemini 503/429 rate spike detected. Retrying in %ds... (attempt %d/%d)", wait_sec, attempt + 1, max_retries)
+                    time.sleep(wait_sec)
+                else:
+                    raise
 
     response = _generate(contents)
     content = (response.text or "").strip()
@@ -681,16 +693,16 @@ def _call_llm_json(
     
     # Auto fallback logic if the requested provider is not configured/supported on the server
     if provider == "puter":
-        if (settings.azure_openai_api_key or "").strip():
-            provider = "azure"
-            from llm_context import _llm_provider, _llm_model
-            _llm_provider.set("azure")
-            _llm_model.set(settings.azure_openai_deployment)
-        elif (settings.gemini_api_key or "").strip():
+        if (settings.gemini_api_key or "").strip():
             provider = "gemini"
             from llm_context import _llm_provider, _llm_model
             _llm_provider.set("gemini")
             _llm_model.set(settings.gemini_model)
+        elif (settings.azure_openai_api_key or "").strip():
+            provider = "azure"
+            from llm_context import _llm_provider, _llm_model
+            _llm_provider.set("azure")
+            _llm_model.set(settings.azure_openai_deployment)
         else:
             raise RuntimeError(
                 "Puter is a browser-side AI provider. Open /puter and use the "
@@ -871,7 +883,6 @@ def extract_records_with_azure_openai(
     budget = _input_char_budget()
     mime = _native_mime_for_file(file_bytes, filename)
     native_file = _should_send_native_file(mime, page_scope=page_scope)
-
     if native_file:
         return _call_llm_json(
             system,
@@ -890,8 +901,6 @@ def extract_records_with_azure_openai(
             filename=filename,
         )
 
-    # Long text (e.g. big spreadsheet or many-page PDF without native upload):
-    # chunk, extract per chunk, then merge.
     chunks = _chunk_long_text(text, budget)
     payloads: List[Dict[str, Any]] = []
     for chunk in chunks:
@@ -916,22 +925,129 @@ def extract_records_with_azure_openai(
     return merged
 
 
-def extract_records_with_llm(
-    extracted_text: str,
+def _llm_label() -> str:
+    if uses_puter():
+        return "Puter.js Gemini"
+    return "Gemini" if uses_gemini() else "Azure OpenAI"
+
+
+def _input_char_budget() -> int:
+    """Per-call input budget; Gemini's large context allows far more than Azure."""
+    if uses_gemini():
+        return max(settings.gemini_max_input_chars, settings.max_input_chars)
+    if uses_puter():
+        return max(settings.gemini_max_input_chars, settings.max_input_chars)
+    return settings.max_input_chars
+
+
+_PAGE_MARKER_RE = re.compile(r"(?=^---\s*PAGE\s+\d+\s*---)", re.I | re.M)
+_SHEET_MARKER_RE = re.compile(r"(?=^---\s*SHEET\s*:)", re.I | re.M)
+
+
+def _native_mime_for_file(file_bytes: Optional[bytes], filename: Optional[str] = None) -> Optional[str]:
+    """Detect MIME type for Gemini native multimodal upload."""
+    if not file_bytes:
+        return None
+    if file_bytes[:5] == b"%PDF-":
+        return "application/pdf"
+    if file_bytes[:2] == b"PK":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if file_bytes[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "application/vnd.ms-excel"
+    ext = ""
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+    if ext == "csv":
+        return "text/csv"
+    if ext in ("xlsx", "xlsm"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == "xls":
+        return "application/vnd.ms-excel"
+    return None
+
+
+def _should_send_native_file(
+    mime: Optional[str],
     *,
-    page_scope: bool = False,
-    file_bytes: Optional[bytes] = None,
-    filename: Optional[str] = None,
-    pdf_bytes: Optional[bytes] = None,
-) -> Dict[str, Any]:
-    """Provider-agnostic alias (routes via LLM_PROVIDER in .env)."""
-    return extract_records_with_azure_openai(
-        extracted_text,
-        page_scope=page_scope,
-        file_bytes=file_bytes,
-        filename=filename,
-        pdf_bytes=pdf_bytes,
-    )
+    page_scope: bool,
+) -> bool:
+    if not mime or page_scope:
+        return False
+    if mime == "application/pdf":
+        return bool(settings.gemini_native_pdf)
+    if mime in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "text/csv",
+    ):
+        return bool(settings.gemini_native_spreadsheet)
+    return False
+
+
+def _chunk_long_text(text: str, max_chars: int) -> List[str]:
+    """
+    Split very long text into chunks that each fit in ``max_chars``.
+
+    Prefers ``--- PAGE N ---`` boundaries (multi-page PDFs), then ``--- SHEET:`` blocks
+    (Excel workbooks); otherwise falls back to line boundaries (long CSV). A single
+    oversized unit is hard sliced so nothing is dropped.
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    pages = [p for p in _PAGE_MARKER_RE.split(text) if p.strip()]
+    if len(pages) <= 1:
+        pages = [p for p in _SHEET_MARKER_RE.split(text) if p.strip()]
+    units = pages if len(pages) > 1 else text.splitlines(keepends=True)
+
+    chunks: List[str] = []
+    buf = ""
+    for unit in units:
+        if len(unit) > max_chars:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(unit), max_chars):
+                chunks.append(unit[i : i + max_chars])
+            continue
+        if len(buf) + len(unit) > max_chars:
+            chunks.append(buf)
+            buf = unit
+        else:
+            buf += unit
+    if buf.strip():
+        chunks.append(buf)
+    return chunks or [text[:max_chars]]
+
+
+def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-chunk LLM payloads into one, de-duplicating records by B/L number."""
+    from record_reconciliation import dedupe_records_by_bl
+
+    all_records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    confidence: Dict[str, Any] = {}
+    layout = "unknown"
+    for payload in payloads:
+        all_records.extend(payload.get("records") or [])
+        warnings.extend(payload.get("warnings") or [])
+        if isinstance(payload.get("confidence"), dict):
+            confidence.update(payload["confidence"])
+        cand = payload.get("document_layout")
+        if cand and (layout == "unknown" or layout == "single_bl"):
+            layout = cand
+
+    merged_records = dedupe_records_by_bl(all_records)
+    if len(merged_records) >= 2 and layout in ("unknown", "single_bl"):
+        layout = "multi_bl_pages"
+    return {
+        "document_layout": layout,
+        "records": merged_records,
+        "confidence": confidence,
+        "warnings": warnings,
+    }
+
+
 
 
 def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
@@ -955,13 +1071,52 @@ INVOICE_JSON_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "vendor_name": {"type": ["string", "null"]},
-            "vendor_invoice_number": {"type": ["string", "null"]},
-            "master_bl_number": {"type": ["string", "null"]},
-            "house_bl_number": {"type": ["string", "null"]},
-            "container_number": {"type": ["string", "null"]},
-            "seal_number": {"type": ["string", "null"]},
-            "currency": {"type": ["string", "null"], "description": "3-letter ISO code like USD, EGP, EUR"},
+            "document_type": {"type": ["string", "null"], "description": "Document type e.g. DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE"},
+            "invoice_date": {"type": ["string", "null"], "description": "Invoice/Debit note date (e.g. 16-Jul-26)"},
+            "due_date": {"type": ["string", "null"], "description": "Payment due date (e.g. 16-Jul-26)"},
+            "vendor_name": {"type": ["string", "null"], "description": "Vendor/Supplier company name"},
+            "vendor_address": {"type": ["string", "null"], "description": "Vendor address and tax/GST registration info"},
+            "vendor_invoice_number": {"type": ["string", "null"], "description": "Invoice or Debit Note number (e.g. 137-26MU000909)"},
+            "master_bl_number": {"type": ["string", "null"], "description": "Master B/L number (e.g. NSA26060443)"},
+            "house_bl_number": {"type": ["string", "null"], "description": "House B/L number (e.g. NAV26MU1470)"},
+            "shipment_ref": {"type": ["string", "null"], "description": "Shipment ref or booking number (e.g. SHP0002096)"},
+            "container_number": {"type": ["string", "null"], "description": "ISO Container number (4 letters + 7 digits, e.g. TRKU4465372)"},
+            "seal_number": {"type": ["string", "null"], "description": "Seal number"},
+            "container_type": {"type": ["string", "null"], "description": "Container type/size (e.g. 40' HIGHCUBE)"},
+            "shipper_name": {"type": ["string", "null"], "description": "Shipper company name"},
+            "shipper_address": {"type": ["string", "null"], "description": "Shipper address"},
+            "consignee_name": {"type": ["string", "null"], "description": "Consignee company name"},
+            "consignee_address": {"type": ["string", "null"], "description": "Consignee address"},
+            "agent_name": {"type": ["string", "null"], "description": "Agent company name"},
+            "acid_number": {"type": ["string", "null"], "description": "ACID number for Egypt customs (e.g. 1000151581013510028)"},
+            "vessel_name": {"type": ["string", "null"], "description": "Vessel name (e.g. VIVIEN A)"},
+            "voyage_number": {"type": ["string", "null"], "description": "Voyage number (e.g. 0TI46E1TK)"},
+            "port_of_loading": {"type": ["string", "null"], "description": "Port of Origin / Loading (e.g. NHAVA SHEVA, INDIA)"},
+            "port_of_discharge": {"type": ["string", "null"], "description": "Port of Discharge / Destination (e.g. ALEXANDRIA)"},
+            "incoterm": {"type": ["string", "null"], "description": "Incoterm (e.g. FOB - FREE ON BOARD)"},
+            "number_of_packages": {"type": ["number", "null"], "description": "Number of packs/packages (e.g. 12)"},
+            "gross_weight_kg": {"type": ["number", "null"], "description": "Gross weight in KG (e.g. 5450.0)"},
+            "volume_cbm": {"type": ["number", "null"], "description": "Volume in CBM (e.g. 6.174)"},
+            "chargeable_volume": {"type": ["number", "null"], "description": "Chargeable volume in CBM (e.g. 6.174)"},
+            "currency": {"type": ["string", "null"], "description": "3-letter ISO currency code (e.g. USD)"},
+            "exchange_rate": {"type": ["number", "null"], "description": "Rate of exchange (ROE, e.g. 1.00)"},
+            "subtotal_amount": {"type": ["number", "null"], "description": "Subtotal / Taxable amount (e.g. 629.75)"},
+            "tax_amount": {"type": ["number", "null"], "description": "Total tax / IGST amount"},
+            "total_amount": {"type": ["number", "null"], "description": "Grand total net amount (e.g. 629.75)"},
+            "amount_in_words": {"type": ["string", "null"], "description": "Total amount written in words"},
+            "bank_details": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "properties": {
+                    "bank_name": {"type": ["string", "null"]},
+                    "account_number": {"type": ["string", "null"]},
+                    "eefc_account": {"type": ["string", "null"]},
+                    "ifsc_code": {"type": ["string", "null"]},
+                    "swift_code": {"type": ["string", "null"]},
+                    "iban": {"type": ["string", "null"]},
+                },
+                "required": ["bank_name", "account_number", "eefc_account", "ifsc_code", "swift_code", "iban"],
+            },
             "line_items": {
                 "type": "array",
                 "items": {
@@ -969,35 +1124,223 @@ INVOICE_JSON_SCHEMA = {
                     "additionalProperties": False,
                     "properties": {
                         "service_description": {"type": ["string", "null"]},
+                        "hsn_sac": {"type": ["string", "null"]},
                         "quantity": {"type": ["number", "null"]},
                         "unit_price": {"type": ["number", "null"]},
-                        "total_amount": {"type": ["number", "null"]}
+                        "currency": {"type": ["string", "null"]},
+                        "exchange_rate": {"type": ["number", "null"]},
+                        "taxable_amount": {"type": ["number", "null"]},
+                        "tax_rate": {"type": ["string", "null"]},
+                        "tax_amount": {"type": ["number", "null"]},
+                        "total_amount": {"type": ["number", "null"]},
                     },
-                    "required": ["service_description", "quantity", "unit_price", "total_amount"]
-                }
-            }
+                    "required": [
+                        "service_description", "hsn_sac", "quantity", "unit_price",
+                        "currency", "exchange_rate", "taxable_amount", "tax_rate",
+                        "tax_amount", "total_amount"
+                    ],
+                },
+            },
         },
-        "required": ["vendor_name", "vendor_invoice_number", "master_bl_number", "house_bl_number", "container_number", "seal_number", "currency", "line_items"]
-    }
+        "required": [
+            "document_type", "invoice_date", "due_date", "vendor_name", "vendor_address",
+            "vendor_invoice_number", "master_bl_number", "house_bl_number", "shipment_ref",
+            "container_number", "seal_number", "container_type", "shipper_name", "shipper_address",
+            "consignee_name", "consignee_address", "agent_name", "acid_number", "vessel_name",
+            "voyage_number", "port_of_loading", "port_of_discharge", "incoterm",
+            "number_of_packages", "gross_weight_kg", "volume_cbm", "chargeable_volume",
+            "currency", "exchange_rate", "subtotal_amount", "tax_amount", "total_amount",
+            "amount_in_words", "bank_details", "line_items"
+        ],
+    },
 }
 
 INVOICE_SYSTEM_PROMPT = """
 You are a professional invoice and debit note data extraction engine for shipping and logistics.
 
-Analyze the raw text and visual layout of the invoice/debit note to extract:
-1. Vendor/Supplier Name: The company billing the charges.
-2. Vendor Invoice/Debit Note Number: Labeled as INV NO, INVOICE NUMBER, DEBIT NOTE NO, DEBIT NOTE NUMBER, etc.
-3. Master B/L Number: Labeled as "Master B/L No.", "MBL", "Master Bill of Lading", "M/BL", etc. (e.g. COSU6501303560).
-4. House B/L Number: Labeled as "B/L(H)", "HBL", "House Bill of Lading", "House B/L No.", "H/BL", "ALYHHSE6050007Z", etc.
-5. Container Number: Locate container number reference (e.g. CSGU7177299, DFSU1234567). Labeled as "Container No.", "Cont No.", etc.
-6. Seal Number: Locate seal number reference (e.g. CW889907, EGY123456). Labeled as "Seal No.", "Seal Number", etc.
-7. Currency: Extract the main currency used for line items, returned as a 3-letter ISO code (e.g. USD, EGP, EUR).
-8. Line Items: Extract each charge/particular line item including:
-   - service_description: Description of the fee or service (e.g., "REFUND DOCS", "Ocean Freight", "Handling").
-   - quantity: Number of units or count of services. If not specified, default to 1.
-   - unit_price: The cost per unit.
-   - total_amount: The total charge for this row.
+Analyze the raw text and visual layout of the invoice/debit note to extract all available metadata:
+1. Header & Identifiers:
+   - document_type: Document type (DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE)
+   - invoice_date: Document date (e.g. 16-Jul-26)
+   - due_date: Payment due date
+   - vendor_name: Billing company/supplier issuing the document (e.g. BYTEPORT LOGISTICS)
+   - vendor_address: Address and tax registration/GST info
+   - vendor_invoice_number: Invoice/Debit Note Number (e.g. 137-26MU000909)
+   - master_bl_number: Master B/L Number (e.g. NSA26060443)
+   - house_bl_number: House B/L Number (e.g. NAV26MU1470)
+   - shipment_ref: Shipment Reference or Booking number (e.g. SHP0002096)
+
+2. Parties & Customs:
+   - shipper_name: Shipper company name (e.g. ZNL BEARINGS PRIVATE LIMITED)
+   - shipper_address: Full shipper address
+   - consignee_name: Consignee company name (e.g. DOCTOR ESTABLISHMENT IMP AND EXP)
+   - consignee_address: Full consignee address
+   - agent_name: Agent company name (e.g. MESCO MARINE AND ENGINEERING SERVICES CO)
+   - acid_number: Egypt Customs ACID number (e.g. 1000151581013510028)
+
+3. Logistics & Vessel Info:
+   - vessel_name: Vessel name (e.g. VIVIEN A)
+   - voyage_number: Voyage number (e.g. 0TI46E1TK)
+   - port_of_loading: Port of Origin / POL (e.g. NHAVA SHEVA, INDIA)
+   - port_of_discharge: Port of Discharge / POD (e.g. ALEXANDRIA)
+   - incoterm: Incoterm (e.g. FOB - FREE ON BOARD)
+   - container_number: ISO container number (4 letters + 7 digits, e.g. TRKU4465372)
+   - seal_number: Carrier seal number
+   - container_type: Container type/size (e.g. 40' HIGHCUBE)
+   - number_of_packages: Package count (e.g. 12)
+   - gross_weight_kg: Gross weight in KG (e.g. 5450.0)
+   - volume_cbm: Volume in CBM (e.g. 6.174)
+   - chargeable_volume: Chargeable volume in CBM (e.g. 6.174)
+
+4. Financial Totals & Banking:
+   - currency: 3-letter ISO code (e.g. USD)
+   - exchange_rate: ROE / exchange rate (e.g. 1.00)
+   - subtotal_amount: Taxable amount / subtotal
+   - tax_amount: Total tax / IGST
+   - total_amount: Grand total amount
+   - amount_in_words: Spelled out total amount in words
+   - bank_details: Bank name, INR/EEFC account numbers, IFSC code, SWIFT code, IBAN
+
+5. Itemized Line Items:
+   - service_description: Description of fee or charge (e.g. OCEAN FREIGHT LCL)
+   - hsn_sac: HSN/SAC code (e.g. 996521)
+   - quantity: Number of units (e.g. 6.174)
+   - unit_price: Price per unit (e.g. 102.00)
+   - currency: Line item currency (e.g. USD)
+   - exchange_rate: Line item ROE
+   - taxable_amount: Taxable amount (e.g. 629.75)
+   - tax_rate: Tax rate percentage (e.g. 0%)
+   - tax_amount: Tax amount (e.g. 0.00)
+   - total_amount: Total amount for this row (e.g. 629.75)
+
+Rules:
+- Do not omit fields if present in the document. Use null only for unprinted fields.
+- Keep quantities, prices, weights, and volumes as numbers.
 """
+
+
+def _enrich_invoice_result(
+    result: Dict[str, Any],
+    raw_text: str,
+    filename: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Fallback regex enrichment for debit note & invoice metadata."""
+    if not isinstance(result, dict):
+        return result
+
+    import re
+
+    # Try PyMuPDF visual lines text if PDF bytes present
+    text_to_search = raw_text or ""
+    if file_bytes and file_bytes[:5] == b"%PDF-":
+        try:
+            import fitz
+            from pdf_extractor import _words_to_visual_lines
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            if len(doc) > 0:
+                words = doc[0].get_text("words")
+                if words:
+                    text_to_search = "\n".join(_words_to_visual_lines(words)) + "\n" + text_to_search
+        except Exception:
+            pass
+
+    # Debit Note deterministic repair
+    try:
+        from pdf_debit_note import parse_freight_debit_note
+        dn = parse_freight_debit_note(text_to_search)
+        if dn:
+            result.setdefault("document_type", dn.get("document_type") or "debit_note")
+            if not result.get("house_bl_number") and dn.get("mesco_houseblno"):
+                result["house_bl_number"] = dn["mesco_houseblno"]
+            if not result.get("master_bl_number") and dn.get("mesco_masterblno"):
+                result["master_bl_number"] = dn["mesco_masterblno"]
+            if not result.get("shipper_name") and dn.get("mesco_shippernamecontactno"):
+                result["shipper_name"] = dn["mesco_shippernamecontactno"]
+            if not result.get("shipper_address") and dn.get("mesco_shipperaddress"):
+                result["shipper_address"] = dn["mesco_shipperaddress"]
+            if not result.get("consignee_name") and dn.get("mesco_consigneenamecontactno"):
+                result["consignee_name"] = dn["mesco_consigneenamecontactno"]
+            if not result.get("consignee_address") and dn.get("mesco_consigneeaddress"):
+                result["consignee_address"] = dn["mesco_consigneeaddress"]
+            if not result.get("port_of_loading") and dn.get("mesco_origin"):
+                result["port_of_loading"] = dn["mesco_origin"]
+            if not result.get("port_of_discharge") and dn.get("mesco_destination"):
+                result["port_of_discharge"] = dn["mesco_destination"]
+            if not result.get("vessel_name") and dn.get("mesco_vessel"):
+                result["vessel_name"] = dn["mesco_vessel"]
+            if not result.get("voyage_number") and dn.get("mesco_voytruckno"):
+                result["voyage_number"] = dn["mesco_voytruckno"]
+            if not result.get("incoterm") and dn.get("mesco_incoterm"):
+                result["incoterm"] = dn["mesco_incoterm"]
+            if not result.get("number_of_packages") and dn.get("cr401_totalpackages"):
+                result["number_of_packages"] = dn["cr401_totalpackages"]
+            if not result.get("gross_weight_kg") and dn.get("cr401_totalgrossweight"):
+                result["gross_weight_kg"] = dn["cr401_totalgrossweight"]
+            if not result.get("volume_cbm") and dn.get("cr401_totalvolume"):
+                result["volume_cbm"] = dn["cr401_totalvolume"]
+            if not result.get("container_number") and dn.get("container_number"):
+                result["container_number"] = dn["container_number"]
+            if dn.get("containers") and isinstance(dn["containers"], list) and dn["containers"]:
+                c_type = dn["containers"][0].get("container_type")
+                if c_type and not result.get("container_type"):
+                    result["container_type"] = c_type
+            if not result.get("shipment_ref") and dn.get("mesco_bookingnumber"):
+                result["shipment_ref"] = dn["mesco_bookingnumber"]
+    except Exception as exc:
+        logger.debug("Debit note repair fallback skipped: %s", exc)
+
+    # Regex extractions for common fields
+    inv_no = str(result.get("vendor_invoice_number") or "").strip()
+    if not inv_no or inv_no in ("0", "0.0", "null", "None"):
+        if filename:
+            from pathlib import Path
+            stem = Path(filename).stem.strip()
+            if stem and not stem.lower().startswith("browser_extracted") and len(stem) >= 3:
+                result["vendor_invoice_number"] = stem
+                inv_no = stem
+        if not result.get("vendor_invoice_number") or str(result.get("vendor_invoice_number")).strip() in ("0", "0.0", "null", "None"):
+            inv_m = re.search(r"Invoice\s*(?:No\.?|Number|#)?\s*:?\s*([A-Z0-9\-\\/,]+)", text_to_search, re.I)
+            if inv_m and inv_m.group(1).strip() not in ("0", "0.0"):
+                result["vendor_invoice_number"] = inv_m.group(1).strip()
+
+    if not result.get("acid_number"):
+        acid_m = re.search(r"ACID\s*(?:NO\.?)?\s*:?\s*(\d{15,25})", text_to_search, re.I)
+        if acid_m:
+            result["acid_number"] = acid_m.group(1)
+
+    if not result.get("invoice_date"):
+        date_m = re.search(r"\bDate\s*:\s*([\d]{1,2}-[A-Za-z]{3}-[\d]{2,4}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text_to_search, re.I)
+        if date_m:
+            result["invoice_date"] = date_m.group(1)
+
+    if not result.get("due_date"):
+        due_m = re.search(r"\bPayment\s+Due\s+Date\s*:\s*([\d]{1,2}-[A-Za-z]{3}-[\d]{2,4}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text_to_search, re.I)
+        if due_m:
+            result["due_date"] = due_m.group(1)
+
+    if not result.get("amount_in_words"):
+        words_m = re.search(r"(?:Total\s+in\s+[A-Z]{3}.*?\n)?\s*([A-Z][a-z\s\-]+(?:Dollar|Cent|Pound|Euro|EGP|USD)[a-zA-Z\s\-]*)\b", text_to_search)
+        if words_m:
+            result["amount_in_words"] = words_m.group(1).strip()
+
+    if not result.get("bank_details"):
+        bank_m = re.search(r"Bank\s+Name\s*:\s*([^\n]+)", text_to_search, re.I)
+        acc_m = re.search(r"Account\s+Number\s*:\s*([^\n]+)", text_to_search, re.I)
+        if bank_m or acc_m:
+            eefc_m = re.search(r"EEFC\s+Account.*?Account\s+Number\s*:\s*([^\n]+)", text_to_search, re.I | re.S)
+            ifsc_m = re.search(r"IFSC\s+Code\s*:\s*([^\n]+)", text_to_search, re.I)
+            swift_m = re.search(r"SWIFT\s+Code\s*:\s*([^\n]+)", text_to_search, re.I)
+            result["bank_details"] = {
+                "bank_name": bank_m.group(1).strip() if bank_m else None,
+                "account_number": acc_m.group(1).strip() if acc_m else None,
+                "eefc_account": eefc_m.group(1).strip() if eefc_m else None,
+                "ifsc_code": ifsc_m.group(1).strip() if ifsc_m else None,
+                "swift_code": swift_m.group(1).strip() if swift_m else None,
+                "iban": None,
+            }
+
+    return result
 
 
 def extract_invoice_with_llm(
@@ -1017,21 +1360,23 @@ def extract_invoice_with_llm(
     native_file = _should_send_native_file(mime, page_scope=False)
 
     if native_file:
-        return _call_llm_json(
+        res = _call_llm_json(
             system,
             user_prefix + text[:budget],
             INVOICE_JSON_SCHEMA,
             file_bytes=file_bytes,
             filename=filename,
         )
+    else:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            INVOICE_JSON_SCHEMA,
+            file_bytes=None,
+            filename=filename,
+        )
 
-    return _call_llm_json(
-        system,
-        user_prefix + text[:budget],
-        INVOICE_JSON_SCHEMA,
-        file_bytes=None,
-        filename=filename,
-    )
+    return _enrich_invoice_result(res, text, filename=filename, file_bytes=file_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -1044,37 +1389,65 @@ MULTI_INVOICE_JSON_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "document_type": {"type": ["string", "null"]},
+            "invoice_date": {"type": ["string", "null"]},
+            "due_date": {"type": ["string", "null"]},
             "vendor_name": {"type": ["string", "null"]},
+            "vendor_address": {"type": ["string", "null"]},
             "vendor_invoice_number": {"type": ["string", "null"]},
             "master_bl_number": {"type": ["string", "null"]},
-            "container_number": {
-                "type": ["string", "null"],
-                "description": "Container number (e.g. EGSU9903117). If container and seal are combined like EGSU9903117/EMCPUL8444, put only the container here.",
-            },
+            "container_number": {"type": ["string", "null"]},
             "seal_number": {"type": ["string", "null"]},
-            "currency": {
-                "type": ["string", "null"],
-                "description": "3-letter ISO currency code (USD, EGP, EUR, etc.)",
+            "container_type": {"type": ["string", "null"]},
+            "shipper_name": {"type": ["string", "null"]},
+            "consignee_name": {"type": ["string", "null"]},
+            "agent_name": {"type": ["string", "null"]},
+            "acid_number": {"type": ["string", "null"]},
+            "vessel_name": {"type": ["string", "null"]},
+            "voyage_number": {"type": ["string", "null"]},
+            "port_of_loading": {"type": ["string", "null"]},
+            "port_of_discharge": {"type": ["string", "null"]},
+            "incoterm": {"type": ["string", "null"]},
+            "currency": {"type": ["string", "null"]},
+            "exchange_rate": {"type": ["number", "null"]},
+            "subtotal_amount": {"type": ["number", "null"]},
+            "tax_amount": {"type": ["number", "null"]},
+            "total_amount": {"type": ["number", "null"]},
+            "amount_in_words": {"type": ["string", "null"]},
+            "bank_details": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "properties": {
+                    "bank_name": {"type": ["string", "null"]},
+                    "account_number": {"type": ["string", "null"]},
+                    "eefc_account": {"type": ["string", "null"]},
+                    "ifsc_code": {"type": ["string", "null"]},
+                    "swift_code": {"type": ["string", "null"]},
+                    "iban": {"type": ["string", "null"]},
+                },
+                "required": ["bank_name", "account_number", "eefc_account", "ifsc_code", "swift_code", "iban"],
             },
             "groups": {
                 "type": "array",
-                "description": "One group per House B/L (HBL). If the document has no HBL grouping, return a single group with house_bl_number set to null.",
+                "description": "Groups of line items by House B/L (HBL), Page, or Invoice section / Currency.",
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "house_bl_number": {
-                            "type": ["string", "null"],
-                            "description": "The House B/L number this group of charges belongs to.",
-                        },
-                        "cbm": {
-                            "type": ["number", "null"],
-                            "description": "Cubic meters for this HBL shipment, if shown.",
-                        },
-                        "kgs": {
-                            "type": ["number", "null"],
-                            "description": "Weight in KG for this HBL shipment, if shown.",
-                        },
+                        "house_bl_number": {"type": ["string", "null"]},
+                        "vendor_invoice_number": {"type": ["string", "null"]},
+                        "invoice_date": {"type": ["string", "null"]},
+                        "currency": {"type": ["string", "null"]},
+                        "shipment_ref": {"type": ["string", "null"]},
+                        "container_number": {"type": ["string", "null"]},
+                        "container_type": {"type": ["string", "null"]},
+                        "seal_number": {"type": ["string", "null"]},
+                        "cbm": {"type": ["number", "null"]},
+                        "kgs": {"type": ["number", "null"]},
+                        "packages": {"type": ["number", "null"]},
+                        "subtotal_amount": {"type": ["number", "null"]},
+                        "tax_amount": {"type": ["number", "null"]},
+                        "total_amount": {"type": ["number", "null"]},
                         "line_items": {
                             "type": "array",
                             "items": {
@@ -1082,26 +1455,40 @@ MULTI_INVOICE_JSON_SCHEMA = {
                                 "additionalProperties": False,
                                 "properties": {
                                     "service_description": {"type": ["string", "null"]},
+                                    "hsn_sac": {"type": ["string", "null"]},
                                     "quantity": {"type": ["number", "null"]},
                                     "unit_price": {"type": ["number", "null"]},
+                                    "currency": {"type": ["string", "null"]},
+                                    "exchange_rate": {"type": ["number", "null"]},
+                                    "taxable_amount": {"type": ["number", "null"]},
+                                    "tax_rate": {"type": ["string", "null"]},
+                                    "tax_amount": {"type": ["number", "null"]},
                                     "total_amount": {"type": ["number", "null"]},
                                 },
-                                "required": ["service_description", "quantity", "unit_price", "total_amount"],
+                                "required": [
+                                    "service_description", "hsn_sac", "quantity", "unit_price",
+                                    "currency", "exchange_rate", "taxable_amount", "tax_rate",
+                                    "tax_amount", "total_amount"
+                                ],
                             },
                         },
                     },
-                    "required": ["house_bl_number", "line_items"],
+                    "required": [
+                        "house_bl_number", "vendor_invoice_number", "invoice_date", "currency",
+                        "shipment_ref", "container_number", "container_type", "seal_number",
+                        "cbm", "kgs", "packages", "subtotal_amount", "tax_amount",
+                        "total_amount", "line_items"
+                    ],
                 },
             },
         },
         "required": [
-            "vendor_name",
-            "vendor_invoice_number",
-            "master_bl_number",
-            "container_number",
-            "seal_number",
-            "currency",
-            "groups",
+            "document_type", "invoice_date", "due_date", "vendor_name", "vendor_address",
+            "vendor_invoice_number", "master_bl_number", "container_number", "seal_number",
+            "container_type", "shipper_name", "consignee_name", "agent_name", "acid_number",
+            "vessel_name", "voyage_number", "port_of_loading", "port_of_discharge",
+            "incoterm", "currency", "exchange_rate", "subtotal_amount", "tax_amount",
+            "total_amount", "amount_in_words", "bank_details", "groups"
         ],
     },
 }
@@ -1109,28 +1496,16 @@ MULTI_INVOICE_JSON_SCHEMA = {
 MULTI_INVOICE_SYSTEM_PROMPT = """\
 You are a professional invoice and debit note data extraction engine for shipping and logistics.
 
-This document may contain charges for MULTIPLE House B/L (HBL) shipments under a single invoice/debit note.
+A single PDF document may contain multiple pages, multiple invoice sections, multiple currencies (e.g. Page 1 in LE / EGP and Page 2 in USD), or multiple House B/L (HBL) shipments.
 
 Your task:
-1. Extract the shared header fields: vendor name, invoice/debit note number, Master B/L number, container number, seal number, and currency.
-2. Group the line items by their House B/L (HBL) number. Each row in the invoice typically shows which HBL it belongs to — look for columns labeled "HBL", "HBL/CNT", "B/L(H)", or the HBL number appearing in the same row as the charge.
-3. For each HBL group, extract:
-   - house_bl_number: The House B/L identifier (e.g. "AMIGL260110746A")
-   - cbm: Cubic meters if shown
-   - kgs: Weight in KG if shown
-   - line_items: Each charge row with service_description, quantity, unit_price, and total_amount
-4. If the document does NOT have multiple HBLs (it's a simple single-invoice), return exactly one group with house_bl_number set to null and all line items in that single group.
-5. Do NOT merge or aggregate charges across HBLs. Keep each charge row under its correct HBL group.
-6. For quantity: use the numeric value shown. If not specified, default to 1.
-7. For unit_price: use the per-unit cost shown.
-8. For total_amount: use the total charge for that row (usually quantity × unit_price).
-
-Field identification tips:
-- Vendor/Supplier: The company name at the top of the document issuing the charges.
-- Invoice Number: Labeled "INV NO", "INVOICE NUMBER", "DEBIT NOTE NO", etc.
-- Master B/L: Labeled "MB/L NO", "MBL", "Master B/L No.", etc.
-- Container: Labeled "CONTAINER NO", "Cont No.", etc. Format: 4 letters + 7 digits (e.g. EGSU9903117).
-- Seal: Often combined with container as "CONTAINER/SEAL" — extract separately.
+1. Extract top-level shared header fields: document_type, dates, vendor, vendor invoice number, master_bl, container, seal, vessel, voyage, ports, acid, currency, total amounts, and bank details.
+2. Group line items into separate groups inside `groups`:
+   - Group by House B/L (HBL) if different HBL numbers are present.
+   - Group by Page / Invoice Section / Currency if the document has multiple pages or multiple currencies (e.g. Page 1 in LE / EGP vs Page 2 in USD).
+3. For each group in `groups`, extract house_bl_number, vendor_invoice_number, invoice_date, currency (e.g. "LE", "USD", "EUR"), shipment_ref, container, cbm, kgs, packages, subtotal_amount, tax_amount, total_amount, and ALL line items.
+4. For EVERY line item, extract service_description, quantity, unit_price, taxable_amount, tax_rate, tax_amount, total_amount, and currency (e.g. "LE", "USD", "EUR").
+5. Do NOT omit any page, table, or currency section. Extract ALL line items across ALL pages.
 """
 
 
@@ -1140,31 +1515,32 @@ def extract_multi_invoice_with_llm(
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Extract a multi-HBL invoice/debit note into grouped line items."""
+    """Extract a multi-HBL / multi-page / multi-currency invoice into grouped line items."""
     text = normalize_text(extracted_text)
     if not text:
         raise ValueError("No text was extracted from the document.")
 
     system = MULTI_INVOICE_SYSTEM_PROMPT
-    user_prefix = "Extract all HBL groups and their line items from this invoice/debit note:\n\n"
+    user_prefix = "Extract all groups and their line items across all pages/currencies from this invoice/debit note:\n\n"
     budget = _input_char_budget()
     mime = _native_mime_for_file(file_bytes, filename)
     native_file = _should_send_native_file(mime, page_scope=False)
 
     if native_file:
-        return _call_llm_json(
+        res = _call_llm_json(
             system,
             user_prefix + text[:budget],
             MULTI_INVOICE_JSON_SCHEMA,
             file_bytes=file_bytes,
             filename=filename,
         )
+    else:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_INVOICE_JSON_SCHEMA,
+            file_bytes=None,
+            filename=filename,
+        )
 
-    return _call_llm_json(
-        system,
-        user_prefix + text[:budget],
-        MULTI_INVOICE_JSON_SCHEMA,
-        file_bytes=None,
-        filename=filename,
-    )
-
+    return _enrich_invoice_result(res, text, filename=filename, file_bytes=file_bytes)
