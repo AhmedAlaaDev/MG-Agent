@@ -17,6 +17,14 @@ class _FakeEnv:
         return self.values.get(key, default)
 
 
+class _FakeEnvWithoutBase(_FakeEnv):
+    values = {
+        "TENANT_ID": "tenant",
+        "CLIENT_ID": "client",
+        "CLIENT_SECRET": "secret",
+    }
+
+
 def test_failed_initialization_does_not_cache_partial_singleton() -> None:
     previous = DataverseClientService._instance
     DataverseClientService._instance = None
@@ -50,5 +58,17 @@ def test_base_url_builds_dataverse_api_url_when_explicit_api_url_is_missing() ->
             client = DataverseClientService()
         assert client.base_url == "https://example.crm.dynamics.com/api/data/v9.2"
         assert client._resource_url == "https://example.crm.dynamics.com"
+    finally:
+        DataverseClientService._instance = previous
+
+
+def test_known_crm_url_is_used_when_serverless_base_url_is_missing() -> None:
+    previous = DataverseClientService._instance
+    DataverseClientService._instance = None
+    try:
+        with patch("dataverse.env_service.EnvService.get_instance", return_value=_FakeEnvWithoutBase()):
+            client = DataverseClientService()
+        assert client.base_url == "https://mgc.crm4.dynamics.com/api/data/v9.2"
+        assert client._resource_url == "https://mgc.crm4.dynamics.com"
     finally:
         DataverseClientService._instance = previous

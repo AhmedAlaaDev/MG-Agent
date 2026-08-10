@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 _TOKEN_SCOPE = "{base_url}/.default"
+_DEFAULT_RESOURCE_URL = "https://mgc.crm4.dynamics.com"
 
 
 @dataclass
@@ -83,7 +84,7 @@ class DataverseClientService:
         from dataverse.env_service import EnvService as _EnvService
         env = _EnvService.get_instance()
 
-        resource_url = env.get_optional("BASE_URL", "").rstrip("/")
+        resource_url = env.get_optional("BASE_URL", _DEFAULT_RESOURCE_URL).rstrip("/")
         configured_api_url = env.get_optional("AZURE_APP_API_URL", "").rstrip("/")
         self.base_url = configured_api_url or (
             f"{resource_url}/api/data/v9.2" if resource_url else ""
