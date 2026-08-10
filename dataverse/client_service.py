@@ -51,14 +51,31 @@ class DataverseClientService:
     _client_secret: str = ""
 
     def __new__(cls, retry_config: Optional[RetryConfig] = None) -> "DataverseClientService":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init(retry_config or RetryConfig())
+        required_state = ("_session", "base_url", "_resource_url")
+        if cls._instance is None or not all(hasattr(cls._instance, key) for key in required_state):
+            instance = super().__new__(cls)
+            cls._instance = instance
+            try:
+                instance._init(retry_config or RetryConfig())
+            except Exception:
+                # Never cache a partially initialized singleton.  A later
+                # serverless invocation must be able to retry cleanly after a
+                # transient environment/configuration failure or warm reload.
+                cls._instance = None
+                raise
         return cls._instance
 
     @staticmethod
     def get_instance(retry_config: Optional[RetryConfig] = None) -> "DataverseClientService":
-        if DataverseClientService._instance is None:
+        required_state = ("_session", "base_url", "_resource_url")
+        if (
+            DataverseClientService._instance is None
+            or not all(
+                hasattr(DataverseClientService._instance, key)
+                for key in required_state
+            )
+        ):
+            DataverseClientService._instance = None
             DataverseClientService(retry_config or RetryConfig())
         return DataverseClientService._instance
 
