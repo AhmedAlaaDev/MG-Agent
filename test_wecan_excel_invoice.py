@@ -203,6 +203,7 @@ class _FakeDataverseClient:
                 "mesco_code": "O-MASTER",
                 "mesco_bltype": 886150001,
                 "mesco_masterblno": "COSU6501303560",
+                "_mesco_origin_value": "00000000-0000-0000-2000-000000000003",
             }]})
         if "mesco_masterblno eq '" in url:
             hbl = url.split("mesco_masterblno eq '", 1)[1].split("'", 1)[0]
@@ -236,6 +237,10 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
             "number": "CSGU7177299",
             "action": "reused",
         }),
+        patch(
+            "main._ensure_invoice_house_cargo",
+            return_value="00000000-0000-0000-5000-000000000001",
+        ),
     ):
         with source.open("rb") as stream:
             response = TestClient(app).post(
@@ -257,6 +262,12 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
     assert all("xollsp_LogisticService@odata.bind" in post for post in fake_client.posts)
     assert all("mesco_invoicevendor_shippingline@odata.bind" in post for post in fake_client.posts)
     assert all("LOCAL AGREEMENT" not in post["xollsp_name"] for post in fake_client.posts)
+    assert all(post["xollsp_transporttype"] == 300000000 for post in fake_client.posts)
+    assert all(post["xollsp_loadtype"] == 300000001 for post in fake_client.posts)
+    assert all(post["xollsp_importexport"] == 300000000 for post in fake_client.posts)
+    freight_posts = [post for post in fake_client.posts if post["xollsp_name"] == "FOB OCEAN FREIGHT"]
+    assert all("xollsp_From@odata.bind" in post for post in freight_posts)
+    assert all("xollsp_To@odata.bind" in post for post in freight_posts)
 
     posting_total = round(sum(
         float(post["xollsp_quantity"]) * float(post["xollsp_unitamount"])
@@ -265,8 +276,18 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
     assert posting_total == 7475.32
     assert any(
         post["xollsp_name"] == "CREDIT - T/S"
-        and post["xollsp_quantity"] == 14.5
-        and post["xollsp_unitamount"] == -20.0
+        and post["xollsp_quantity"] == -14.5
+        and post["xollsp_unitamount"] == 20.0
+        and "original quantity 14.5" in post["xollsp_comments"]
+        and "unit price -20.0 USD" in post["xollsp_comments"]
+        for post in fake_client.posts
+    )
+    assert any(
+        post["xollsp_name"] == "FOB OCEAN FREIGHT"
+        and post["xollsp_quantity"] == 1.0
+        and post["xollsp_unitamount"] == 472.28
+        and "original quantity 5.957" in post["xollsp_comments"]
+        and "source row 17" in post["xollsp_comments"]
         for post in fake_client.posts
     )
 

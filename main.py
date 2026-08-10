@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -32,9 +33,13 @@ from dataverse_uploader import (
     _find_existing_container,
     _normalize_container_number,
     _resolve_containerno_lookup,
+    _sync_operation_totals_from_cargo,
     _update_entity,
 )
 from invoice_dataverse_mapper import (
+    IMPORT,
+    LCL,
+    SEA,
     build_invoice_mapping_plan,
     container_type_option,
     fetch_invoice_reference_data,
@@ -2674,7 +2679,13 @@ def _extract_wecan_excel_invoice(file_bytes: bytes, filename: str) -> Dict[str, 
             handle.write(file_bytes)
             temp_path = handle.name
         parsed = extract_wecan_proxy_bill(temp_path)
-        return to_multi_invoice_payload(parsed, filename)
+        payload = to_multi_invoice_payload(parsed, filename)
+        sheets = parsed.get("sheets") or []
+        if sheets:
+            meta = sheets[0].get("meta") or {}
+            if meta.get("consol_description"):
+                payload["cargo_description"] = meta["consol_description"]
+        return payload
     finally:
         if temp_path:
             try:
@@ -2964,11 +2975,150 @@ def _invoice_groups_from_table(raw_text: str) -> List[Dict[str, Any]]:
     return list(grouped.values())
 
 
+def _invoice_source_key(item: Dict[str, Any]) -> Optional[str]:
+    parts: List[str] = []
+    if item.get("source_row") not in (None, ""):
+        parts.append(f"source row {item['source_row']}")
+    if item.get("source_term") not in (None, ""):
+        parts.append(f"term {item['source_term']}")
+    return f"Invoice line {'; '.join(parts)}." if parts else None
+
+
+def _invoice_cost_values(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Return Dataverse-safe values while preserving each invoice line total.
+
+    Quote Cost Line unit amounts cannot be negative in Dataverse, but quantity
+    can. Credits therefore use a negative quantity and positive unit amount;
+    the source values are retained in Comments for auditability.
+    """
+    source_quantity = Decimal(str(item.get("quantity") or 1))
+    source_unit_price = Decimal(str(item.get("unit_price") or 0))
+    source_total = item.get("total_amount")
+    if source_total in (None, ""):
+        source_total = source_quantity * source_unit_price
+    source_total = Decimal(str(source_total))
+
+    is_credit = (
+        str(item.get("posting_direction") or "").strip().lower() == "credit"
+        or source_total < Decimal("0")
+        or source_unit_price < Decimal("0")
+        or source_quantity < Decimal("0")
+    )
+    quantity = -abs(source_quantity) if is_credit else abs(source_quantity)
+    unit_price = abs(source_unit_price)
+    if unit_price == 0 and source_total:
+        unit_price = abs(source_total) / (abs(source_quantity) or Decimal("1"))
+
+    quantity_step = Decimal("0.01")
+    unit_step = Decimal("0.001")
+    total_step = Decimal("0.001")
+    direct_total = (quantity * unit_price).quantize(total_step)
+    expected_total = source_total.quantize(total_step)
+    precision_adjusted = (
+        quantity.quantize(quantity_step) != quantity
+        or unit_price.quantize(unit_step) != unit_price
+        or direct_total != expected_total
+    )
+    if precision_adjusted:
+        quantity = Decimal("-1") if is_credit else Decimal("1")
+        unit_price = abs(source_total).quantize(unit_step)
+
+    comment_parts: List[str] = []
+    source_key = _invoice_source_key(item)
+    if source_key:
+        comment_parts.append(source_key)
+    if is_credit or precision_adjusted:
+        currency = str(item.get("currency") or "").strip()
+        suffix = f" {currency}" if currency else ""
+        reason = "Invoice credit" if is_credit else "Dynamics precision adjustment"
+        comment_parts.append(
+            f"{reason}; original quantity {source_quantity:g}, "
+            f"unit price {source_unit_price:g}{suffix}, total {source_total:g}{suffix}."
+        )
+
+    return {
+        "quantity": float(quantity),
+        "unit_price": float(unit_price),
+        "comments": " ".join(comment_parts) or None,
+    }
+
+
+def _ensure_invoice_house_cargo(
+    client: DataverseClientService,
+    *,
+    house_operation_id: str,
+    master_operation_id: str,
+    container_id: Optional[str],
+    group: Dict[str, Any],
+    extracted_data: Dict[str, Any],
+) -> str:
+    """Persist house measurements on cargo, the source of Dynamics rollups."""
+    hbl = str(group.get("house_bl_number") or "").strip()
+    invoice = str(
+        group.get("vendor_invoice_number")
+        or extracted_data.get("vendor_invoice_number")
+        or ""
+    ).strip()
+    source_id = f"{hbl} / INVOICE {invoice}"[:100]
+    query = (
+        "mesco_cargos?"
+        "$select=mesco_cargoid,mesco_id,mesco_noofpackages,mesco_grosskg,mesco_volcbm"
+        f"&$filter=_mesco_houseoperation_value eq {house_operation_id}&$top=100"
+    )
+    rows = client.get(query).json().get("value", [])
+    tagged = [row for row in rows if str(row.get("mesco_id") or "") == source_id]
+
+    expected = {
+        "mesco_noofpackages": float(group.get("packages") or 0),
+        "mesco_grosskg": float(group.get("kgs") or 0),
+        "mesco_volcbm": float(group.get("cbm") or 0),
+    }
+    if rows and not tagged:
+        current = {
+            key: sum(float(row.get(key) or 0) for row in rows)
+            for key in expected
+        }
+        if all(abs(current[key] - expected[key]) <= 0.01 for key in expected):
+            _sync_operation_totals_from_cargo(
+                client, house_operation_id, is_house=True, load_type=LCL
+            )
+            return str(rows[0]["mesco_cargoid"])
+        raise ValueError(
+            f"existing cargo measurements {current} conflict with invoice {expected}"
+        )
+
+    fields: Dict[str, Any] = {
+        "mesco_id": source_id,
+        "mesco_descriptionofgoods": (
+            extracted_data.get("cargo_description")
+            or f"Invoice cargo measurements {invoice}"
+        ),
+        **expected,
+        "mesco_HouseOperation@odata.bind": f"/mesco_operations({house_operation_id})",
+        "mesco_MasterOperation@odata.bind": f"/mesco_operations({master_operation_id})",
+    }
+    if container_id:
+        fields["mesco_Conainter@odata.bind"] = f"/mesco_containers({container_id})"
+
+    if tagged:
+        cargo_id = str(tagged[0]["mesco_cargoid"])
+        if not _update_entity(client, "mesco_cargos", cargo_id, fields):
+            raise RuntimeError(f"failed to update invoice cargo {cargo_id}")
+    else:
+        cargo_id = _create_entity(client, "mesco_cargos", fields)
+
+    _sync_operation_totals_from_cargo(
+        client, house_operation_id, is_house=True, load_type=LCL
+    )
+    return cargo_id
+
+
 def _invoice_cost_signature(item: Dict[str, Any]) -> Dict[str, Any]:
+    values = _invoice_cost_values(item)
     return {
         "name": str(item.get("service_description") or "Invoice Charge").strip(),
-        "quantity": float(item.get("quantity") or 1),
-        "unit_price": float(item.get("unit_price") or 0),
+        "quantity": values["quantity"],
+        "unit_price": values["unit_price"],
     }
 
 
@@ -2987,18 +3137,38 @@ def _find_existing_invoice_cost_line(
     invoice = str(vendor_invoice_number).replace("'", "''")
     query = (
         "xollsp_quotecostlines?"
-        "$select=xollsp_quotecostlineid"
+        "$select=xollsp_quotecostlineid,xollsp_quantity,xollsp_unitamount,xollsp_comments,createdon"
         f"&$filter={op_field} eq {operation_id} "
         f"and mesco_vendorinvoicenumber eq '{invoice}' "
-        f"and xollsp_name eq '{name}' "
-        f"and xollsp_quantity eq {sig['quantity']} "
-        f"and xollsp_unitamount eq {sig['unit_price']}"
-        "&$top=1"
+        f"and xollsp_name eq '{name}'"
+        "&$orderby=createdon asc&$top=100"
     )
     rows = client.get(query).json().get("value", [])
     if not rows:
         return None
-    return rows[0].get("xollsp_quotecostlineid")
+
+    source_key = _invoice_source_key(item)
+    if source_key:
+        keyed = [row for row in rows if source_key in str(row.get("xollsp_comments") or "")]
+        if keyed:
+            return keyed[0].get("xollsp_quotecostlineid")
+
+    # Backward compatibility for records created before source keys were added.
+    # Dataverse already rounded their decimal values, so use the oldest unkeyed
+    # line as the canonical record and update it in place.
+    legacy_rows = [
+        row for row in rows
+        if not str(row.get("xollsp_comments") or "").startswith("Invoice line ")
+    ]
+    if legacy_rows:
+        return legacy_rows[0].get("xollsp_quotecostlineid")
+
+    rounded_matches = [
+        row for row in rows
+        if round(float(row.get("xollsp_quantity") or 0), 2) == round(sig["quantity"], 2)
+        and round(float(row.get("xollsp_unitamount") or 0), 3) == round(sig["unit_price"], 3)
+    ]
+    return rounded_matches[0].get("xollsp_quotecostlineid") if rounded_matches else None
 
 
 @app.post("/extract/invoice", response_model=InvoiceExtractResponse, tags=["Invoice Extraction"])
@@ -3315,8 +3485,9 @@ async def extract_invoice(
                     desc = item.get("service_description") or "Invoice Charge"
                     matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name")
                     
-                    qty = float(item.get("quantity") or 1)
-                    u_price = float(item.get("unit_price") or 0)
+                    cost_values = _invoice_cost_values(item)
+                    qty = cost_values["quantity"]
+                    u_price = cost_values["unit_price"]
                     
                     payload = {
                         "xollsp_name": desc,
@@ -3328,6 +3499,8 @@ async def extract_invoice(
                         "mesco_servicecategory": 886150006, # Others
                         "mesco_vendorinvoicenumber": extracted_data.get("vendor_invoice_number"),
                     }
+                    if cost_values["comments"]:
+                        payload["xollsp_comments"] = cost_values["comments"]
                     
                     # Bind lookups
                     if matched_srv:
@@ -3600,11 +3773,13 @@ async def extract_invoice_multi(
         fallback_op_code = None
         fallback_is_master = True
         fallback_tariff_quote_id = None
+        fallback_origin_id = None
+        master_post_error: Optional[str] = None
 
         if client and (fallback_op_id or master_bl_number):
             if fallback_op_id and not fallback_op_code:
                 try:
-                    op_url = f"mesco_operations({fallback_op_id})?$select=mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                    op_url = f"mesco_operations({fallback_op_id})?$select=mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote,_mesco_origin_value"
                     op_resp = client.get(op_url)
                     if op_resp.status_code == 200:
                         op_data = op_resp.json()
@@ -3612,6 +3787,7 @@ async def extract_invoice_multi(
                         fallback_is_master = op_data.get("mesco_bltype") == 886150001
                         if op_data.get("_mesco_xollsp_tariffquote_value"):
                             fallback_tariff_quote_id = op_data["_mesco_xollsp_tariffquote_value"]
+                        fallback_origin_id = op_data.get("_mesco_origin_value")
                 except Exception:
                     pass
 
@@ -3622,11 +3798,12 @@ async def extract_invoice_multi(
                 fallback_op_code = None
                 fallback_is_master = True
                 fallback_tariff_quote_id = None
+                fallback_origin_id = None
 
             if not fallback_op_id and master_bl_number:
                 try:
                     search_url = (
-                        f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
+                        f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote,_mesco_origin_value"
                         f"&$filter=mesco_masterblno eq '{master_bl_number}' "
                         "and mesco_bltype eq 886150001&$top=1"
                     )
@@ -3640,6 +3817,7 @@ async def extract_invoice_multi(
                             fallback_is_master = op.get("mesco_bltype") == 886150001
                             if op.get("_mesco_xollsp_tariffquote_value"):
                                 fallback_tariff_quote_id = op["_mesco_xollsp_tariffquote_value"]
+                            fallback_origin_id = op.get("_mesco_origin_value")
                 except Exception as e:
                     logger.warning("Failed to lookup fallback operation by MBL: %s", e)
 
@@ -3667,6 +3845,8 @@ async def extract_invoice_multi(
                 fallback_is_master = True
                 logger.info("Auto-created fallback Master Operation record: %s for B/L %s", fallback_op_id, master_bl_number)
             except Exception as create_err:
+                master_post_error = f"Master Operation creation failed: {create_err}"
+                strict_posting_ready = False
                 logger.exception("Failed to auto-create fallback Master Operation record: %s", create_err)
 
         # Existing master records retain their operational code (for example
@@ -3686,6 +3866,8 @@ async def extract_invoice_multi(
                 master_patch.pop("mesco_bltype", None)
                 _update_entity(client, "mesco_operations", fallback_op_id, master_patch)
             except Exception as patch_err:
+                master_post_error = f"Master Operation mapping failed: {patch_err}"
+                strict_posting_ready = False
                 logger.exception("Failed to update mapped Master Operation fields: %s", patch_err)
 
         # Pre-fetch reference lists for Dataverse posting
@@ -3777,11 +3959,12 @@ async def extract_invoice_multi(
         # Process each HBL group
         group_results: List[MultiInvoiceGroupResult] = []
         total_posted = 0
-        dataverse_error = None
+        dataverse_error = master_post_error
         if post_to_dataverse and is_excel_invoice and not strict_posting_ready:
-            dataverse_error = "Posting blocked because one or more Dynamics mappings are unresolved: " + "; ".join(
-                (mapping_validation or {}).get("errors") or ["unknown mapping error"]
-            )
+            if not dataverse_error:
+                dataverse_error = "Posting blocked because one or more Dynamics mappings are unresolved: " + "; ".join(
+                    (mapping_validation or {}).get("errors") or ["unknown mapping error"]
+                )
 
         for group in groups_raw:
             hbl = group.get("house_bl_number")
@@ -3826,6 +4009,7 @@ async def extract_invoice_multi(
             group_op_code = None
             group_is_master = True
             group_tariff_quote_id = None
+            group_operation_ready = True
 
             if client and hbl:
                 try:
@@ -3868,8 +4052,11 @@ async def extract_invoice_multi(
                                     try:
                                         _update_entity(client, "mesco_operations", group_op_id, patch_fields)
                                     except Exception as patch_e:
+                                        group_operation_ready = False
+                                        gr.errors.append(f"Operation mapping failed: {patch_e}")
                                         logger.warning("Failed to patch mapped fields for HBL %s: %s", hbl, patch_e)
                 except Exception as e:
+                    gr.errors.append(f"Operation lookup failed: {e}")
                     logger.warning("Failed to resolve operation for HBL %s: %s", hbl, e)
 
             # Auto-create House Operation if not found and post_to_dataverse is True
@@ -3897,6 +4084,8 @@ async def extract_invoice_multi(
                     group_is_master = False
                     logger.info("Auto-created House Operation record: %s for HBL %s", group_op_id, hbl)
                 except Exception as create_err:
+                    group_operation_ready = False
+                    gr.errors.append(f"Operation creation failed: {create_err}")
                     logger.exception("Failed to auto-create House Operation record: %s", create_err)
 
             # Fallback to MBL/provided operation
@@ -3910,9 +4099,12 @@ async def extract_invoice_multi(
             gr.resolved_operation_code = group_op_code
             if group_op_id:
                 gr.dynamics_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={group_op_id}"
+            elif post_to_dataverse and strict_posting_ready:
+                group_operation_ready = False
+                gr.errors.append("Operation could not be resolved or created")
 
             # Post cost lines for this group
-            if post_to_dataverse and strict_posting_ready and group_op_id and client:
+            if post_to_dataverse and strict_posting_ready and group_operation_ready and group_op_id and client:
                 # Ensure container for this group
                 invoice_container = shared_invoice_container
                 if not is_excel_invoice:
@@ -3925,6 +4117,20 @@ async def extract_invoice_multi(
                         invoice_container = _ensure_invoice_container(client, group_op_id, container_data)
                     except Exception as e:
                         gr.errors.append(f"Container creation failed: {e}")
+
+                if is_excel_invoice and not group_is_master:
+                    try:
+                        _ensure_invoice_house_cargo(
+                            client,
+                            house_operation_id=group_op_id,
+                            master_operation_id=fallback_op_id,
+                            container_id=(invoice_container or {}).get("id"),
+                            group=group,
+                            extracted_data=extracted_data,
+                        )
+                    except Exception as cargo_exc:
+                        gr.errors.append(f"Cargo measurement mapping failed: {cargo_exc}")
+                        continue
 
                 for item in line_items:
                     desc = item.get("service_description") or "Invoice Charge"
@@ -3948,10 +4154,9 @@ async def extract_invoice_multi(
                         else:
                             matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name") if services_list else None
 
-                        qty = float(item.get("quantity") or 1)
-                        u_price = float(item.get("unit_price") or 0)
-                        if not u_price and item.get("total_amount"):
-                            u_price = float(item["total_amount"])
+                        cost_values = _invoice_cost_values(item)
+                        qty = cost_values["quantity"]
+                        u_price = cost_values["unit_price"]
 
                         payload = {
                             "xollsp_name": desc,
@@ -3962,10 +4167,28 @@ async def extract_invoice_multi(
                             "xollsp_fixedamountbase": 0,
                             "mesco_servicecategory": 886150006,
                             "mesco_vendorinvoicenumber": group_vendor_inv,
+                            "xollsp_transporttype": SEA,
+                            "xollsp_loadtype": LCL,
+                            "xollsp_importexport": IMPORT,
                         }
+                        if cost_values["comments"]:
+                            payload["xollsp_comments"] = cost_values["comments"]
 
                         if matched_srv:
                             payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
+                        if desc == "FOB OCEAN FREIGHT":
+                            destination_id = (
+                                ((group_mapping or {}).get("lookups") or {})
+                                .get("destination", {})
+                                .get("id")
+                            )
+                            if not fallback_origin_id or not destination_id:
+                                gr.errors.append(
+                                    "POST FOB OCEAN FREIGHT: Sea Freight requires mapped origin and destination"
+                                )
+                                continue
+                            payload["xollsp_From@odata.bind"] = f"/xollsp_addresses({fallback_origin_id})"
+                            payload["xollsp_To@odata.bind"] = f"/xollsp_addresses({destination_id})"
                         if item_curr_id:
                             payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({item_curr_id})"
                             payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({item_curr_id})"
