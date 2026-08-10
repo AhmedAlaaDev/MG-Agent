@@ -3076,10 +3076,12 @@ async def extract_invoice(
         
         from dataverse.client_service import DataverseClientService
         client = None
+        client_init_error: Optional[str] = None
         try:
             client = DataverseClientService.get_instance()
-        except Exception:
-            pass
+        except Exception as client_exc:
+            client_init_error = f"{type(client_exc).__name__}: {client_exc}"
+            logger.warning("Dataverse client is unavailable: %s", client_init_error)
 
         # If no operation_id is provided, resolve by B/L in a deterministic order.
         # Prefer House B/L over Master B/L so multi-HBL debit notes do not post
@@ -3560,10 +3562,12 @@ async def extract_invoice_multi(
         # Initialize Dataverse client
         from dataverse.client_service import DataverseClientService
         client = None
+        client_init_error: Optional[str] = None
         try:
             client = DataverseClientService.get_instance()
-        except Exception:
-            pass
+        except Exception as client_exc:
+            client_init_error = f"{type(client_exc).__name__}: {client_exc}"
+            logger.warning("Dataverse client is unavailable: %s", client_init_error)
 
         # Excel invoice posting uses a strict, schema-backed mapping plan.
         # The plan is also returned during dry runs so the caller can verify
@@ -3575,7 +3579,10 @@ async def extract_invoice_multi(
             if client:
                 reference_data, reference_errors = fetch_invoice_reference_data(client)
             else:
-                reference_errors.append("Dynamics client is unavailable; lookups could not be validated")
+                reference_errors.append(
+                    "Dynamics client is unavailable; lookups could not be validated"
+                    + (f" ({client_init_error})" if client_init_error else "")
+                )
             mapping_validation = build_invoice_mapping_plan(
                 extracted_data,
                 reference_data,
