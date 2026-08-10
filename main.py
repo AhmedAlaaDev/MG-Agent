@@ -3879,6 +3879,41 @@ async def extract_invoice_multi(
         return MultiInvoiceExtractResponse(success=False, error=str(exc))
 
 
+@app.post(
+    "/extract/invoice/excel",
+    response_model=MultiInvoiceExtractResponse,
+    tags=["Invoice Extraction"],
+    summary="Extract and optionally post an Excel invoice",
+)
+async def extract_invoice_excel(
+    file: UploadFile = File(..., description="Legacy XLS or XLSX invoice workbook"),
+    operation_id: Optional[str] = Form(None, description="Fallback Dynamics operation ID if HBL lookup fails"),
+    post_to_dataverse: bool = Form(False, description="Whether to post reconciled cost lines to Dynamics Dataverse"),
+):
+    """
+    Process a WE-CAN proxy invoice workbook without OCR or an LLM.
+
+    The workbook is parsed deterministically, reconciled to FINAL DN, grouped
+    by HBL, and then passed through the same idempotent Dynamics posting path
+    used by the multi-invoice endpoint.
+    """
+    filename = str(file.filename or "")
+    if not filename.lower().endswith((".xls", ".xlsx")):
+        raise HTTPException(
+            status_code=400,
+            detail="Excel invoice endpoint accepts only .xls or .xlsx files.",
+        )
+
+    return await extract_invoice_multi(
+        file=file,
+        operation_id=operation_id,
+        post_to_dataverse=post_to_dataverse,
+        llm_provider=LlmProviderQuery.gemini,
+        llm_model=None,
+        extracted_data_json=None,
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

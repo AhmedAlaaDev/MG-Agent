@@ -77,6 +77,35 @@ def test_multi_invoice_endpoint_accepts_legacy_xls_without_llm() -> None:
     assert body["groups"][0]["local_agreement_total"] == 65.0
 
 
+def test_excel_invoice_endpoint_accepts_legacy_xls() -> None:
+    source = _fixture_path()
+    with patch("main.DataverseClientService.get_instance", side_effect=RuntimeError("offline test")):
+        with source.open("rb") as stream:
+            response = TestClient(app).post(
+                "/extract/invoice/excel",
+                files={"file": (source.name, stream, "application/vnd.ms-excel")},
+                data={"post_to_dataverse": "false"},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["groups_count"] == 10
+    assert body["total_line_items"] == 26
+    assert body["extraction_validation"]["posting_net_total"] == 7475.32
+
+
+def test_excel_invoice_endpoint_rejects_non_excel_uploads() -> None:
+    response = TestClient(app).post(
+        "/extract/invoice/excel",
+        files={"file": ("invoice.pdf", b"not an excel workbook", "application/pdf")},
+        data={"post_to_dataverse": "false"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Excel invoice endpoint accepts only .xls or .xlsx files."
+
+
 class _FakeResponse:
     def __init__(self, status_code: int = 200, body=None):
         self.status_code = status_code
@@ -152,7 +181,7 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
     ):
         with source.open("rb") as stream:
             response = TestClient(app).post(
-                "/extract/invoice/multi",
+                "/extract/invoice/excel",
                 files={"file": (source.name, stream, "application/vnd.ms-excel")},
                 data={"post_to_dataverse": "true"},
             )
