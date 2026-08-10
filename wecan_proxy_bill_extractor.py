@@ -35,7 +35,12 @@ def normalize_cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S") if value.time() else value.strftime("%Y-%m-%d")
+        # Several legacy WE-CAN sheets store a few stray seconds in otherwise
+        # date-only cells. Treat near-midnight values as dates so ETD does not
+        # become e.g. ``2026-05-30 00:00:09``.
+        if value.hour == 0 and value.minute == 0:
+            return value.strftime("%Y-%m-%d")
+        return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, float):
@@ -191,9 +196,12 @@ CIF_COLS = {
     "credit_custom": 16,
     "credit_truckage": 17,
     # Some versions contain extra right-side credit columns.
-    "credit_thc_cfs": 19,
-    "credit_do_admin": 20,
-    "credit_total": 21,
+    # These right-side columns are under "AGREEMENT LOCAL WITH MARINE".
+    # They are not invoice credits and are intentionally kept separate from
+    # the DEBIT - CREDIT = FINAL DN reconciliation.
+    "local_agreement_thc_cfs": 19,
+    "local_agreement_do_admin": 20,
+    "local_agreement_total": 21,
 }
 
 FOB_COLS = {
@@ -351,19 +359,27 @@ def extract_cif_record(row: List[str], source_row: int, sheet_name: str, meta: D
         "dest_local_prepaid": _money_to_float(_get(row, CIF_COLS["credit_dest_local_prepaid"])),
         "custom": _money_to_float(_get(row, CIF_COLS["credit_custom"])),
         "truckage": _money_to_float(_get(row, CIF_COLS["credit_truckage"])),
-        "thc_cfs": _money_to_float(_get(row, CIF_COLS["credit_thc_cfs"])),
-        "do_admin": _money_to_float(_get(row, CIF_COLS["credit_do_admin"])),
-        "total": _money_to_float(_get(row, CIF_COLS["credit_total"])),
+    }
+    local_agreement = {
+        "thc_cfs": _money_to_float(_get(row, CIF_COLS["local_agreement_thc_cfs"])),
+        "do_admin": _money_to_float(_get(row, CIF_COLS["local_agreement_do_admin"])),
+        "total": _money_to_float(_get(row, CIF_COLS["local_agreement_total"])),
     }
 
     # Remove empty money fields, but preserve known zeros if present in the sheet.
     debit = {k: v for k, v in debit.items() if v is not None}
     credit = {k: v for k, v in credit.items() if v is not None}
+    local_agreement = {k: v for k, v in local_agreement.items() if v is not None}
 
     return {
         "unique_key": record["hbl_no"],
         "record": record,
-        "financial_processing": {**record, "debit": debit, "credit": credit},
+        "financial_processing": {
+            **record,
+            "debit": debit,
+            "credit": credit,
+            "local_agreement": local_agreement,
+        },
         "mesco_payload": build_mesco_payload(record, meta),
     }
 
@@ -507,6 +523,7 @@ def calculate_totals_from_records(records: List[Dict[str, Any]]) -> Dict[str, An
         "fob_of_total": 0.0,
         "grand_debit_total": 0.0,
         "grand_credit_total": 0.0,
+        "local_agreement_total": 0.0,
         "calculated_final_dn": 0.0,
     }
 
@@ -515,16 +532,15 @@ def calculate_totals_from_records(records: List[Dict[str, Any]]) -> Dict[str, An
         cargo_type = fp["cargo_type"]
         debit = fp.get("debit", {})
         credit = fp.get("credit", {})
+        local_agreement = fp.get("local_agreement", {})
 
         if cargo_type == "CIF":
             calc["cif_count"] += 1
             cif_debit = debit.get("total") or 0.0
-            # Credit row total may not exist, so sum the visible credit fields.
-            cif_credit = credit.get("total")
-            if cif_credit is None:
-                cif_credit = sum(v for k, v in credit.items() if isinstance(v, (int, float)))
+            cif_credit = sum(v for v in credit.values() if isinstance(v, (int, float)))
             calc["cif_debit_total"] += cif_debit
             calc["cif_credit_total"] += cif_credit or 0.0
+            calc["local_agreement_total"] += local_agreement.get("total") or 0.0
 
         elif cargo_type == "FOB":
             calc["fob_count"] += 1
@@ -541,6 +557,209 @@ def calculate_totals_from_records(records: List[Dict[str, Any]]) -> Dict[str, An
             calc[key] = round(value, 2)
 
     return calc
+
+
+# ---------------------------------------------------------------------------
+# Invoice-agent / Dynamics adapter
+# ---------------------------------------------------------------------------
+
+_DEBIT_TERM_LABELS = {
+    "agreement_rebate": "AGREEMENT REBATE",
+    "pcs": "PCS",
+    "lss": "LSS",
+    "loading_unloading": "LOADING/UNLOADING",
+    "admin_fees": "ADMIN FEES",
+    "ex_work": "EX-WORK",
+    "thc": "THC",
+    "fob_of": "FOB OCEAN FREIGHT",
+}
+
+_CREDIT_TERM_LABELS = {
+    "ts": "CREDIT - T/S",
+    "dest_local_prepaid": "CREDIT - DESTINATION LOCAL PREPAID",
+    "custom": "CREDIT - DAP/DDU/DDP CUSTOMS",
+    "truckage": "CREDIT - DAP/DDU/DDP TRUCKAGE",
+}
+
+_LOCAL_AGREEMENT_LABELS = {
+    "thc_cfs": "LOCAL AGREEMENT - THC/CFS",
+    "do_admin": "LOCAL AGREEMENT - D/O + ADMIN",
+}
+
+
+def _invoice_reference_from_filename(filename: str) -> str:
+    stem = Path(filename or "invoice").stem
+    for pattern in (r"_Get_(\d+)", r"#(\d+)"):
+        match = re.search(pattern, stem, re.I)
+        if match:
+            return match.group(1)
+    return stem[:100]
+
+
+def _rated_line_item(
+    description: str,
+    amount: float,
+    record: Dict[str, Any],
+    *,
+    direction: str,
+    term_key: str,
+) -> Dict[str, Any]:
+    charged_wm = float(record.get("charged_wm") or 0)
+    quantity = 1.0
+    unit_price = float(amount)
+
+    # Preserve the explicit W/M rate where the sheet's amount proves it. This
+    # gives Dynamics meaningful quantity and unit-rate fields while retaining
+    # the exact spreadsheet total.
+    known_rate = {
+        "agreement_rebate": 75.0,
+        "pcs": 15.0,
+        "loading_unloading": 65.0,
+        "fob_of": 79.28202200868931,
+        "ts": 20.0,
+        "thc_cfs": 30.0,
+    }.get(term_key)
+    sign = -1.0 if direction == "credit" else 1.0
+    if known_rate and charged_wm and abs(abs(amount) - charged_wm * known_rate) <= 0.02:
+        quantity = charged_wm
+        unit_price = sign * known_rate
+    else:
+        unit_price = sign * abs(float(amount))
+
+    return {
+        "service_description": description,
+        "quantity": quantity,
+        "unit_price": round(unit_price, 8),
+        "currency": "USD",
+        "total_amount": round(sign * abs(float(amount)), 2),
+        "posting_direction": direction,
+        "source_term": term_key,
+        "source_row": record.get("source_row"),
+    }
+
+
+def _record_to_invoice_group(item: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    record = item["record"]
+    processing = item["financial_processing"]
+    debit = processing.get("debit", {})
+    credit = processing.get("credit", {})
+    local_agreement = processing.get("local_agreement", {})
+
+    invoice_lines: List[Dict[str, Any]] = []
+    for key, description in _DEBIT_TERM_LABELS.items():
+        amount = debit.get(key)
+        if amount is not None and abs(float(amount)) > 0:
+            invoice_lines.append(
+                _rated_line_item(description, float(amount), record, direction="debit", term_key=key)
+            )
+    for key, description in _CREDIT_TERM_LABELS.items():
+        amount = credit.get(key)
+        if amount is not None and abs(float(amount)) > 0:
+            invoice_lines.append(
+                _rated_line_item(description, float(amount), record, direction="credit", term_key=key)
+            )
+
+    local_lines: List[Dict[str, Any]] = []
+    for key, description in _LOCAL_AGREEMENT_LABELS.items():
+        amount = local_agreement.get(key)
+        if amount is not None and abs(float(amount)) > 0:
+            local_lines.append(
+                _rated_line_item(description, float(amount), record, direction="local_agreement", term_key=key)
+            )
+
+    debit_total = sum(
+        float(v) for key, v in debit.items()
+        if key != "total" and isinstance(v, (int, float))
+    )
+    credit_total = sum(float(v) for v in credit.values() if isinstance(v, (int, float)))
+    net_total = round(debit_total - credit_total, 2)
+
+    return {
+        "house_bl_number": record.get("hbl_no"),
+        "currency": "USD",
+        "shipment_ref": record.get("hbl_no"),
+        "container_number": meta.get("container_no"),
+        "container_type": meta.get("container_type"),
+        "cbm": record.get("volume_cbm"),
+        "kgs": record.get("gw_kgs"),
+        "packages": record.get("pkgs"),
+        "charged_wm": record.get("charged_wm"),
+        "term": record.get("term"),
+        "destination": record.get("dest"),
+        "source_row": record.get("source_row"),
+        "debit_total": round(debit_total, 2),
+        "credit_total": round(credit_total, 2),
+        "total_amount": net_total,
+        "line_items": invoice_lines,
+        # Extracted and returned for audit, but deliberately not included in
+        # invoice line_items: this block is outside DEBIT/CREDIT and is not
+        # part of FINAL DN in the source workbook.
+        "local_agreement_items": local_lines,
+        "local_agreement_total": round(
+            float(local_agreement.get("total") or sum(
+                float(v) for key, v in local_agreement.items()
+                if key != "total" and isinstance(v, (int, float))
+            )),
+            2,
+        ),
+    }
+
+
+def to_multi_invoice_payload(result: Dict[str, Any], source_filename: str) -> Dict[str, Any]:
+    """Map a parsed WE-CAN proxy workbook to the multi-invoice API schema."""
+    sheets = result.get("sheets") or []
+    if not sheets or not result.get("records"):
+        raise ValueError("The Excel file is not a recognized WE-CAN proxy billing workbook.")
+
+    primary_sheet = sheets[0]
+    meta = primary_sheet.get("meta") or {}
+    groups = [_record_to_invoice_group(item, meta) for item in result["records"]]
+    summary = primary_sheet.get("processing_summary") or {}
+    calculated = primary_sheet.get("calculated_totals_from_records") or {}
+    final_summary = summary.get("final_summary") or {}
+
+    posted_net = round(sum(
+        float(line.get("total_amount") or 0)
+        for group in groups
+        for line in group.get("line_items") or []
+    ), 2)
+    stated_final = final_summary.get("final_dn")
+    validation = {
+        "record_count": len(groups),
+        "line_items_count": sum(len(group["line_items"]) for group in groups),
+        "calculated_debit": calculated.get("grand_debit_total"),
+        "calculated_credit": calculated.get("grand_credit_total"),
+        "calculated_final_dn": calculated.get("calculated_final_dn"),
+        "stated_final_dn": stated_final,
+        "posting_net_total": posted_net,
+        "local_agreement_total": calculated.get("local_agreement_total"),
+        "is_reconciled": stated_final is not None and abs(float(stated_final) - posted_net) <= 0.02,
+    }
+    if not validation["is_reconciled"]:
+        raise ValueError(
+            "WE-CAN invoice totals did not reconcile: "
+            f"posting lines={posted_net}, stated FINAL DN={stated_final}."
+        )
+
+    return {
+        "document_type": "WE-CAN Proxy Billing Excel",
+        "vendor_name": meta.get("company") or "WE-CAN INTERNATIONAL LOGISTICS CO., LTD.",
+        "vendor_invoice_number": _invoice_reference_from_filename(source_filename),
+        "master_bl_number": meta.get("mbl_no"),
+        "container_number": meta.get("container_no"),
+        "container_type": meta.get("container_type"),
+        "currency": "USD",
+        "vessel_name": meta.get("vessel"),
+        "voyage_number": meta.get("voyage"),
+        "etd": meta.get("etd"),
+        "carrier": meta.get("carrier"),
+        "ocean_freight": meta.get("ocean_freight"),
+        "total_gross_weight_kg": meta.get("total_gw_kgs"),
+        "total_volume_cbm": meta.get("total_volume_cbm"),
+        "groups": groups,
+        "processing_summary": summary,
+        "extraction_validation": validation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +886,7 @@ def write_records_csv(result: Dict[str, Any], csv_path: str | Path) -> None:
         fp = rec["financial_processing"]
         debit = fp.get("debit", {})
         credit = fp.get("credit", {})
+        local_agreement = fp.get("local_agreement", {})
         base = {
             "record_index": rec.get("record_index"),
             "sheet_name": fp.get("sheet_name"),
@@ -684,6 +904,8 @@ def write_records_csv(result: Dict[str, Any], csv_path: str | Path) -> None:
             base[f"debit_{k}"] = v
         for k, v in credit.items():
             base[f"credit_{k}"] = v
+        for k, v in local_agreement.items():
+            base[f"local_agreement_{k}"] = v
         rows.append(base)
 
     # Stable preferred column order, plus any discovered columns.
@@ -693,7 +915,7 @@ def write_records_csv(result: Dict[str, Any], csv_path: str | Path) -> None:
         "debit_agreement_rebate", "debit_pcs", "debit_lss", "debit_loading_unloading",
         "debit_admin_fees", "debit_total", "debit_ex_work", "debit_thc", "debit_fob_of",
         "credit_ts", "credit_dest_local_prepaid", "credit_custom", "credit_truckage",
-        "credit_thc_cfs", "credit_do_admin", "credit_total",
+        "local_agreement_thc_cfs", "local_agreement_do_admin", "local_agreement_total",
     ]
     all_keys = []
     for row in rows:

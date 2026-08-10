@@ -9,7 +9,9 @@ Run:
 
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -2655,6 +2657,26 @@ class InvoiceExtractResponse(BaseModel):
     dynamics_url: Optional[str] = None
 
 
+def _extract_wecan_excel_invoice(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    """Deterministically parse a legacy WE-CAN .xls/.xlsx invoice workbook."""
+    from wecan_proxy_bill_extractor import extract_wecan_proxy_bill, to_multi_invoice_payload
+
+    suffix = ".xls" if str(filename or "").lower().endswith(".xls") else ".xlsx"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="wecan_invoice_", suffix=suffix, delete=False) as handle:
+            handle.write(file_bytes)
+            temp_path = handle.name
+        parsed = extract_wecan_proxy_bill(temp_path)
+        return to_multi_invoice_payload(parsed, filename)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 def _invoice_container_parts(extracted_data: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Normalize container/seal/type values extracted from an invoice."""
     raw_container = str(extracted_data.get("container_number") or "").strip()
@@ -3388,6 +3410,14 @@ class MultiInvoiceGroupResult(BaseModel):
     cbm: Optional[float] = None
     kgs: Optional[float] = None
     packages: Optional[float] = None
+    charged_wm: Optional[float] = None
+    term: Optional[str] = None
+    destination: Optional[str] = None
+    source_row: Optional[int] = None
+    debit_total: Optional[float] = None
+    credit_total: Optional[float] = None
+    local_agreement_total: Optional[float] = None
+    local_agreement_items: List[Dict[str, Any]] = []
     shipment_ref: Optional[str] = None
     container_number: Optional[str] = None
     container_type: Optional[str] = None
@@ -3416,13 +3446,15 @@ class MultiInvoiceExtractResponse(BaseModel):
     master_operation_code: Optional[str] = None
     master_dynamics_url: Optional[str] = None
     groups: List[MultiInvoiceGroupResult] = []
+    processing_summary: Optional[Dict[str, Any]] = None
+    extraction_validation: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     dataverse_error: Optional[str] = None
 
 
 @app.post("/extract/invoice/multi", response_model=MultiInvoiceExtractResponse, tags=["Invoice Extraction"])
 async def extract_invoice_multi(
-    file: Optional[UploadFile] = File(None, description="PDF or Image invoice/debit note file"),
+    file: Optional[UploadFile] = File(None, description="PDF, image, XLS, or XLSX invoice/debit note file"),
     operation_id: Optional[str] = Form(None, description="Fallback Dynamics operation ID if HBL lookup fails"),
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
@@ -3452,11 +3484,17 @@ async def extract_invoice_multi(
 
         file_bytes = None
         filename = "browser_extracted.pdf"
+        extracted_data = None
+        is_excel_invoice = False
         if file:
             file_bytes = await file.read()
             filename = file.filename
-            
-            if not extracted_data_json:
+
+            is_excel_invoice = str(filename or "").lower().endswith((".xls", ".xlsx"))
+            if is_excel_invoice and not extracted_data_json:
+                extracted_data = _extract_wecan_excel_invoice(file_bytes, filename)
+                raw_text = ""
+            elif not extracted_data_json:
                 extracted = extract_document_text_professionally(file_bytes, filename)
                 raw_text = extracted.get("text", "")
                 if not raw_text.strip():
@@ -3476,7 +3514,7 @@ async def extract_invoice_multi(
                     success=False, 
                     error=f"Failed to parse AI response. Raw response: {extracted_data_json[:500]}"
                 )
-        else:
+        elif extracted_data is None:
             with llm_request_overrides(provider_val, model_val):
                 extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
 
@@ -3634,6 +3672,14 @@ async def extract_invoice_multi(
                 cbm=group.get("cbm"),
                 kgs=group.get("kgs"),
                 packages=group.get("packages"),
+                charged_wm=group.get("charged_wm"),
+                term=group.get("term"),
+                destination=group.get("destination"),
+                source_row=group.get("source_row"),
+                debit_total=group.get("debit_total"),
+                credit_total=group.get("credit_total"),
+                local_agreement_total=group.get("local_agreement_total"),
+                local_agreement_items=group.get("local_agreement_items") or [],
                 shipment_ref=group.get("shipment_ref"),
                 container_number=group.get("container_number") or container_number,
                 container_type=group.get("container_type"),
@@ -3673,6 +3719,8 @@ async def extract_invoice_multi(
                                     patch_fields["cr401_totalvolume"] = float(group["cbm"])
                                 if group.get("kgs") is not None:
                                     patch_fields["cr401_totalgrossweight"] = float(group["kgs"])
+                                if group.get("packages") is not None:
+                                    patch_fields["cr401_totalpackages"] = float(group["packages"])
                                 if patch_fields:
                                     try:
                                         client.patch(f"mesco_operations({group_op_id})", json=patch_fields)
@@ -3693,6 +3741,8 @@ async def extract_invoice_multi(
                         group_fields["cr401_totalvolume"] = float(group["cbm"])
                     if group.get("kgs") is not None:
                         group_fields["cr401_totalgrossweight"] = float(group["kgs"])
+                    if group.get("packages") is not None:
+                        group_fields["cr401_totalpackages"] = float(group["packages"])
 
                     if fallback_op_id:
                         group_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({fallback_op_id})"
@@ -3821,6 +3871,8 @@ async def extract_invoice_multi(
             master_operation_code=fallback_op_code,
             master_dynamics_url=master_dyn_url,
             groups=group_results,
+            processing_summary=extracted_data.get("processing_summary"),
+            extraction_validation=extracted_data.get("extraction_validation"),
         )
     except Exception as exc:
         logger.exception("Multi-invoice extraction endpoint failed")
