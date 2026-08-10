@@ -741,6 +741,33 @@ def to_multi_invoice_payload(result: Dict[str, Any], source_filename: str) -> Di
             f"posting lines={posted_net}, stated FINAL DN={stated_final}."
         )
 
+    group_packages = round(sum(float(group.get("packages") or 0) for group in groups), 3)
+    group_gross_weight = round(sum(float(group.get("kgs") or 0) for group in groups), 3)
+    group_volume = round(sum(float(group.get("cbm") or 0) for group in groups), 3)
+    stated_gross_weight = meta.get("total_gw_kgs")
+    stated_volume = meta.get("total_volume_cbm")
+    measurement_validation = {
+        "group_packages_total": group_packages,
+        "group_gross_weight_kg": group_gross_weight,
+        "stated_gross_weight_kg": stated_gross_weight,
+        "gross_weight_difference_kg": round(float(stated_gross_weight or 0) - group_gross_weight, 3),
+        "gross_weight_matches": (
+            stated_gross_weight is not None
+            and abs(float(stated_gross_weight) - group_gross_weight) <= 0.001
+        ),
+        "group_volume_cbm": group_volume,
+        "stated_volume_cbm": stated_volume,
+        "volume_difference_cbm": round(float(stated_volume or 0) - group_volume, 3),
+        "volume_matches": (
+            stated_volume is not None
+            and abs(float(stated_volume) - group_volume) <= 0.001
+        ),
+        "mapping_policy": (
+            "Master/container use stated header totals; each House uses its own source row. "
+            "Differences are reported and never silently redistributed."
+        ),
+    }
+
     return {
         "document_type": "WE-CAN Proxy Billing Excel",
         "vendor_name": meta.get("company") or "WE-CAN INTERNATIONAL LOGISTICS CO., LTD.",
@@ -759,6 +786,7 @@ def to_multi_invoice_payload(result: Dict[str, Any], source_filename: str) -> Di
         "groups": groups,
         "processing_summary": summary,
         "extraction_validation": validation,
+        "measurement_validation": measurement_validation,
     }
 
 

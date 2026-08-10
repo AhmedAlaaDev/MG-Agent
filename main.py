@@ -34,6 +34,12 @@ from dataverse_uploader import (
     _resolve_containerno_lookup,
     _update_entity,
 )
+from invoice_dataverse_mapper import (
+    build_invoice_mapping_plan,
+    container_type_option,
+    fetch_invoice_reference_data,
+    mapping_group,
+)
 from dataverse_field_limits import cap_nested_payload
 
 from spreadsheet_extractor import extract_document_text_professionally
@@ -2747,6 +2753,18 @@ def _ensure_invoice_container(
     }
     if parts.get("seal_no"):
         fields["mesco_carrierseal"] = parts["seal_no"]
+    type_option = container_type_option(parts.get("container_type"))
+    if type_option is not None:
+        fields["mesco_containertype"] = type_option
+    container_numbers = {
+        "mesco_noofpackages": extracted_data.get("total_packages"),
+        "mesco_grosskg": extracted_data.get("total_gross_weight_kg"),
+        "mesco_volcbm": extracted_data.get("total_volume_cbm"),
+    }
+    for field_name, raw_value in container_numbers.items():
+        if raw_value not in (None, ""):
+            fields[field_name] = float(raw_value)
+    fields["mesco_quantity"] = 1
 
     existing_id = _find_existing_container(client, operation_id, container_no)
     if existing_id:
@@ -3278,7 +3296,6 @@ async def extract_invoice(
                     "transactioncurrencyid",
                     "isocurrencycode",
                     "currencyname",
-                    fallback_first=True,
                 )
                 
                 # Find exchange rate
@@ -3429,6 +3446,7 @@ class MultiInvoiceGroupResult(BaseModel):
     dynamics_url: Optional[str] = None
     posted_count: int = 0
     errors: List[str] = []
+    mapping_validation: Optional[Dict[str, Any]] = None
 
 
 class MultiInvoiceExtractResponse(BaseModel):
@@ -3448,6 +3466,8 @@ class MultiInvoiceExtractResponse(BaseModel):
     groups: List[MultiInvoiceGroupResult] = []
     processing_summary: Optional[Dict[str, Any]] = None
     extraction_validation: Optional[Dict[str, Any]] = None
+    measurement_validation: Optional[Dict[str, Any]] = None
+    mapping_validation: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     dataverse_error: Optional[str] = None
 
@@ -3545,6 +3565,29 @@ async def extract_invoice_multi(
         except Exception:
             pass
 
+        # Excel invoice posting uses a strict, schema-backed mapping plan.
+        # The plan is also returned during dry runs so the caller can verify
+        # every scalar field and lookup before any Dynamics record is changed.
+        mapping_validation: Optional[Dict[str, Any]] = None
+        if is_excel_invoice:
+            reference_data: Dict[str, List[Dict[str, Any]]] = {}
+            reference_errors: List[str] = []
+            if client:
+                reference_data, reference_errors = fetch_invoice_reference_data(client)
+            else:
+                reference_errors.append("Dynamics client is unavailable; lookups could not be validated")
+            mapping_validation = build_invoice_mapping_plan(
+                extracted_data,
+                reference_data,
+                reference_errors,
+            )
+            extracted_data["mapping_validation"] = mapping_validation
+
+        strict_posting_ready = bool(
+            not is_excel_invoice
+            or (mapping_validation and mapping_validation.get("ready_to_post"))
+        )
+
         # Resolve fallback operation from MBL or provided operation_id
         fallback_op_id = operation_id
         fallback_op_code = None
@@ -3565,11 +3608,20 @@ async def extract_invoice_multi(
                 except Exception:
                     pass
 
+            # An Excel consolidation always needs the actual master as its
+            # parent, even if the UI supplied a currently-open House ID.
+            if is_excel_invoice and fallback_op_id and not fallback_is_master and master_bl_number:
+                fallback_op_id = None
+                fallback_op_code = None
+                fallback_is_master = True
+                fallback_tariff_quote_id = None
+
             if not fallback_op_id and master_bl_number:
                 try:
                     search_url = (
                         f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
-                        f"&$filter=mesco_masterblno eq '{master_bl_number}'&$top=1"
+                        f"&$filter=mesco_masterblno eq '{master_bl_number}' "
+                        "and mesco_bltype eq 886150001&$top=1"
                     )
                     search_resp = client.get(search_url)
                     if search_resp.status_code == 200:
@@ -3584,20 +3636,50 @@ async def extract_invoice_multi(
                 except Exception as e:
                     logger.warning("Failed to lookup fallback operation by MBL: %s", e)
 
-        # Auto-create fallback Master Operation if not found and post_to_dataverse is True
-        if not fallback_op_id and post_to_dataverse and client and master_bl_number:
+        # Auto-create the Master only after every Excel lookup has been
+        # validated.  This keeps a failed/ambiguous mapping fully atomic.
+        if (
+            not fallback_op_id
+            and post_to_dataverse
+            and strict_posting_ready
+            and client
+            and master_bl_number
+        ):
             try:
-                op_fields = {
-                    "mesco_code": master_bl_number,
-                    "mesco_masterblno": master_bl_number,
-                    "mesco_bltype": 886150001,  # Master B/L
-                }
+                op_fields = (
+                    dict(mapping_validation["master_operation"]["fields"])
+                    if is_excel_invoice and mapping_validation
+                    else {
+                        "mesco_code": master_bl_number,
+                        "mesco_masterblno": master_bl_number,
+                        "mesco_bltype": 886150001,
+                    }
+                )
                 fallback_op_id = _create_entity(client, "mesco_operations", op_fields)
                 fallback_op_code = master_bl_number
                 fallback_is_master = True
                 logger.info("Auto-created fallback Master Operation record: %s for B/L %s", fallback_op_id, master_bl_number)
             except Exception as create_err:
                 logger.exception("Failed to auto-create fallback Master Operation record: %s", create_err)
+
+        # Existing master records retain their operational code (for example
+        # O-10212); all invoice-derived fields and lookup binds are refreshed.
+        if (
+            fallback_op_id
+            and fallback_is_master
+            and post_to_dataverse
+            and strict_posting_ready
+            and client
+            and is_excel_invoice
+            and mapping_validation
+        ):
+            try:
+                master_patch = dict(mapping_validation["master_operation"]["fields"])
+                master_patch.pop("mesco_code", None)
+                master_patch.pop("mesco_bltype", None)
+                _update_entity(client, "mesco_operations", fallback_op_id, master_patch)
+            except Exception as patch_err:
+                logger.exception("Failed to update mapped Master Operation fields: %s", patch_err)
 
         # Pre-fetch reference lists for Dataverse posting
         services_list = []
@@ -3642,7 +3724,7 @@ async def extract_invoice_multi(
                         return opt[key_id]
                 return options[0][key_id] if fallback_first and options else None
 
-            currency_id = fuzzy_match(currency, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname", fallback_first=True)
+            currency_id = fuzzy_match(currency, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname")
             if currency_id:
                 for cur in currencies_list:
                     if cur.get("transactioncurrencyid") == currency_id:
@@ -3651,10 +3733,48 @@ async def extract_invoice_multi(
 
             vendor_id = fuzzy_match(vendor_name, vendors_list, "mesco_shippinglineid", "mesco_name")
 
+            if is_excel_invoice and mapping_validation:
+                currency_resolution = mapping_validation["lookups"]["currency"]
+                vendor_resolution = mapping_validation["lookups"]["invoice_vendor"]
+                currency_id = currency_resolution.get("id")
+                vendor_id = vendor_resolution.get("id")
+                ex_rate = float(currency_resolution.get("exchange_rate") or 1.0)
+
+        # One physical container belongs to the master operation.  Reusing it
+        # for every HBL cost line avoids the previous duplicate-container bug.
+        shared_invoice_container: Optional[Dict[str, Any]] = None
+        container_post_error: Optional[str] = None
+        if (
+            is_excel_invoice
+            and post_to_dataverse
+            and strict_posting_ready
+            and client
+            and fallback_op_id
+            and fallback_is_master
+        ):
+            try:
+                container_source = dict(extracted_data)
+                container_source["total_packages"] = sum(
+                    float(group.get("packages") or 0) for group in groups_raw
+                )
+                shared_invoice_container = _ensure_invoice_container(
+                    client,
+                    fallback_op_id,
+                    container_source,
+                )
+                if not shared_invoice_container:
+                    container_post_error = "Container number could not be resolved or created"
+            except Exception as container_exc:
+                container_post_error = f"Container creation failed: {container_exc}"
+
         # Process each HBL group
         group_results: List[MultiInvoiceGroupResult] = []
         total_posted = 0
         dataverse_error = None
+        if post_to_dataverse and is_excel_invoice and not strict_posting_ready:
+            dataverse_error = "Posting blocked because one or more Dynamics mappings are unresolved: " + "; ".join(
+                (mapping_validation or {}).get("errors") or ["unknown mapping error"]
+            )
 
         for group in groups_raw:
             hbl = group.get("house_bl_number")
@@ -3687,6 +3807,12 @@ async def extract_invoice_multi(
                 line_items_count=len(line_items),
                 line_items=line_items,
             )
+            group_mapping = mapping_group(mapping_validation, hbl) if mapping_validation else None
+            gr.mapping_validation = group_mapping
+            if container_post_error:
+                gr.errors.append(container_post_error)
+            if post_to_dataverse and is_excel_invoice and not strict_posting_ready:
+                gr.errors.extend((group_mapping or {}).get("errors") or [])
 
             # Resolve operation for this HBL
             group_op_id = None
@@ -3696,7 +3822,11 @@ async def extract_invoice_multi(
 
             if client and hbl:
                 try:
-                    hbl_filter = f"mesco_masterblno eq '{hbl}'"
+                    safe_hbl = str(hbl).replace("'", "''")
+                    hbl_filter = (
+                        f"mesco_masterblno eq '{safe_hbl}' "
+                        "and mesco_bltype eq 886150002"
+                    )
                     hbl_url = (
                         f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_bltype,mesco_masterblno,mesco_xollsp_TariffQuote"
                         f"&$filter={hbl_filter}&$top=1"
@@ -3712,37 +3842,46 @@ async def extract_invoice_multi(
                             if hop.get("_mesco_xollsp_tariffquote_value"):
                                 group_tariff_quote_id = hop["_mesco_xollsp_tariffquote_value"]
                             
-                            # Patch existing operation with extracted CBM/KGS if applicable
-                            if post_to_dataverse and not group_is_master:
-                                patch_fields = {}
-                                if group.get("cbm") is not None:
-                                    patch_fields["cr401_totalvolume"] = float(group["cbm"])
-                                if group.get("kgs") is not None:
-                                    patch_fields["cr401_totalgrossweight"] = float(group["kgs"])
-                                if group.get("packages") is not None:
-                                    patch_fields["cr401_totalpackages"] = float(group["packages"])
+                            # Patch every mapped operation field, including
+                            # destination/incoterm/carrier/vessel/currency.
+                            if post_to_dataverse and strict_posting_ready and not group_is_master:
+                                if is_excel_invoice and group_mapping:
+                                    patch_fields = dict(group_mapping["fields"])
+                                    patch_fields.pop("mesco_code", None)
+                                    patch_fields.pop("mesco_bltype", None)
+                                else:
+                                    patch_fields = {}
+                                    if group.get("cbm") is not None:
+                                        patch_fields["cr401_totalvolume"] = float(group["cbm"])
+                                    if group.get("kgs") is not None:
+                                        patch_fields["cr401_totalgrossweight"] = float(group["kgs"])
+                                    if group.get("packages") is not None:
+                                        patch_fields["cr401_totalpackages"] = float(group["packages"])
                                 if patch_fields:
                                     try:
-                                        client.patch(f"mesco_operations({group_op_id})", json=patch_fields)
+                                        _update_entity(client, "mesco_operations", group_op_id, patch_fields)
                                     except Exception as patch_e:
-                                        logger.warning("Failed to patch CBM/KGS for HBL %s: %s", hbl, patch_e)
+                                        logger.warning("Failed to patch mapped fields for HBL %s: %s", hbl, patch_e)
                 except Exception as e:
                     logger.warning("Failed to resolve operation for HBL %s: %s", hbl, e)
 
             # Auto-create House Operation if not found and post_to_dataverse is True
-            if not group_op_id and post_to_dataverse and client and hbl:
+            if not group_op_id and post_to_dataverse and strict_posting_ready and client and hbl:
                 try:
-                    group_fields = {
-                        "mesco_code": hbl,
-                        "mesco_masterblno": hbl,
-                        "mesco_bltype": 886150002,  # House B/L
-                    }
-                    if group.get("cbm") is not None:
-                        group_fields["cr401_totalvolume"] = float(group["cbm"])
-                    if group.get("kgs") is not None:
-                        group_fields["cr401_totalgrossweight"] = float(group["kgs"])
-                    if group.get("packages") is not None:
-                        group_fields["cr401_totalpackages"] = float(group["packages"])
+                    if is_excel_invoice and group_mapping:
+                        group_fields = dict(group_mapping["fields"])
+                    else:
+                        group_fields = {
+                            "mesco_code": hbl,
+                            "mesco_masterblno": hbl,
+                            "mesco_bltype": 886150002,
+                        }
+                        if group.get("cbm") is not None:
+                            group_fields["cr401_totalvolume"] = float(group["cbm"])
+                        if group.get("kgs") is not None:
+                            group_fields["cr401_totalgrossweight"] = float(group["kgs"])
+                        if group.get("packages") is not None:
+                            group_fields["cr401_totalpackages"] = float(group["packages"])
 
                     if fallback_op_id:
                         group_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({fallback_op_id})"
@@ -3754,7 +3893,7 @@ async def extract_invoice_multi(
                     logger.exception("Failed to auto-create House Operation record: %s", create_err)
 
             # Fallback to MBL/provided operation
-            if not group_op_id:
+            if not group_op_id and not (is_excel_invoice and post_to_dataverse):
                 group_op_id = fallback_op_id
                 group_op_code = fallback_op_code
                 group_is_master = fallback_is_master
@@ -3766,19 +3905,26 @@ async def extract_invoice_multi(
                 gr.dynamics_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={group_op_id}"
 
             # Post cost lines for this group
-            if post_to_dataverse and group_op_id and client:
+            if post_to_dataverse and strict_posting_ready and group_op_id and client:
                 # Ensure container for this group
-                container_data = {"container_number": container_number, "seal_number": seal_number}
-                invoice_container = None
-                try:
-                    invoice_container = _ensure_invoice_container(client, group_op_id, container_data)
-                except Exception as e:
-                    gr.errors.append(f"Container creation failed: {e}")
+                invoice_container = shared_invoice_container
+                if not is_excel_invoice:
+                    container_data = {
+                        "container_number": group.get("container_number") or container_number,
+                        "container_type": group.get("container_type") or extracted_data.get("container_type"),
+                        "seal_number": group.get("seal_number") or seal_number,
+                    }
+                    try:
+                        invoice_container = _ensure_invoice_container(client, group_op_id, container_data)
+                    except Exception as e:
+                        gr.errors.append(f"Container creation failed: {e}")
 
                 for item in line_items:
                     desc = item.get("service_description") or "Invoice Charge"
                     item_curr_str = item.get("currency") or group_curr or currency
-                    item_curr_id = fuzzy_match(item_curr_str, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname", fallback_first=True) if currencies_list else currency_id
+                    item_curr_id = fuzzy_match(item_curr_str, currencies_list, "transactioncurrencyid", "isocurrencycode", "currencyname") if currencies_list else currency_id
+                    if is_excel_invoice and mapping_validation:
+                        item_curr_id = mapping_validation["lookups"]["currency"].get("id")
                     item_ex_rate = ex_rate
                     if item_curr_id and currencies_list:
                         for cur in currencies_list:
@@ -3786,7 +3932,14 @@ async def extract_invoice_multi(
                                 item_ex_rate = float(cur.get("exchangerate") or 1.0)
                                 break
                     try:
-                        matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name") if services_list else None
+                        if is_excel_invoice and mapping_validation:
+                            matched_srv = (
+                                mapping_validation["lookups"]["services"]
+                                .get(desc, {})
+                                .get("id")
+                            )
+                        else:
+                            matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name") if services_list else None
 
                         qty = float(item.get("quantity") or 1)
                         u_price = float(item.get("unit_price") or 0)
@@ -3873,6 +4026,9 @@ async def extract_invoice_multi(
             groups=group_results,
             processing_summary=extracted_data.get("processing_summary"),
             extraction_validation=extracted_data.get("extraction_validation"),
+            measurement_validation=extracted_data.get("measurement_validation"),
+            mapping_validation=mapping_validation,
+            dataverse_error=dataverse_error,
         )
     except Exception as exc:
         logger.exception("Multi-invoice extraction endpoint failed")

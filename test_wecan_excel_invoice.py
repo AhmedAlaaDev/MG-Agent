@@ -37,6 +37,21 @@ def test_wecan_xls_maps_every_invoice_term_and_reconciles() -> None:
         "local_agreement_total": 780.56,
         "is_reconciled": True,
     }
+    assert invoice["measurement_validation"] == {
+        "group_packages_total": 395.0,
+        "group_gross_weight_kg": 23272.1,
+        "stated_gross_weight_kg": 23272.1,
+        "gross_weight_difference_kg": 0.0,
+        "gross_weight_matches": True,
+        "group_volume_cbm": 61.679,
+        "stated_volume_cbm": 63.066,
+        "volume_difference_cbm": 1.387,
+        "volume_matches": False,
+        "mapping_policy": (
+            "Master/container use stated header totals; each House uses its own source row. "
+            "Differences are reported and never silently redistributed."
+        ),
+    }
 
     port_said = next(group for group in invoice["groups"] if group["house_bl_number"] == "WYSE6050123")
     assert port_said["packages"] == 11.0
@@ -72,6 +87,8 @@ def test_multi_invoice_endpoint_accepts_legacy_xls_without_llm() -> None:
     assert body["total_line_items"] == 26
     assert body["extraction_validation"]["is_reconciled"] is True
     assert body["extraction_validation"]["posting_net_total"] == 7475.32
+    assert body["measurement_validation"]["gross_weight_matches"] is True
+    assert body["measurement_validation"]["volume_difference_cbm"] == 1.387
     assert body["groups"][0]["source_row"] == 10
     assert body["groups"][0]["term"] == "CIF"
     assert body["groups"][0]["local_agreement_total"] == 65.0
@@ -124,7 +141,20 @@ class _FakeDataverseClient:
 
     def get(self, url: str):
         if url.startswith("xollsp_servicedefinitions"):
-            return _FakeResponse(body={"value": []})
+            names = {
+                "Admin Fees": "00000000-0000-0000-1000-000000000001",
+                "Rebate": "00000000-0000-0000-1000-000000000002",
+                "Transfer Charges": "00000000-0000-0000-1000-000000000003",
+                "Sea Freight + Exwork": "00000000-0000-0000-1000-000000000004",
+                "Sea Freight": "00000000-0000-0000-1000-000000000005",
+                "Loading Charges": "00000000-0000-0000-1000-000000000006",
+                "PCS Port Congestion Surcharges": "00000000-0000-0000-1000-000000000007",
+                "THC": "00000000-0000-0000-1000-000000000008",
+            }
+            return _FakeResponse(body={"value": [
+                {"xollsp_servicedefinitionid": guid, "xollsp_name": name}
+                for name, guid in names.items()
+            ]})
         if url.startswith("transactioncurrencies"):
             return _FakeResponse(body={"value": [{
                 "transactioncurrencyid": "00000000-0000-0000-0000-000000000001",
@@ -133,10 +163,38 @@ class _FakeDataverseClient:
                 "exchangerate": 1.0,
             }]})
         if url.startswith("mesco_shippinglines"):
+            return _FakeResponse(body={"value": [
+                {
+                    "mesco_shippinglineid": "00000000-0000-0000-0000-000000000002",
+                    "mesco_name": "We-Can International Logistics",
+                },
+                {
+                    "mesco_shippinglineid": "00000000-0000-0000-0000-000000000005",
+                    "mesco_name": "COSCO SHIPPING LINE",
+                },
+            ]})
+        if url.startswith("xollsp_addresses"):
+            return _FakeResponse(body={"value": [
+                {
+                    "xollsp_addressid": "00000000-0000-0000-2000-000000000001",
+                    "xollsp_name": "Alexandria, Egypt (old)",
+                },
+                {
+                    "xollsp_addressid": "00000000-0000-0000-2000-000000000002",
+                    "xollsp_name": "Port Said",
+                },
+            ]})
+        if url.startswith("mesco_vesselsmises"):
             return _FakeResponse(body={"value": [{
-                "mesco_shippinglineid": "00000000-0000-0000-0000-000000000002",
-                "mesco_name": "SHANGHAI WE-CAN INTERNATIONAL LOGISTICS CO., LTD.",
+                "mesco_vesselsmisid": "00000000-0000-0000-3000-000000000001",
+                "mesco_name": "CMA CGM ADONIS",
             }]})
+        if url.startswith("xollsp_incoterms"):
+            return _FakeResponse(body={"value": [
+                {"xollsp_incotermid": "00000000-0000-0000-4000-000000000001", "xollsp_name": "CIF"},
+                {"xollsp_incotermid": "00000000-0000-0000-4000-000000000002", "xollsp_name": "FOB"},
+                {"xollsp_incotermid": "00000000-0000-0000-4000-000000000003", "xollsp_name": "EXW"},
+            ]})
         if url.startswith("xollsp_quotecostlines"):
             return _FakeResponse(body={"value": []})
         if "mesco_masterblno eq 'COSU6501303560'" in url:
@@ -189,12 +247,15 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
+    assert body["mapping_validation"]["ready_to_post"] is True
     assert body["total_posted"] == 26
     assert len(fake_client.posts) == 26
     assert all(post["mesco_vendorinvoicenumber"] == "702320601" for post in fake_client.posts)
     assert all("mesco_Operation@odata.bind" in post for post in fake_client.posts)
     assert all("mesco_Master3@odata.bind" in post for post in fake_client.posts)
     assert all("transactioncurrencyid@odata.bind" in post for post in fake_client.posts)
+    assert all("xollsp_LogisticService@odata.bind" in post for post in fake_client.posts)
+    assert all("mesco_invoicevendor_shippingline@odata.bind" in post for post in fake_client.posts)
     assert all("LOCAL AGREEMENT" not in post["xollsp_name"] for post in fake_client.posts)
 
     posting_total = round(sum(
@@ -209,8 +270,73 @@ def test_wecan_xls_builds_complete_dynamics_posting_payloads() -> None:
         for post in fake_client.posts
     )
 
-    operation_updates = [payload for entity, payload in fake_client.patches if entity.startswith("mesco_operations(")]
-    assert len(operation_updates) == 10
-    assert all("cr401_totalvolume" in payload for payload in operation_updates)
-    assert all("cr401_totalgrossweight" in payload for payload in operation_updates)
-    assert all("cr401_totalpackages" in payload for payload in operation_updates)
+    operation_updates = [
+        (entity, payload)
+        for entity, payload in fake_client.patches
+        if entity.startswith("mesco_operations(")
+    ]
+    assert len(operation_updates) == 11
+    master_update = next(
+        payload for entity, payload in operation_updates
+        if "00000000-0000-0000-0000-000000000003" in entity
+    )
+    assert "mesco_code" not in master_update
+    assert master_update["cr401_totalgrossweight"] == 23272.1
+    assert master_update["cr401_totalvolume"] == 63.066
+    assert master_update["mesco_direction"] == 300000000
+    assert master_update["mesco_transporttype"] == 300000000
+    assert master_update["mesco_loadtype"] == 300000001
+    assert master_update["mesco_containertype"] == 100000001
+    assert "mesco_ShippingLine@odata.bind" in master_update
+    assert "mesco_Vessel@odata.bind" in master_update
+    assert "transactioncurrencyid@odata.bind" in master_update
+
+    house_updates = [
+        payload for entity, payload in operation_updates
+        if "00000000-0000-0000-0000-000000000003" not in entity
+    ]
+    assert len(house_updates) == 10
+    assert all("cr401_totalvolume" in payload for payload in house_updates)
+    assert all("cr401_totalgrossweight" in payload for payload in house_updates)
+    assert all("cr401_totalpackages" in payload for payload in house_updates)
+    assert all("mesco_Destination@odata.bind" in payload for payload in house_updates)
+    assert all("mesco_Incoterm@odata.bind" in payload for payload in house_updates)
+    assert all("mesco_ShippingLine@odata.bind" in payload for payload in house_updates)
+    assert all("mesco_Vessel@odata.bind" in payload for payload in house_updates)
+    assert all("transactioncurrencyid@odata.bind" in payload for payload in house_updates)
+    assert all("mesco_pcfreightterm" not in payload for payload in house_updates)
+
+
+class _MissingServiceDataverseClient(_FakeDataverseClient):
+    def get(self, url: str):
+        response = super().get(url)
+        if url.startswith("xollsp_servicedefinitions"):
+            rows = [
+                row for row in response.json()["value"]
+                if row["xollsp_name"] != "THC"
+            ]
+            return _FakeResponse(body={"value": rows})
+        return response
+
+
+def test_excel_posting_is_atomic_when_required_lookup_is_missing() -> None:
+    source = _fixture_path()
+    fake_client = _MissingServiceDataverseClient()
+
+    with patch("main.DataverseClientService.get_instance", return_value=fake_client):
+        with source.open("rb") as stream:
+            response = TestClient(app).post(
+                "/extract/invoice/excel",
+                files={"file": (source.name, stream, "application/vnd.ms-excel")},
+                data={"post_to_dataverse": "true"},
+            )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["mapping_validation"]["ready_to_post"] is False
+    assert any("service THC: unresolved" in error for error in body["mapping_validation"]["errors"])
+    assert body["total_posted"] == 0
+    assert body["dataverse_error"].startswith("Posting blocked")
+    assert fake_client.posts == []
+    assert fake_client.patches == []
