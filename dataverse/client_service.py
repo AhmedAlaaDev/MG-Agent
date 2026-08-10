@@ -83,16 +83,20 @@ class DataverseClientService:
         from dataverse.env_service import EnvService as _EnvService
         env = _EnvService.get_instance()
 
-        self.base_url = (env.get("AZURE_APP_API_URL") or "").rstrip("/")
+        resource_url = env.get_optional("BASE_URL", "").rstrip("/")
+        configured_api_url = env.get_optional("AZURE_APP_API_URL", "").rstrip("/")
+        self.base_url = configured_api_url or (
+            f"{resource_url}/api/data/v9.2" if resource_url else ""
+        )
         if not self.base_url:
-            raise ValueError("AZURE_APP_API_URL is not configured")
+            raise ValueError("AZURE_APP_API_URL or BASE_URL is not configured")
 
-        self._tenant_id = env.get("TENANT_ID")
-        self._client_id = env.get("CLIENT_ID")
-        self._client_secret = env.get("CLIENT_SECRET")
+        self._tenant_id = env.get_optional("TENANT_ID", "")
+        self._client_id = env.get_optional("CLIENT_ID", "")
+        self._client_secret = env.get_optional("CLIENT_SECRET", "")
         # OAuth scope root: prefer explicit BASE_URL, else strip OData path from API URL
         self._resource_url = (
-            env.get_optional("BASE_URL", "").rstrip("/")
+            resource_url
             or self.base_url.replace("/api/data/v9.2", "").rstrip("/")
         )
 

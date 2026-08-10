@@ -5,6 +5,18 @@ import pytest
 from dataverse.client_service import DataverseClientService
 
 
+class _FakeEnv:
+    values = {
+        "BASE_URL": "https://example.crm.dynamics.com",
+        "TENANT_ID": "tenant",
+        "CLIENT_ID": "client",
+        "CLIENT_SECRET": "secret",
+    }
+
+    def get_optional(self, key: str, default: str) -> str:
+        return self.values.get(key, default)
+
+
 def test_failed_initialization_does_not_cache_partial_singleton() -> None:
     previous = DataverseClientService._instance
     DataverseClientService._instance = None
@@ -26,5 +38,17 @@ def test_get_instance_rebuilds_partial_singleton() -> None:
             rebuilt = DataverseClientService.get_instance()
         assert rebuilt is not partial
         initialize.assert_called_once()
+    finally:
+        DataverseClientService._instance = previous
+
+
+def test_base_url_builds_dataverse_api_url_when_explicit_api_url_is_missing() -> None:
+    previous = DataverseClientService._instance
+    DataverseClientService._instance = None
+    try:
+        with patch("dataverse.env_service.EnvService.get_instance", return_value=_FakeEnv()):
+            client = DataverseClientService()
+        assert client.base_url == "https://example.crm.dynamics.com/api/data/v9.2"
+        assert client._resource_url == "https://example.crm.dynamics.com"
     finally:
         DataverseClientService._instance = previous
