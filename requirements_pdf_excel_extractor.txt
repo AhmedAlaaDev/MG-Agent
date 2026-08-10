@@ -8,4 +8,4 @@ numpy
 openai>=1.0.0
 pydantic-settings
 openpyxl
-xlrd>=2.0.1
+xlrd>=2.0.2,<3.0.0
