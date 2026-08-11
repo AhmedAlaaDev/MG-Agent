@@ -163,7 +163,25 @@ def extract_pdf_text_professionally(pdf_bytes: bytes, force_ocr: bool = False) -
             },
         }
 
-    ocr = ocr_pdf(pdf_bytes)
+    try:
+        ocr = ocr_pdf(pdf_bytes)
+    except Exception as exc:
+        # Serverless deployments may not have a system Tesseract binary. Keep
+        # the native text and let Gemini inspect the original PDF bytes instead
+        # of failing before the multimodal model gets the document.
+        if native.text.strip():
+            return {
+                "method": "native_no_ocr",
+                "text": native.text,
+                "quality": {
+                    "native_char_count": native.char_count,
+                    "native_field_hits": native.field_hits,
+                    "page_count": native.page_count,
+                    "native_warnings": native.warnings,
+                    "ocr_error": str(exc),
+                },
+            }
+        raise
     ocr_text = ocr["raw_text"]
 
     if native.text.strip():

@@ -690,6 +690,12 @@ def _native_mime_for_file(file_bytes: Optional[bytes], filename: Optional[str] =
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if ext == "xls":
         return "application/vnd.ms-excel"
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
     return None
 
 
@@ -708,6 +714,8 @@ def _should_send_native_file(
         "text/csv",
     ):
         return bool(settings.gemini_native_spreadsheet)
+    if mime.startswith("image/"):
+        return True
     return False
 
 
@@ -886,6 +894,12 @@ def _native_mime_for_file(file_bytes: Optional[bytes], filename: Optional[str] =
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if ext == "xls":
         return "application/vnd.ms-excel"
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
     return None
 
 
@@ -904,6 +918,8 @@ def _should_send_native_file(
         "text/csv",
     ):
         return bool(settings.gemini_native_spreadsheet)
+    if mime.startswith("image/"):
+        return True
     return False
 
 

@@ -2928,7 +2928,10 @@ async def extract_invoice(
             extracted = extract_document_text_professionally(file_bytes, filename)
             raw_text = extracted.get("text", "")
             if not raw_text.strip():
-                return InvoiceExtractResponse(success=False, error="No text extracted from file.")
+                if str(filename or "").lower().endswith(".pdf"):
+                    raw_text = "[PDF text layer unavailable; inspect the attached PDF directly.]"
+                else:
+                    return InvoiceExtractResponse(success=False, error="No text extracted from file.")
         else:
             return InvoiceExtractResponse(success=False, error="No invoice file provided.")
         
@@ -3404,7 +3407,10 @@ async def extract_invoice_multi(
                 extracted = extract_document_text_professionally(file_bytes, filename)
                 raw_text = extracted.get("text", "")
                 if not raw_text.strip():
-                    return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
+                    if str(filename or "").lower().endswith(".pdf"):
+                        raw_text = "[PDF text layer unavailable; inspect the attached PDF directly.]"
+                    else:
+                        return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
         else:
             return MultiInvoiceExtractResponse(success=False, error="No invoice file provided.")
 
