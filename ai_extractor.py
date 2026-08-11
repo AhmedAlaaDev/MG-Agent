@@ -1073,6 +1073,8 @@ INVOICE_JSON_SCHEMA = {
         "properties": {
             "document_type": {"type": ["string", "null"], "description": "Document type e.g. DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE"},
             "invoice_date": {"type": ["string", "null"], "description": "Invoice/Debit note date (e.g. 16-Jul-26)"},
+            "payment_request_reference": {"type": ["string", "null"], "description": "Payment Request Ref value; never use this as the vendor invoice number"},
+            "payment_request_date": {"type": ["string", "null"], "description": "Date printed on a PAYMENT REQUEST"},
             "due_date": {"type": ["string", "null"], "description": "Payment due date (e.g. 16-Jul-26)"},
             "vendor_name": {"type": ["string", "null"], "description": "Vendor/Supplier company name"},
             "vendor_address": {"type": ["string", "null"], "description": "Vendor address and tax/GST registration info"},
@@ -1087,6 +1089,7 @@ INVOICE_JSON_SCHEMA = {
             "shipper_address": {"type": ["string", "null"], "description": "Shipper address"},
             "consignee_name": {"type": ["string", "null"], "description": "Consignee company name"},
             "consignee_address": {"type": ["string", "null"], "description": "Consignee address"},
+            "client_name": {"type": ["string", "null"], "description": "Company explicitly labelled Client Name; do not map it to consignee"},
             "agent_name": {"type": ["string", "null"], "description": "Agent company name"},
             "acid_number": {"type": ["string", "null"], "description": "ACID number for Egypt customs (e.g. 1000151581013510028)"},
             "vessel_name": {"type": ["string", "null"], "description": "Vessel name (e.g. VIVIEN A)"},
@@ -1094,6 +1097,19 @@ INVOICE_JSON_SCHEMA = {
             "port_of_loading": {"type": ["string", "null"], "description": "Port of Origin / Loading (e.g. NHAVA SHEVA, INDIA)"},
             "port_of_discharge": {"type": ["string", "null"], "description": "Port of Discharge / Destination (e.g. ALEXANDRIA)"},
             "incoterm": {"type": ["string", "null"], "description": "Incoterm (e.g. FOB - FREE ON BOARD)"},
+            "custody_type": {"type": ["string", "null"], "description": "Value printed beside Custody, e.g. SUPPLIER"},
+            "payment_method": {"type": ["string", "null"], "description": "Value printed beside Payment, e.g. Cash"},
+            "client_payment_term": {"type": ["string", "null"], "description": "Value explicitly labelled Client Payment Term"},
+            "activity": {"type": ["string", "null"], "description": "Payment request activity, e.g. LCL"},
+            "account_code": {"type": ["string", "null"]},
+            "account_name": {"type": ["string", "null"]},
+            "sub_account_code": {"type": ["string", "null"]},
+            "sub_account_name": {"type": ["string", "null"]},
+            "salesman_name": {"type": ["string", "null"]},
+            "operation_manager_name": {"type": ["string", "null"]},
+            "shipping_line_name": {"type": ["string", "null"], "description": "Carrier/Line printed in operation details"},
+            "booking_status": {"type": ["string", "null"]},
+            "booking_creation_date": {"type": ["string", "null"]},
             "number_of_packages": {"type": ["number", "null"], "description": "Number of packs/packages (e.g. 12)"},
             "gross_weight_kg": {"type": ["number", "null"], "description": "Gross weight in KG (e.g. 5450.0)"},
             "volume_cbm": {"type": ["number", "null"], "description": "Volume in CBM (e.g. 6.174)"},
@@ -1102,8 +1118,10 @@ INVOICE_JSON_SCHEMA = {
             "exchange_rate": {"type": ["number", "null"], "description": "Rate of exchange (ROE, e.g. 1.00)"},
             "subtotal_amount": {"type": ["number", "null"], "description": "Subtotal / Taxable amount (e.g. 629.75)"},
             "tax_amount": {"type": ["number", "null"], "description": "Total tax / IGST amount"},
+            "withholding_tax_amount": {"type": ["number", "null"], "description": "Total withholding tax amount"},
             "total_amount": {"type": ["number", "null"], "description": "Grand total net amount (e.g. 629.75)"},
             "amount_in_words": {"type": ["string", "null"], "description": "Total amount written in words"},
+            "creator_name": {"type": ["string", "null"], "description": "Creator printed on an internal payment request"},
             "bank_details": {
                 "type": ["object", "null"],
                 "additionalProperties": False,
@@ -1123,6 +1141,8 @@ INVOICE_JSON_SCHEMA = {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
+                        "category": {"type": ["string", "null"], "description": "Payment request Category column"},
+                        "item_description": {"type": ["string", "null"], "description": "Payment request Item column"},
                         "service_description": {"type": ["string", "null"]},
                         "hsn_sac": {"type": ["string", "null"]},
                         "quantity": {"type": ["number", "null"]},
@@ -1132,25 +1152,32 @@ INVOICE_JSON_SCHEMA = {
                         "taxable_amount": {"type": ["number", "null"]},
                         "tax_rate": {"type": ["string", "null"]},
                         "tax_amount": {"type": ["number", "null"]},
+                        "estimated_amount": {"type": ["number", "null"]},
                         "total_amount": {"type": ["number", "null"]},
                     },
                     "required": [
-                        "service_description", "hsn_sac", "quantity", "unit_price",
+                        "category", "item_description", "service_description", "hsn_sac", "quantity", "unit_price",
                         "currency", "exchange_rate", "taxable_amount", "tax_rate",
-                        "tax_amount", "total_amount"
+                        "tax_amount", "estimated_amount", "total_amount"
                     ],
                 },
             },
         },
         "required": [
-            "document_type", "invoice_date", "due_date", "vendor_name", "vendor_address",
+            "document_type", "invoice_date", "payment_request_reference", "payment_request_date",
+            "due_date", "vendor_name", "vendor_address",
             "vendor_invoice_number", "master_bl_number", "house_bl_number", "shipment_ref",
             "container_number", "seal_number", "container_type", "shipper_name", "shipper_address",
-            "consignee_name", "consignee_address", "agent_name", "acid_number", "vessel_name",
+            "consignee_name", "consignee_address", "client_name", "agent_name", "acid_number", "vessel_name",
             "voyage_number", "port_of_loading", "port_of_discharge", "incoterm",
+            "custody_type", "payment_method", "client_payment_term", "activity",
+            "account_code", "account_name", "sub_account_code", "sub_account_name",
+            "salesman_name", "operation_manager_name", "shipping_line_name",
+            "booking_status", "booking_creation_date",
             "number_of_packages", "gross_weight_kg", "volume_cbm", "chargeable_volume",
-            "currency", "exchange_rate", "subtotal_amount", "tax_amount", "total_amount",
-            "amount_in_words", "bank_details", "line_items"
+            "currency", "exchange_rate", "subtotal_amount", "tax_amount",
+            "withholding_tax_amount", "total_amount", "amount_in_words", "creator_name",
+            "bank_details", "line_items"
         ],
     },
 }
@@ -1160,12 +1187,16 @@ You are a professional invoice and debit note data extraction engine for shippin
 
 Analyze the raw text and visual layout of the invoice/debit note to extract all available metadata:
 1. Header & Identifiers:
-   - document_type: Document type (DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE)
+   - document_type: Document type (DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE, PAYMENT REQUEST)
    - invoice_date: Document date (e.g. 16-Jul-26)
+   - payment_request_reference: ONLY the value labelled `Ref` on a PAYMENT REQUEST
+   - payment_request_date: Date printed on a PAYMENT REQUEST
    - due_date: Payment due date
    - vendor_name: Billing company/supplier issuing the document (e.g. BYTEPORT LOGISTICS)
    - vendor_address: Address and tax registration/GST info
    - vendor_invoice_number: Invoice/Debit Note Number (e.g. 137-26MU000909)
+     On a PAYMENT REQUEST, read this from the Vendor cell text `(Invoice : nnn)`.
+     Never copy the header `Ref` into vendor_invoice_number.
    - master_bl_number: Master B/L Number (e.g. NSA26060443)
    - house_bl_number: House B/L Number (e.g. NAV26MU1470)
    - shipment_ref: Shipment Reference or Booking number (e.g. SHP0002096)
@@ -1177,6 +1208,7 @@ Analyze the raw text and visual layout of the invoice/debit note to extract all 
    - consignee_address: Full consignee address
    - agent_name: Agent company name (e.g. MESCO MARINE AND ENGINEERING SERVICES CO)
    - acid_number: Egypt Customs ACID number (e.g. 1000151581013510028)
+   - client_name: value explicitly labelled `Client Name`; a Client is not a Consignee
 
 3. Logistics & Vessel Info:
    - vessel_name: Vessel name (e.g. VIVIEN A)
@@ -1197,11 +1229,14 @@ Analyze the raw text and visual layout of the invoice/debit note to extract all 
    - exchange_rate: ROE / exchange rate (e.g. 1.00)
    - subtotal_amount: Taxable amount / subtotal
    - tax_amount: Total tax / IGST
+   - withholding_tax_amount: value labelled Total with holding tax amount
    - total_amount: Grand total amount
    - amount_in_words: Spelled out total amount in words
    - bank_details: Bank name, INR/EEFC account numbers, IFSC code, SWIFT code, IBAN
 
 5. Itemized Line Items:
+   - category: exact Category column text
+   - item_description: exact Item column text
    - service_description: Description of fee or charge (e.g. OCEAN FREIGHT LCL)
    - hsn_sac: HSN/SAC code (e.g. 996521)
    - quantity: Number of units (e.g. 6.174)
@@ -1212,11 +1247,176 @@ Analyze the raw text and visual layout of the invoice/debit note to extract all 
    - tax_rate: Tax rate percentage (e.g. 0%)
    - tax_amount: Tax amount (e.g. 0.00)
    - total_amount: Total amount for this row (e.g. 629.75)
+   - estimated_amount: value in the Estimated column
+
+6. PAYMENT REQUEST fields:
+   - custody_type, payment_method, client_payment_term, activity
+   - account_code/account_name and sub_account_code/sub_account_name
+   - salesman_name, operation_manager_name, shipping_line_name
+   - booking_status, booking_creation_date, creator_name
 
 Rules:
 - Do not omit fields if present in the document. Use null only for unprinted fields.
 - Keep quantities, prices, weights, and volumes as numbers.
+- Preserve source labels exactly. Do not reinterpret Client as Consignee or Ref as Invoice Number.
+- Do not invent quantity, unit price, exchange rate, line tax rate, or amount in words from totals/currency.
 """
+
+
+def _payment_request_number(value: Any) -> Optional[float]:
+    text = str(value or "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _repair_payment_request_result(
+    result: Dict[str, Any],
+    text_to_search: str,
+) -> Dict[str, Any]:
+    """Enforce label-faithful mappings for MESCO FastReport payment requests.
+
+    These documents contain both a header ``Ref`` and a vendor-cell
+    ``(Invoice: ...)`` value.  Treating the former as the latter breaks
+    Dynamics de-duplication, so the printed labels always win over an LLM
+    guess.  The function is intentionally conservative for values that are
+    not printed (quantity, unit price, ROE, and line tax rate).
+    """
+    document_type = str(result.get("document_type") or "")
+    is_payment_request = bool(
+        re.search(r"\bPayment\s+Request\b", text_to_search, re.I)
+        or re.search(r"\bPayment\s+Request\b", document_type, re.I)
+    )
+    if not is_payment_request:
+        return result
+
+    result["document_type"] = "PAYMENT REQUEST"
+
+    def first(pattern: str, flags: int = re.I) -> Optional[str]:
+        match = re.search(pattern, text_to_search, flags)
+        return match.group(1).strip() if match else None
+
+    reference = first(r"\bRef\s*:\s*([A-Z0-9][A-Z0-9./_-]*)")
+    invoice_number = first(
+        r"\(\s*Invoice\s*:\s*([A-Z0-9][A-Z0-9./_-]*)\s*\)"
+    ) or first(r"\bInvoice\s*:\s*([A-Z0-9][A-Z0-9./_-]*)")
+    payment_request_date = first(r"\bDate\s*:\s*(\d{1,2}/\d{1,2}/\d{4})")
+
+    if reference:
+        result["payment_request_reference"] = reference
+    if invoice_number:
+        result["vendor_invoice_number"] = invoice_number
+    if payment_request_date:
+        result["payment_request_date"] = payment_request_date
+        # Retain the generic field for backward-compatible API clients, while
+        # exposing its precise semantic label above.
+        result["invoice_date"] = payment_request_date
+
+    scalar_patterns = {
+        "custody_type": r"\bCustody\s*:\s*([A-Z]+)",
+        "payment_method": r"\bPayment\s*:\s*([A-Za-z]+)",
+        "activity": r"\bActivity\s*:\s*([A-Z0-9]+)",
+        "currency": r"\bCurrency\s*:\s*([A-Z]{3})\b",
+        "account_code": r"\bAccount\s*:\s*(\d{5,})",
+        "sub_account_code": r"\bSub\s*Account\s*:\s*(\d{5,})",
+    }
+    for key, pattern in scalar_patterns.items():
+        value = first(pattern)
+        if value:
+            result[key] = value
+
+    if re.search(r"\bCreator\b", text_to_search, re.I):
+        creator_candidates = re.findall(
+            r"(?m)^[ \t]*([A-Z]{2,}(?:[ \t]+[A-Z]{2,}){1,3})[ \t]*$",
+            text_to_search,
+        )
+        excluded_creator_lines = {
+            "ACCOUNTANT APPROVED BY",
+            "PAYABLE SUPERVISOR APPROVED BY",
+            "TREASURY SUPERVISOR APPROVED BY",
+            "LCL THC FEES",
+        }
+        creator = next(
+            (
+                candidate.strip()
+                for candidate in reversed(creator_candidates)
+                if candidate.strip() not in excluded_creator_lines
+                and "APPROVED BY" not in candidate
+            ),
+            None,
+        )
+        if creator:
+            result["creator_name"] = creator
+
+    amount_patterns = {
+        "subtotal_amount": r"Total\s+amount\s+without\s+VAT\s+([\d,.]+)",
+        "tax_amount": r"Total\s+tax\s+amount\s+([\d,.]+)",
+        "withholding_tax_amount": r"Total\s+with\s*holding\s+tax\s+amount\s+([\d,.]+)",
+        "total_amount": r"Total\s+amount\s+([\d,.]+)(?![\s\S]*Total\s+amount)",
+    }
+    for key, pattern in amount_patterns.items():
+        value = first(pattern)
+        parsed = _payment_request_number(value)
+        if parsed is not None:
+            result[key] = parsed
+
+    # A Payment Request's Client Name is not evidence of a consignee role.
+    if not result.get("client_name") and result.get("consignee_name"):
+        result["client_name"] = result["consignee_name"]
+    if not re.search(r"\bConsignee\b", text_to_search, re.I):
+        result["consignee_name"] = None
+        result["consignee_address"] = None
+
+    # These values were frequently hallucinated from Currency/Total cells.
+    if not re.search(r"Amount\s+in\s+Words|Total\s+in\s+Words", text_to_search, re.I):
+        result["amount_in_words"] = None
+    if not re.search(r"\b(?:ROE|Exchange\s+Rate)\b", text_to_search, re.I):
+        result["exchange_rate"] = None
+
+    line_items = result.get("line_items") or []
+    if isinstance(line_items, list):
+        one_line = len(line_items) == 1
+        table_amounts = re.search(
+            r"\b[A-Z]{4}\d{7}\s+([\d,.]+)\s+([\d,.]+)\b",
+            text_to_search,
+        )
+        for item in line_items:
+            if not isinstance(item, dict):
+                continue
+            item["quantity"] = None
+            item["unit_price"] = None
+            item["exchange_rate"] = None
+            item["taxable_amount"] = None
+            item["tax_rate"] = None
+            item["tax_amount"] = None
+            if not item.get("category"):
+                category = first(r"\b(LCL\s+THC\s+FEES)\b")
+                if category:
+                    item["category"] = category
+            description = str(item.get("service_description") or "").strip()
+            category = str(item.get("category") or "").strip()
+            if not item.get("item_description") and category and description:
+                remainder = re.sub(
+                    rf"^{re.escape(category)}\s*[-:]?\s*",
+                    "",
+                    description,
+                    flags=re.I,
+                ).strip()
+                if remainder and remainder != description:
+                    item["item_description"] = remainder
+            if one_line and table_amounts:
+                item["estimated_amount"] = _payment_request_number(table_amounts.group(1))
+                item["total_amount"] = _payment_request_number(table_amounts.group(2))
+            elif one_line and item.get("total_amount") in (None, ""):
+                item["total_amount"] = result.get("total_amount")
+            if not item.get("service_description"):
+                parts = [item.get("category"), item.get("item_description")]
+                item["service_description"] = " - ".join(str(x) for x in parts if x) or None
+
+    return result
 
 
 def _enrich_invoice_result(
@@ -1340,7 +1540,23 @@ def _enrich_invoice_result(
                 "iban": None,
             }
 
-    return result
+    return _repair_payment_request_result(result, text_to_search)
+
+
+def normalize_invoice_result(
+    result: Dict[str, Any],
+    raw_text: str,
+    *,
+    filename: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Normalize either LLM output or browser-supplied invoice JSON."""
+    return _enrich_invoice_result(
+        result,
+        raw_text,
+        filename=filename,
+        file_bytes=file_bytes,
+    )
 
 
 def extract_invoice_with_llm(

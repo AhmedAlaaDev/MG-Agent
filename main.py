@@ -41,8 +41,10 @@ from invoice_dataverse_mapper import (
     LCL,
     SEA,
     build_invoice_mapping_plan,
+    build_single_invoice_lookup_plan,
     container_type_option,
     fetch_invoice_reference_data,
+    fetch_single_invoice_reference_data,
     mapping_group,
 )
 from dataverse_field_limits import cap_nested_payload
@@ -3194,7 +3196,7 @@ async def extract_invoice(
     model_val = llm_model.value if llm_model else None
     try:
         import json
-        from ai_extractor import extract_invoice_with_llm
+        from ai_extractor import extract_invoice_with_llm, normalize_invoice_result
         
         if extracted_data_json and extracted_data_json.strip() == "string":
             extracted_data_json = None
@@ -3208,14 +3210,14 @@ async def extract_invoice(
         if file:
             file_bytes = await file.read()
             filename = file.filename
-            
-            if not extracted_data_json:
-                extracted = extract_document_text_professionally(file_bytes, filename)
-                raw_text = extracted.get("text", "")
-                if not raw_text.strip():
-                    return InvoiceExtractResponse(success=False, error="No text extracted from file.")
-            else:
-                raw_text = ""
+
+            # Always read the source document. Browser/third-party JSON still
+            # needs deterministic label validation (Ref vs Invoice, Client vs
+            # Consignee) and operation-scoped table filtering.
+            extracted = extract_document_text_professionally(file_bytes, filename)
+            raw_text = extracted.get("text", "")
+            if not raw_text.strip() and not extracted_data_json:
+                return InvoiceExtractResponse(success=False, error="No text extracted from file.")
         else:
             raw_text = ""
             if not extracted_data_json:
@@ -3232,6 +3234,15 @@ async def extract_invoice(
         else:
             with llm_request_overrides(provider_val, model_val):
                 extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
+
+        # Idempotent for server-side LLM output and essential for browser-side
+        # extraction JSON, which previously bypassed all deterministic repairs.
+        extracted_data = normalize_invoice_result(
+            extracted_data,
+            raw_text,
+            filename=filename,
+            file_bytes=file_bytes,
+        )
         
         extracted_mbl = extracted_data.get("master_bl_number") or ""
         extracted_hbl = extracted_data.get("house_bl_number") or ""
@@ -3252,6 +3263,24 @@ async def extract_invoice(
         except Exception as client_exc:
             client_init_error = f"{type(client_exc).__name__}: {client_exc}"
             logger.warning("Dataverse client is unavailable: %s", client_init_error)
+
+        single_mapping: Optional[Dict[str, Any]] = None
+        single_references: Dict[str, List[Dict[str, Any]]] = {}
+        single_reference_errors: List[str] = []
+        if client:
+            single_references, single_reference_errors = fetch_single_invoice_reference_data(client)
+            single_mapping = build_single_invoice_lookup_plan(
+                extracted_data,
+                single_references,
+                single_reference_errors,
+            )
+            extracted_data["dynamics_mapping"] = single_mapping
+        elif client_init_error:
+            extracted_data["dynamics_mapping"] = {
+                "ready_to_post": False,
+                "errors": [client_init_error],
+                "lookups": {},
+            }
 
         # If no operation_id is provided, resolve by B/L in a deterministic order.
         # Prefer House B/L over Master B/L so multi-HBL debit notes do not post
@@ -3391,6 +3420,13 @@ async def extract_invoice(
                 raw_text,
                 resolved_op_bl,
             )
+            if client:
+                single_mapping = build_single_invoice_lookup_plan(
+                    extracted_data,
+                    single_references,
+                    single_reference_errors,
+                )
+                extracted_data["dynamics_mapping"] = single_mapping
 
         # Build direct web URL to the Operation record in Dynamics
         dynamics_url = None
@@ -3414,6 +3450,24 @@ async def extract_invoice(
         
         if post_to_dataverse and resolved_op_id and client:
             try:
+                if not single_mapping or not single_mapping.get("ready_to_post"):
+                    mapping_errors = (single_mapping or {}).get("errors") or [
+                        "Dynamics lookup mapping is unavailable"
+                    ]
+                    raise ValueError(
+                        "Invoice was not posted because required Dynamics lookups "
+                        f"did not resolve uniquely: {'; '.join(mapping_errors)}"
+                    )
+
+                lookup_plan = single_mapping["lookups"]
+                currency_resolution = lookup_plan["currency"]
+                vendor_resolution = lookup_plan["invoice_vendor"]
+                currency_id = currency_resolution.get("id")
+                vendor_id = vendor_resolution.get("id")
+                ex_rate = float(currency_resolution.get("exchange_rate") or 1.0)
+
+                # Validate every lookup before creating/updating any Dataverse
+                # row so a missing vendor/service cannot leave a partial upload.
                 invoice_container = _ensure_invoice_container(
                     client,
                     resolved_op_id,
@@ -3425,65 +3479,11 @@ async def extract_invoice(
                         "success": True,
                         **invoice_container,
                     })
-                
-                # Fetch currencies list and services list from crm to map
-                services_resp = client.get("xollsp_servicedefinitions?$select=xollsp_servicedefinitionid,xollsp_name")
-                services_list = services_resp.json().get("value", [])
-                
-                currencies_resp = client.get("transactioncurrencies?$select=transactioncurrencyid,currencyname,isocurrencycode,exchangerate")
-                currencies_list = currencies_resp.json().get("value", [])
-                
-                vendors_resp = client.get("mesco_shippinglines?$select=mesco_shippinglineid,mesco_name")
-                vendors_list = vendors_resp.json().get("value", [])
-                
-                def fuzzy_match(q, options, key_id, key_name, second_key=None, fallback_first=False):
-                    if not q:
-                        return None
-                    q_clean = re.sub(r"[^a-z0-9]", "", q.lower())
-                    if not q_clean:
-                        return None
-                    for opt in options:
-                        lbl = opt.get(key_name) or ""
-                        lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                        if lbl_clean and lbl_clean == q_clean:
-                            return opt[key_id]
-                        if second_key and opt.get(second_key):
-                            scnd = opt[second_key]
-                            scnd_clean = re.sub(r"[^a-z0-9]", "", scnd.lower())
-                            if scnd_clean and scnd_clean == q_clean:
-                                return opt[key_id]
-                    # Partial match
-                    for opt in options:
-                        lbl = opt.get(key_name) or ""
-                        lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
-                        if lbl_clean and (q_clean in lbl_clean or lbl_clean in q_clean):
-                            return opt[key_id]
-                    return options[0][key_id] if fallback_first and options else None
-
-                # Extract and post each item
-                ext_currency = extracted_data.get("currency")
-                currency_id = fuzzy_match(
-                    ext_currency,
-                    currencies_list,
-                    "transactioncurrencyid",
-                    "isocurrencycode",
-                    "currencyname",
-                )
-                
-                # Find exchange rate
-                ex_rate = 1.0
-                if currency_id:
-                    for cur in currencies_list:
-                        if cur.get("transactioncurrencyid") == currency_id:
-                            ex_rate = float(cur.get("exchangerate") or 1.0)
-                            break
-
-                ext_vendor = extracted_data.get("vendor_name")
-                vendor_id = fuzzy_match(ext_vendor, vendors_list, "mesco_shippinglineid", "mesco_name")
 
                 for item in extracted_data.get("line_items", []):
                     desc = item.get("service_description") or "Invoice Charge"
-                    matched_srv = fuzzy_match(desc, services_list, "xollsp_servicedefinitionid", "xollsp_name")
+                    service_resolution = lookup_plan["services"].get(desc) or {}
+                    matched_srv = service_resolution.get("id")
                     
                     cost_values = _invoice_cost_values(item)
                     qty = cost_values["quantity"]
@@ -3498,18 +3498,39 @@ async def extract_invoice(
                         "xollsp_fixedamountbase": 0,
                         "mesco_servicecategory": 886150006, # Others
                         "mesco_vendorinvoicenumber": extracted_data.get("vendor_invoice_number"),
+                        "xollsp_exchangerate": ex_rate,
                     }
-                    if cost_values["comments"]:
-                        payload["xollsp_comments"] = cost_values["comments"]
+                    if extracted_data.get("shipment_ref"):
+                        payload["mesco_bookingnumber"] = extracted_data["shipment_ref"]
+                    if extracted_data.get("container_number"):
+                        payload["mesco_containernumber"] = extracted_data["container_number"]
+
+                    audit_comments = [cost_values["comments"]] if cost_values["comments"] else []
+                    if extracted_data.get("payment_request_reference"):
+                        audit_comments.append(
+                            f"Payment Request Ref: {extracted_data['payment_request_reference']}."
+                        )
+                    if extracted_data.get("payment_request_date"):
+                        audit_comments.append(
+                            f"Payment Request Date: {extracted_data['payment_request_date']}."
+                        )
+                    if extracted_data.get("client_name"):
+                        audit_comments.append(f"Client: {extracted_data['client_name']}.")
+                    if extracted_data.get("withholding_tax_amount") is not None:
+                        withholding_amount = float(extracted_data["withholding_tax_amount"])
+                        audit_comments.append(
+                            "Withholding tax: "
+                            f"{withholding_amount:g} "
+                            f"{extracted_data.get('currency') or ''}.".rstrip()
+                        )
+                    if audit_comments:
+                        payload["xollsp_comments"] = " ".join(audit_comments)
                     
                     # Bind lookups
-                    if matched_srv:
-                        payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
-                    if currency_id:
-                        payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({currency_id})"
-                        payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({currency_id})"
-                    if vendor_id:
-                        payload["mesco_invoicevendor_shippingline@odata.bind"] = f"/mesco_shippinglines({vendor_id})"
+                    payload["xollsp_LogisticService@odata.bind"] = f"/xollsp_servicedefinitions({matched_srv})"
+                    payload["transactioncurrencyid@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                    payload["xollsp_Currency@odata.bind"] = f"/transactioncurrencies({currency_id})"
+                    payload["mesco_invoicevendor_shippingline@odata.bind"] = f"/mesco_shippinglines({vendor_id})"
                     if tariff_quote_id:
                         payload["xollsp_TariffQuote@odata.bind"] = f"/xollsp_tariffquotes({tariff_quote_id})"
                     if invoice_container and invoice_container.get("id"):
@@ -3529,8 +3550,6 @@ async def extract_invoice(
                     )
                     if existing_cost_line_id:
                         update_payload = dict(payload)
-                        if not matched_srv:
-                            update_payload["xollsp_LogisticService@odata.bind"] = None
                         patch_resp = client.patch(
                             f"xollsp_quotecostlines({existing_cost_line_id})",
                             json=update_payload,

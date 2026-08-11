@@ -8,6 +8,7 @@ normalized label or by an explicit business alias documented below.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -34,7 +35,8 @@ REFERENCE_QUERIES: Dict[str, str] = {
     ),
     "shipping_lines": (
         "mesco_shippinglines?"
-        "$select=mesco_shippinglineid,mesco_name&$top=5000"
+        "$select=mesco_shippinglineid,mesco_name,mesco_code,mesco_vendorid,"
+        "mesco_number,mesco_oldaccountid&$top=5000"
     ),
     "addresses": (
         "xollsp_addresses?"
@@ -89,7 +91,9 @@ LOOKUP_ALIASES: Dict[str, Dict[str, str]] = {
 
 
 def normalize_label(value: Any) -> str:
-    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+    """Normalize lookup labels without discarding Arabic or other scripts."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).upper()
+    return "".join(char for char in normalized if char.isalnum())
 
 
 def container_type_option(value: Any) -> Optional[int]:
@@ -125,6 +129,20 @@ def fetch_invoice_reference_data(client: Any) -> Tuple[Dict[str, List[Dict[str, 
     for key, query in REFERENCE_QUERIES.items():
         try:
             references[key] = _safe_rows(client.get(query))
+        except Exception as exc:
+            references[key] = []
+            errors.append(f"Could not read Dynamics {key}: {exc}")
+    return references, errors
+
+
+def fetch_single_invoice_reference_data(
+    client: Any,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], List[str]]:
+    references: Dict[str, List[Dict[str, Any]]] = {}
+    errors: List[str] = []
+    for key in ("currencies", "shipping_lines", "services"):
+        try:
+            references[key] = _safe_rows(client.get(REFERENCE_QUERIES[key]))
         except Exception as exc:
             references[key] = []
             errors.append(f"Could not read Dynamics {key}: {exc}")
@@ -191,6 +209,137 @@ def resolve_unique_lookup(
             for row in matches
         ]
     return result
+
+
+def resolve_unique_lookup_candidates(
+    source_values: Iterable[Any],
+    rows: List[Dict[str, Any]],
+    *,
+    kind: str,
+    id_key: str,
+    label_keys: Iterable[str],
+    required: bool = True,
+) -> Dict[str, Any]:
+    """Resolve the first uniquely matching name/code without fuzzy fallback."""
+    candidates = [str(value).strip() for value in source_values if str(value or "").strip()]
+    if not candidates:
+        return resolve_unique_lookup(
+            None,
+            rows,
+            kind=kind,
+            id_key=id_key,
+            label_keys=label_keys,
+            required=required,
+        )
+
+    attempts: List[Dict[str, Any]] = []
+    for source in candidates:
+        resolution = resolve_unique_lookup(
+            source,
+            rows,
+            kind=kind,
+            id_key=id_key,
+            label_keys=label_keys,
+            required=required,
+        )
+        attempts.append(resolution)
+        if resolution.get("status") == "resolved":
+            resolution["source_candidates"] = candidates
+            return resolution
+        if resolution.get("status") == "ambiguous":
+            resolution["source_candidates"] = candidates
+            return resolution
+
+    unresolved = next(
+        (attempt for attempt in attempts if attempt.get("status") == "unresolved"),
+        attempts[0],
+    )
+    unresolved["source_candidates"] = candidates
+    return unresolved
+
+
+def canonical_service_label(value: Any) -> str:
+    """Map document charge wording to an exact Dynamics service label."""
+    source = str(value or "").strip()
+    key = normalize_label(source)
+    if "THC" in key and ("LCL" in key or "FEE" in key):
+        return "THC"
+    return LOOKUP_ALIASES.get("service", {}).get(key, source)
+
+
+def build_single_invoice_lookup_plan(
+    extracted: Dict[str, Any],
+    references: Dict[str, List[Dict[str, Any]]],
+    reference_errors: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Resolve all lookups used by the single-invoice cost-line uploader."""
+    currency = resolve_unique_lookup(
+        extracted.get("currency"),
+        references.get("currencies", []),
+        kind="currency",
+        id_key="transactioncurrencyid",
+        label_keys=("isocurrencycode", "currencyname"),
+    )
+    vendor = resolve_unique_lookup_candidates(
+        (
+            extracted.get("vendor_name"),
+            extracted.get("sub_account_code"),
+        ),
+        references.get("shipping_lines", []),
+        kind="invoice_vendor",
+        id_key="mesco_shippinglineid",
+        label_keys=(
+            "mesco_name",
+            "mesco_code",
+            "mesco_vendorid",
+            "mesco_number",
+            "mesco_oldaccountid",
+        ),
+    )
+
+    services: Dict[str, Dict[str, Any]] = {}
+    for item in extracted.get("line_items") or []:
+        source = str(item.get("service_description") or "Invoice Charge").strip()
+        target = canonical_service_label(source)
+        resolution = resolve_unique_lookup(
+            target,
+            references.get("services", []),
+            kind="service",
+            id_key="xollsp_servicedefinitionid",
+            label_keys=("xollsp_name",),
+        )
+        resolution["source"] = source
+        resolution["target_label"] = target
+        services[source] = resolution
+
+    errors = list(reference_errors or [])
+    for label, resolution in (("currency", currency), ("invoice vendor", vendor)):
+        failure = _required_failure(label, resolution)
+        if failure:
+            errors.append(failure)
+    for source, resolution in services.items():
+        failure = _required_failure(f"service {source}", resolution)
+        if failure:
+            errors.append(failure)
+
+    return {
+        "ready_to_post": not errors,
+        "errors": errors,
+        "lookups": {
+            "currency": currency,
+            "invoice_vendor": vendor,
+            "services": services,
+        },
+        "field_contract": {
+            "payment_request_reference": "audit comment; never mesco_vendorinvoicenumber",
+            "vendor_invoice_number": "xollsp_quotecostline.mesco_vendorinvoicenumber",
+            "vendor": "mesco_invoicevendor_shippingline lookup",
+            "currency": "transactioncurrencyid and xollsp_Currency lookups",
+            "service": "xollsp_LogisticService lookup",
+            "operation": "mesco_Master3 or mesco_Operation lookup",
+            "container": "mesco_Container lookup",
+        },
+    }
 
 
 def _bind(fields: Dict[str, Any], nav: str, entity_set: str, resolution: Dict[str, Any]) -> None:
@@ -384,4 +533,3 @@ def mapping_group(plan: Dict[str, Any], house_bl_number: Any) -> Optional[Dict[s
          if normalize_label(group.get("house_bl_number")) == wanted),
         None,
     )
-
