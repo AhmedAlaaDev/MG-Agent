@@ -14,11 +14,11 @@ _llm_model: ContextVar[Optional[str]] = ContextVar("llm_model", default=None)
 
 def normalize_llm_provider(provider: Optional[str]) -> str:
     normalized = (provider or settings.llm_provider or "gemini").strip().lower()
-    if normalized in ("puter", "puterjs", "puter.js"):
-        return "puter"
     if normalized in ("gemini", "google"):
         return "gemini"
-    return "azure"
+    raise ValueError(
+        f"Unsupported AI provider '{normalized}'. This service uses Gemini only."
+    )
 
 
 def effective_llm_provider() -> str:
@@ -32,11 +32,7 @@ def effective_llm_model() -> str:
     override = _llm_model.get()
     if override and override.strip():
         return override.strip()
-    if effective_llm_provider() == "puter":
-        return settings.puter_model
-    if effective_llm_provider() == "gemini":
-        return settings.gemini_model
-    return settings.azure_openai_deployment
+    return settings.gemini_model
 
 
 def uses_gemini() -> bool:
@@ -44,7 +40,8 @@ def uses_gemini() -> bool:
 
 
 def uses_puter() -> bool:
-    return effective_llm_provider() == "puter"
+    """Compatibility shim for older parser branches; Puter is no longer used."""
+    return False
 
 
 def llm_meta() -> dict[str, str]:
@@ -56,9 +53,7 @@ def llm_meta() -> dict[str, str]:
 
 
 def llm_extraction_prefix() -> str:
-    if uses_puter():
-        return "puter"
-    return "gemini" if uses_gemini() else "azure"
+    return "gemini"
 
 
 def validate_llm_request(provider: Optional[str], model: Optional[str]) -> None:
@@ -66,11 +61,7 @@ def validate_llm_request(provider: Optional[str], model: Optional[str]) -> None:
     effective = normalize_llm_provider(provider) if provider else effective_llm_provider()
     if model:
         model = model.strip()
-        if model.startswith("gemini-") and effective not in ("gemini", "puter"):
-            raise ValueError(
-                f"Model '{model}' is a Gemini model. Set llm_provider=puter or gemini to use it."
-            )
-        if effective in ("gemini", "puter") and not is_valid_gemini_model(model):
+        if effective == "gemini" and not is_valid_gemini_model(model):
             from config import GEMINI_MODELS
 
             raise ValueError(
@@ -84,7 +75,7 @@ def llm_request_overrides(
     provider: Optional[str] = None,
     model: Optional[str] = None,
 ) -> Iterator[None]:
-    """Temporarily override LLM_PROVIDER / GEMINI_MODEL (or Azure deployment) for one request."""
+    """Temporarily override LLM_PROVIDER / GEMINI_MODEL for one request."""
     t_provider = _llm_provider.set(provider.strip().lower()) if provider else None
     t_model = _llm_model.set(model.strip()) if model else None
     try:

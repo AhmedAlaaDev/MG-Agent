@@ -52,18 +52,14 @@ from dataverse_field_limits import cap_nested_payload
 from spreadsheet_extractor import extract_document_text_professionally
 from ai_extractor import MULTI_BL_JSON_SCHEMA, SYSTEM_PROMPT, extract_with_azure_openai
 from document_parser import parse_document_intelligently
-from pdf_deterministic_registry import best_deterministic_parse
 from pdf_batch_processor import process_pdf_bytes
-from record_reconciliation import merge_record_fields, reconcile_record_lists
 from crm_mapper import map_crm_operation_to_records
 from config import GEMINI_MODELS, settings
 from llm_context import (
     llm_extraction_prefix,
     llm_meta,
     llm_request_overrides,
-    normalize_llm_provider,
     uses_gemini,
-    uses_puter,
     validate_llm_request,
 )
 from llm_models import GeminiModelQuery, LlmProviderQuery
@@ -95,42 +91,6 @@ from pdf_sea_waybill import (
     parse_consolidation_sea_waybill,
 )
 from upload_audit import audit_store
-
-
-_PUTER_DETERMINISTIC_FORCE_KEYS = {
-    "mesco_masterblno",
-    "mesco_bookingnumber",
-    "mesco_acidnumber",
-    "cr401_totalpackages",
-    "cr401_totalgrossweight",
-    "cr401_totalvolume",
-    "mesco_origin",
-    "mesco_destination",
-    "mesco_vessel",
-    "mesco_voytruckno",
-    "container_number",
-    "seal_number",
-    "containers",
-    "mesco_containertype",
-    "mesco_transporttype",
-    "mesco_loadtype",
-    "mesco_pcfreightterm",
-    "mesco_bookingterm",
-    "mesco_freightpayableat",
-    "mesco_consolidation",
-    "mesco_shippingline",
-    "mesco_shipper",
-    "mesco_consignee",
-    "mesco_country",
-    "mesco_countryoforigin",
-    "mesco_importerstaxno",
-    "mesco_foreignsupplierregistrationnumber",
-    "mesco_typeofregistrationnumber",
-    "mesco_dateofissue",
-    "mesco_shippedonboarddate",
-    "mesco_placeofissue",
-    "mesco_nooforgbls",
-}
 
 
 class BlTypeQuery(str, Enum):
@@ -172,8 +132,8 @@ async def root() -> str:
     <body>
       <h1>B/L Extractor v4.0</h1>
       <p>FastAPI service for extracting Bill of Lading data from PDF and Excel files.</p>
-      <h2>Default Puter AI Extractor</h2>
-      <p><a href="/puter">Open Puter Gemini extractor</a> (browser-side Puter.js, no Gemini API key).</p>
+      <h2>Gemini AI Extractor</h2>
+      <p>Server-side Gemini API extraction is used for all uploaded documents.</p>
       <form action="/docs" method="get">
         <button type="submit">Open API Docs</button>
       </form>
@@ -207,27 +167,6 @@ async def upload_audit_page() -> str:
         <body>
           <h1>Upload audit dashboard is not available</h1>
           <p>The audit_view.html file was not found on this deployment.</p>
-        </body>
-        </html>
-        """
-
-
-@app.get("/puter", response_class=HTMLResponse, include_in_schema=False)
-async def puter_extractor_page() -> str:
-    """Serve the browser-side Puter.js Gemini extractor."""
-    import os
-
-    html_path = os.path.join(os.path.dirname(__file__), "puter_extract.html")
-    try:
-        with open(html_path, "r", encoding="utf-8") as handle:
-            return handle.read()
-    except FileNotFoundError:
-        return """
-        <!doctype html>
-        <html>
-        <body>
-          <h1>Puter extractor is not available</h1>
-          <p>The puter_extract.html file was not found on this deployment.</p>
         </body>
         </html>
         """
@@ -477,14 +416,8 @@ async def health():
         "status": "ok",
         "version": "4.0.0",
         **meta,
-        "azure_in_use": not uses_gemini() and not uses_puter(),
-        "puter_in_use": uses_puter(),
-        "azure_openai_configured": bool(
-            settings.azure_openai_endpoint and settings.azure_openai_api_key
-        ),
+        "provider": "gemini",
         "gemini_configured": bool(settings.gemini_api_key),
-        "azure_openai_deployment": settings.azure_openai_deployment or None,
-        "default_puter_model": settings.puter_model,
         "default_gemini_model": settings.gemini_model,
         "gemini_models": list(GEMINI_MODELS),
         "dataverse_configured": bool(
@@ -517,15 +450,12 @@ async def business_rules_status():
 
 @app.get("/llm/models", tags=["Extraction"])
 async def list_llm_models():
-    """Gemini model ids available for per-request selection (same ids as Puter.js)."""
+    """Gemini model ids available for per-request selection."""
     return {
-        "providers": ["puter", "azure", "gemini"],
-        "default_provider": (settings.llm_provider or "gemini").strip().lower(),
-        "default_puter_model": settings.puter_model,
+        "providers": ["gemini"],
+        "default_provider": "gemini",
         "default_gemini_model": settings.gemini_model,
-        "default_azure_deployment": settings.azure_openai_deployment,
         "gemini_models": list(GEMINI_MODELS),
-        "puter_note": "Puter.js runs in the browser. Use /puter for the default no-key Gemini extraction flow.",
     }
 
 
@@ -538,16 +468,6 @@ class ExtractRequest(BaseModel):
     bl_type: BlTypeQuery = BlTypeQuery.master
     llm_provider: Optional[LlmProviderQuery] = LlmProviderQuery.gemini
     llm_model: Optional[str] = None
-
-
-class PuterFormatRequest(BaseModel):
-    puter_payload: Dict[str, Any]
-    raw_text: Optional[str] = ""
-    bl_type: BlTypeQuery = BlTypeQuery.master
-    post_to_dataverse: bool = True
-    llm_model: Optional[str] = None
-    visual_page_count: Optional[int] = None
-    pdf_page_count: Optional[int] = None
 
 
 class ExtractResponse(BaseModel):
@@ -1285,11 +1205,11 @@ async def extract_file(
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
         LlmProviderQuery.gemini,
-        description="AI backend: gemini (default), puter, or azure",
+        description="AI backend: Gemini API",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
-        description="Gemini model id when llm_provider=gemini (same list as Puter.js free tier)",
+        description="Gemini model id",
     ),
     post_to_dataverse: bool = Form(
         True,
@@ -1306,15 +1226,6 @@ async def extract_file(
 ):
     provider_val = llm_provider.value if llm_provider else None
     model_val = llm_model.value if llm_model else None
-    if normalize_llm_provider(provider_val or settings.llm_provider) == "puter":
-        return ExtractResponse(
-            success=False,
-            error=(
-                "Puter is the default AI extractor and runs in the browser. "
-                "Open /puter to upload the PDF with Puter.js, or submit this "
-                "API request with llm_provider=azure or llm_provider=gemini for server-side extraction."
-            ),
-        )
     try:
         validate_llm_request(provider_val, model_val)
     except ValueError as exc:
@@ -1986,186 +1897,6 @@ def _build_response(
     )
 
 
-def _merge_puter_records_with_deterministic_pdf(
-    records: List[Dict[str, Any]],
-    raw_text: str,
-    extraction_quality: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    deterministic = best_deterministic_parse(raw_text)
-    if not deterministic:
-        return records
-
-    fallback_records = deterministic.reconciliation_records()
-    if not fallback_records:
-        return records
-
-    extraction_quality.update(
-        {
-            "deterministic_parser": deterministic.parser,
-            "deterministic_confidence": deterministic.confidence,
-            "deterministic_record_count": len(fallback_records),
-            "deterministic_layout": deterministic.layout,
-            "deterministic_document_type": deterministic.document_type,
-            "deterministic_reconciled": True,
-        }
-    )
-
-    if not records:
-        return list(fallback_records)
-
-    if len(records) == 1 and len(fallback_records) == 1 and deterministic.layout in {
-        "single_bl",
-        "single_house",
-    }:
-        return [
-            merge_record_fields(
-                records[0],
-                fallback_records[0],
-                prefer_secondary_keys=_PUTER_DETERMINISTIC_FORCE_KEYS,
-            )
-        ]
-
-    return reconcile_record_lists(
-        records,
-        fallback_records,
-        prefer_fallback_keys=_PUTER_DETERMINISTIC_FORCE_KEYS,
-    )
-
-
-@app.get("/puter/config", tags=["Extraction"])
-async def puter_config():
-    """Return the browser-side Puter.js extraction prompt and model list."""
-    from ai_extractor import INVOICE_JSON_SCHEMA, INVOICE_SYSTEM_PROMPT, MULTI_INVOICE_JSON_SCHEMA, MULTI_INVOICE_SYSTEM_PROMPT
-    schema_hint = json.dumps(MULTI_BL_JSON_SCHEMA.get("schema") or MULTI_BL_JSON_SCHEMA)
-    prompt_prefix = (
-        SYSTEM_PROMPT
-        + "\n\nReturn ONLY one valid JSON object matching this schema. "
-        + "No markdown fences, no commentary, no extra text after the JSON:\n"
-        + schema_hint
-        + "\n\nThe attached PDF page images are the authoritative source. "
-        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
-        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
-    )
-
-    inv_schema_hint = json.dumps(INVOICE_JSON_SCHEMA.get("schema") or INVOICE_JSON_SCHEMA)
-    inv_prompt_prefix = (
-        INVOICE_SYSTEM_PROMPT
-        + "\n\nReturn ONLY one valid JSON object matching this schema. "
-        + "No markdown fences, no commentary, no extra text after the JSON:\n"
-        + inv_schema_hint
-        + "\n\nThe attached PDF page images are the authoritative source. "
-        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
-        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
-    )
-
-    multi_inv_schema_hint = json.dumps(MULTI_INVOICE_JSON_SCHEMA.get("schema") or MULTI_INVOICE_JSON_SCHEMA)
-    multi_inv_prompt_prefix = (
-        MULTI_INVOICE_SYSTEM_PROMPT
-        + "\n\nReturn ONLY one valid JSON object matching this schema. "
-        + "No markdown fences, no commentary, no extra text after the JSON:\n"
-        + multi_inv_schema_hint
-        + "\n\nThe attached PDF page images are the authoritative source. "
-        + "Use Gemini vision/OCR to read the layout, tables, field labels, and stamps. "
-        + "The browser-extracted text below is only a backup hint and may be incomplete:\n\n"
-    )
-
-    return {
-        "provider": "puter",
-        "default_model": settings.puter_model,
-        "models": list(GEMINI_MODELS),
-        "prompt_prefix": prompt_prefix,
-        "invoice_prompt_prefix": inv_prompt_prefix,
-        "multi_invoice_prompt_prefix": multi_inv_prompt_prefix,
-        "max_text_chars": settings.gemini_max_input_chars,
-        "max_visual_pages": 8,
-        "pdf_render_scale": 2.0,
-        "pdf_max_canvas_width": 1800,
-        "pdf_image_quality": 0.86,
-    }
-
-
-@app.post("/puter/format", response_model=ExtractResponse, tags=["Extraction"])
-async def puter_format(request: PuterFormatRequest):
-    """Validate Puter.js Gemini JSON, map it to CRM JSON, and optionally post to Dataverse."""
-    try:
-        payload = request.puter_payload or {}
-        raw_text = request.raw_text or ""
-        records = payload.get("records")
-        if not isinstance(records, list):
-            records = [payload] if payload else []
-        records = [dict(rec) for rec in records if isinstance(rec, dict)]
-
-        deterministic_quality: Dict[str, Any] = {}
-        records = _merge_puter_records_with_deterministic_pdf(
-            records,
-            raw_text,
-            deterministic_quality,
-        )
-        if not records:
-            return ExtractResponse(success=False, error="Puter did not return any B/L records.")
-
-        validated_records: List[Dict[str, Any]] = []
-        for rec in records:
-            rec.setdefault("extraction_method", "puter_gemini_browser")
-            validated_records.append(validate_and_correct(rec, raw_text))
-
-        layout = str(payload.get("document_layout") or "").lower()
-        master_values = {
-            str(rec.get("mesco_masterblno") or "").strip().upper()
-            for rec in validated_records
-            if rec.get("mesco_masterblno")
-        }
-        house_count = sum(1 for rec in validated_records if rec.get("mesco_houseblno"))
-        one_master_with_houses = (
-            layout in {"manifest", "master_with_houses", "consolidated_lcl", "multi_house"}
-            or (len(master_values) == 1 and house_count >= 1)
-        )
-
-        extraction_quality = {
-            "source": "puter_js",
-            "llm_provider": "puter",
-            "llm_model": request.llm_model or settings.puter_model,
-            "visual_input": "pdf_page_images",
-            "visual_page_count": request.visual_page_count,
-            "pdf_page_count": request.pdf_page_count,
-            "document_layout": payload.get("document_layout"),
-            "record_count": len(validated_records),
-        }
-        extraction_quality.update(deterministic_quality)
-
-        if len(validated_records) > 1 and not one_master_with_houses:
-            crm_masters = [records_to_master_json([rec]) for rec in validated_records]
-            return _build_response(
-                crm_masters[0],
-                raw_text,
-                extraction_quality,
-                request.post_to_dataverse,
-                False,
-                house_output={"value": []},
-                crm_records=crm_masters,
-                bl_type=request.bl_type,
-            )
-
-        crm_output = records_to_master_json(validated_records)
-        house_output = records_to_house_json(validated_records)
-        return _build_response(
-            crm_output,
-            raw_text,
-            extraction_quality,
-            request.post_to_dataverse,
-            False,
-            house_output,
-            bl_type=request.bl_type,
-        )
-    except Exception as exc:
-        logger.exception("Puter format failed")
-        return ExtractResponse(
-            success=False,
-            error="We could not format the Puter extraction for Dataverse. Please review the extracted JSON and try again.",
-            extraction_quality={"technical_error": str(exc), "llm_provider": "puter"},
-        )
-
-
 @app.post(
     "/test/pdf/batch",
     response_model=BatchPdfTestResponse,
@@ -2244,15 +1975,6 @@ async def test_pdf_batch(
 async def extract_text(request: ExtractRequest):
     provider_val = request.llm_provider.value if request.llm_provider else None
     model_val = (request.llm_model or "").strip() or None
-    if normalize_llm_provider(provider_val or settings.llm_provider) == "puter":
-        return ExtractResponse(
-            success=False,
-            error=(
-                "Puter is the default AI extractor and runs in the browser. "
-                "Open /puter for Puter.js extraction, or set llm_provider=azure/gemini "
-                "for server-side text extraction."
-            ),
-        )
     try:
         validate_llm_request(provider_val, model_val)
     except ValueError as exc:
@@ -2300,9 +2022,7 @@ async def extract_text(request: ExtractRequest):
     description=(
         "Upload a PDF and extract B/L data. Use **bl_type** to post as "
         "**master** (886150001) or **house** (886150002) in Dynamics.\n\n"
-        "**Default AI:** use `/puter` for browser-side Puter.js Gemini extraction "
-        "with no Gemini API key. For server-side API extraction only, set "
-        "`llm_provider=azure` or `llm_provider=gemini` explicitly."
+        "**AI provider:** Gemini API (server-side)."
     ),
     tags=["Extraction"],
 )
@@ -2316,11 +2036,11 @@ async def extract_pdf(
     ),
     llm_provider: Optional[LlmProviderQuery] = Query(
         LlmProviderQuery.gemini,
-        description="AI backend: gemini (default), puter, or azure",
+        description="AI backend: Gemini API",
     ),
     llm_model: Optional[GeminiModelQuery] = Query(
         GeminiModelQuery.gemini_3_pro_preview,
-        description="Gemini model id when llm_provider=gemini (Puter.js-compatible ids)",
+        description="Gemini model id",
     ),
     post_to_dataverse: bool = Query(
         True,
@@ -2353,9 +2073,7 @@ async def extract_pdf(
     summary="Extract from Excel file",
     description=(
         "Upload an Excel file (.xlsx, .xls, .csv). Choose **bl_type** (master or house) in the form.\n\n"
-        "**Default AI:** use `/puter` for browser-side Puter.js Gemini extraction "
-        "with no Gemini API key. For server-side API extraction only, set "
-        "`llm_provider=azure` or `llm_provider=gemini` explicitly."
+        "**AI provider:** Gemini API (server-side)."
     ),
     tags=["Extraction"],
 )
@@ -2368,7 +2086,7 @@ async def extract_excel(
     ),
     llm_provider: Optional[LlmProviderQuery] = Form(
         LlmProviderQuery.gemini,
-        description="AI backend: gemini (default), puter, or azure",
+        description="AI backend: Gemini API",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         GeminiModelQuery.gemini_3_pro_preview,
@@ -3181,25 +2899,18 @@ async def extract_invoice(
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
         LlmProviderQuery.gemini,
-        description="AI backend: gemini (default), puter, or azure",
+        description="AI backend: Gemini API",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
         description="Gemini model id when llm_provider=gemini",
     ),
-    extracted_data_json: Optional[str] = Form(
-        None,
-        description="Optional pre-extracted JSON data (e.g. from Puter browser). If provided, LLM extraction is skipped."
-    ),
 ):
     provider_val = llm_provider.value if llm_provider else None
     model_val = llm_model.value if llm_model else None
     try:
-        import json
         from ai_extractor import extract_invoice_with_llm, normalize_invoice_result
-        
-        if extracted_data_json and extracted_data_json.strip() == "string":
-            extracted_data_json = None
+
         if operation_id and operation_id.strip() == "string":
             operation_id = None
         if current_bl and current_bl.strip() == "string":
@@ -3216,27 +2927,15 @@ async def extract_invoice(
             # Consignee) and operation-scoped table filtering.
             extracted = extract_document_text_professionally(file_bytes, filename)
             raw_text = extracted.get("text", "")
-            if not raw_text.strip() and not extracted_data_json:
+            if not raw_text.strip():
                 return InvoiceExtractResponse(success=False, error="No text extracted from file.")
         else:
-            raw_text = ""
-            if not extracted_data_json:
-                return InvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
+            return InvoiceExtractResponse(success=False, error="No invoice file provided.")
         
-        if extracted_data_json:
-            try:
-                extracted_data = json.loads(extracted_data_json)
-            except json.JSONDecodeError:
-                return InvoiceExtractResponse(
-                    success=False, 
-                    error=f"Failed to parse AI response. Raw response: {extracted_data_json[:500]}"
-                )
-        else:
-            with llm_request_overrides(provider_val, model_val):
-                extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
+        with llm_request_overrides(provider_val, model_val):
+            extracted_data = extract_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
 
-        # Idempotent for server-side LLM output and essential for browser-side
-        # extraction JSON, which previously bypassed all deterministic repairs.
+        # Normalize the server-side Gemini response before lookup mapping.
         extracted_data = normalize_invoice_result(
             extracted_data,
             raw_text,
@@ -3673,31 +3372,24 @@ async def extract_invoice_multi(
     post_to_dataverse: bool = Form(False, description="Whether to post extracted items to Dynamics Dataverse"),
     llm_provider: Optional[LlmProviderQuery] = Form(
         LlmProviderQuery.gemini,
-        description="AI backend: gemini (default), puter, or azure",
+        description="AI backend: Gemini API",
     ),
     llm_model: Optional[GeminiModelQuery] = Form(
         None,
         description="Gemini model id when llm_provider=gemini",
-    ),
-    extracted_data_json: Optional[str] = Form(
-        None,
-        description="Optional pre-extracted JSON data (e.g. from Puter browser). If provided, LLM extraction is skipped."
     ),
 ):
     """Extract a multi-HBL invoice/debit note and post cost lines per HBL group."""
     provider_val = llm_provider.value if llm_provider else None
     model_val = llm_model.value if llm_model else None
     try:
-        import json
         from ai_extractor import extract_multi_invoice_with_llm
 
-        if extracted_data_json and extracted_data_json.strip() == "string":
-            extracted_data_json = None
         if operation_id and operation_id.strip() == "string":
             operation_id = None
 
         file_bytes = None
-        filename = "browser_extracted.pdf"
+        filename = "uploaded_invoice.pdf"
         extracted_data = None
         is_excel_invoice = False
         if file:
@@ -3705,30 +3397,18 @@ async def extract_invoice_multi(
             filename = file.filename
 
             is_excel_invoice = str(filename or "").lower().endswith((".xls", ".xlsx"))
-            if is_excel_invoice and not extracted_data_json:
+            if is_excel_invoice:
                 extracted_data = _extract_wecan_excel_invoice(file_bytes, filename)
                 raw_text = ""
-            elif not extracted_data_json:
+            else:
                 extracted = extract_document_text_professionally(file_bytes, filename)
                 raw_text = extracted.get("text", "")
                 if not raw_text.strip():
                     return MultiInvoiceExtractResponse(success=False, error="No text extracted from file.")
-            else:
-                raw_text = ""
         else:
-            raw_text = ""
-            if not extracted_data_json:
-                return MultiInvoiceExtractResponse(success=False, error="No file and no extracted data provided.")
+            return MultiInvoiceExtractResponse(success=False, error="No invoice file provided.")
 
-        if extracted_data_json:
-            try:
-                extracted_data = json.loads(extracted_data_json)
-            except json.JSONDecodeError:
-                return MultiInvoiceExtractResponse(
-                    success=False, 
-                    error=f"Failed to parse AI response. Raw response: {extracted_data_json[:500]}"
-                )
-        elif extracted_data is None:
+        if extracted_data is None:
             with llm_request_overrides(provider_val, model_val):
                 extracted_data = extract_multi_invoice_with_llm(raw_text, file_bytes=file_bytes, filename=filename)
 
@@ -4315,7 +3995,6 @@ async def extract_invoice_excel(
         post_to_dataverse=post_to_dataverse,
         llm_provider=LlmProviderQuery.gemini,
         llm_model=None,
-        extracted_data_json=None,
     )
 
 

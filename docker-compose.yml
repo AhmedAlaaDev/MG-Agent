@@ -15,11 +15,9 @@ services:
       - .env
     environment:
       # ── Azure OpenAI (required) ───────────────────────────────────────────
-      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
-      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
-      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
-      AZURE_OPENAI_PROJECT_URL: ${AZURE_OPENAI_PROJECT_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+      LLM_PROVIDER: gemini
 
       # ── OCR (Linux paths inside container) ────────────────────────────────
       OCR_DPI: ${OCR_DPI:-300}

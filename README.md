@@ -5,7 +5,7 @@ FastAPI service that performs:
 1. PDF upload
 2. PDF page rendering
 3. Tesseract OCR
-4. Azure OpenAI intelligent extraction
+4. Gemini API intelligent extraction
 5. Validation and correction of common B/L mistakes
 6. JSON response suitable for Dynamics/Dataverse mapping
 
@@ -30,10 +30,8 @@ copy .env.example .env
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AZURE_OPENAI_ENDPOINT` | Yes | `https://houseblreader-resource.openai.azure.com/` |
-| `AZURE_OPENAI_API_KEY` | Yes | Azure OpenAI API key |
-| `AZURE_OPENAI_API_VERSION` | Yes | e.g. `2024-08-01-preview` |
-| `AZURE_OPENAI_DEPLOYMENT` | Yes | e.g. `gpt-4o` |
+| `GEMINI_API_KEY` | Yes | Google Gemini API key |
+| `GEMINI_MODEL` | No | Gemini model, e.g. `gemini-3.5-flash` |
 | `TENANT_ID` | For Dataverse upload | Azure AD tenant |
 | `CLIENT_ID` | For Dataverse upload | App registration client ID |
 | `CLIENT_SECRET` | For Dataverse upload | App secret |
@@ -139,10 +137,8 @@ curl -X POST http://localhost:8000/extract/text \
 Use `.env`; never hard-code keys in the code.
 
 ```env
-AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
-AZURE_OPENAI_API_KEY=YOUR_KEY_HERE
-AZURE_OPENAI_API_VERSION=2024-08-01-preview
-AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+GEMINI_MODEL=gemini-3.5-flash
 OCR_DPI=300
 TESSERACT_LANG=eng
 RETURN_RAW_TEXT=false

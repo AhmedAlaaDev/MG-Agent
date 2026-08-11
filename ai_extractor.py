@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from config import normalize_azure_openai_endpoint, settings
-from llm_context import effective_llm_model, effective_llm_provider, uses_gemini, uses_puter
+from config import settings
+from llm_context import effective_llm_model, effective_llm_provider
 from pdf_extractor import normalize_text
 
 def _bl_record_properties() -> Dict[str, Any]:
@@ -387,31 +387,6 @@ If the page is not a B/L, return document_layout unknown and a single record wit
 """
 
 
-class AzureClient:
-    _client = None
-
-    @classmethod
-    def get_client(cls):
-        if cls._client is not None:
-            return cls._client
-
-        try:
-            from openai import AzureOpenAI as OpenAIClient
-        except Exception:
-            raise ImportError("Azure OpenAI SDK is not available. Install: pip install openai")
-
-        if not settings.azure_openai_endpoint or not settings.azure_openai_api_key:
-            raise ValueError("Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY.")
-
-        endpoint = normalize_azure_openai_endpoint(settings.azure_openai_endpoint)
-        cls._client = OpenAIClient(
-            azure_endpoint=endpoint,
-            api_key=settings.azure_openai_api_key,
-            api_version=settings.azure_openai_api_version,
-        )
-        return cls._client
-
-
 class GeminiClient:
     _client = None
 
@@ -543,22 +518,6 @@ def _merge_llm_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-def _call_azure_json(system: str, user: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-    client = AzureClient.get_client()
-    response = client.chat.completions.create(
-        model=effective_llm_model(),
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_schema", "json_schema": schema},
-    )
-    content = response.choices[0].message.content or ""
-    payload = _parse_json_response(content, "Azure OpenAI")
-    return _attach_llm_usage(payload, response, "azure")
-
-
 def _gemini_file_part(file_bytes: bytes, mime_type: str):
     """Return a Gemini content Part for a file, inline for small files, Files API for large."""
     from google.genai import types
@@ -590,7 +549,7 @@ def _call_gemini_json(
     client = GeminiClient.get_client()
     inner_schema = schema.get("schema") or schema
     # Gemini Developer API cannot use our OpenAI-style schema (nullable unions,
-    # additionalProperties). JSON mode + schema in the prompt matches Azure output.
+    # additionalProperties). JSON mode + schema in the prompt keeps the response stable.
     schema_hint = json.dumps(inner_schema, indent=2)
     combined_system = (
         f"{system}\n\n"
@@ -690,56 +649,22 @@ def _call_llm_json(
     filename: Optional[str] = None,
 ) -> Dict[str, Any]:
     provider = effective_llm_provider()
-    
-    # Auto fallback logic if the requested provider is not configured/supported on the server
-    if provider == "puter":
-        if (settings.gemini_api_key or "").strip():
-            provider = "gemini"
-            from llm_context import _llm_provider, _llm_model
-            _llm_provider.set("gemini")
-            _llm_model.set(settings.gemini_model)
-        elif (settings.azure_openai_api_key or "").strip():
-            provider = "azure"
-            from llm_context import _llm_provider, _llm_model
-            _llm_provider.set("azure")
-            _llm_model.set(settings.azure_openai_deployment)
-        else:
-            raise RuntimeError(
-                "Puter is a browser-side AI provider. Open /puter and use the "
-                "Puter.js extractor, or configure AZURE_OPENAI_API_KEY/GEMINI_API_KEY "
-                "in .env for server-side API extraction."
-            )
-            
-    if provider == "gemini" and not (settings.gemini_api_key or "").strip():
-        if (settings.azure_openai_api_key or "").strip():
-            logger.warning("Gemini is not configured. Falling back to Azure OpenAI.")
-            provider = "azure"
-            from llm_context import _llm_provider, _llm_model
-            _llm_provider.set("azure")
-            _llm_model.set(settings.azure_openai_deployment)
-        else:
-            raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
-            
-    if provider == "gemini":
-        return _call_gemini_json(
-            system, user, schema, file_bytes=file_bytes, filename=filename
-        )
-    return _call_azure_json(system, user, schema)
+    if provider != "gemini":
+        raise RuntimeError("Only the Gemini API is supported for document extraction.")
+    if not (settings.gemini_api_key or "").strip():
+        raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
+    return _call_gemini_json(
+        system, user, schema, file_bytes=file_bytes, filename=filename
+    )
 
 
 def _llm_label() -> str:
-    if uses_puter():
-        return "Puter.js Gemini"
-    return "Gemini" if uses_gemini() else "Azure OpenAI"
+    return "Gemini"
 
 
 def _input_char_budget() -> int:
-    """Per-call input budget; Gemini's large context allows far more than Azure."""
-    if uses_gemini():
-        return max(settings.gemini_max_input_chars, settings.max_input_chars)
-    if uses_puter():
-        return max(settings.gemini_max_input_chars, settings.max_input_chars)
-    return settings.max_input_chars
+    """Per-call input budget for Gemini's large context window."""
+    return max(settings.gemini_max_input_chars, settings.max_input_chars)
 
 
 _PAGE_MARKER_RE = re.compile(r"(?=^---\s*PAGE\s+\d+\s*---)", re.I | re.M)
@@ -851,7 +776,7 @@ def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def extract_records_with_azure_openai(
+def extract_records_with_gemini(
     extracted_text: str,
     *,
     page_scope: bool = False,
@@ -867,7 +792,7 @@ def extract_records_with_azure_openai(
     supplied and the provider is Gemini, the original PDF or spreadsheet is sent
     natively for true layout/table understanding.
     """
-    # Backward-compatible alias used by older callers.
+    # Backward-compatible argument alias used by older callers.
     if file_bytes is None and pdf_bytes is not None:
         file_bytes = pdf_bytes
 
@@ -925,19 +850,17 @@ def extract_records_with_azure_openai(
     return merged
 
 
+# Compatibility alias for older imports. The implementation above uses Gemini only.
+extract_records_with_azure_openai = extract_records_with_gemini
+
+
 def _llm_label() -> str:
-    if uses_puter():
-        return "Puter.js Gemini"
-    return "Gemini" if uses_gemini() else "Azure OpenAI"
+    return "Gemini"
 
 
 def _input_char_budget() -> int:
-    """Per-call input budget; Gemini's large context allows far more than Azure."""
-    if uses_gemini():
-        return max(settings.gemini_max_input_chars, settings.max_input_chars)
-    if uses_puter():
-        return max(settings.gemini_max_input_chars, settings.max_input_chars)
-    return settings.max_input_chars
+    """Per-call input budget for Gemini's large context window."""
+    return max(settings.gemini_max_input_chars, settings.max_input_chars)
 
 
 _PAGE_MARKER_RE = re.compile(r"(?=^---\s*PAGE\s+\d+\s*---)", re.I | re.M)
@@ -1050,9 +973,9 @@ def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 
-def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
-    """Backward-compatible: returns a single flat B/L dict (first record)."""
-    payload = extract_records_with_azure_openai(extracted_text)
+def extract_with_gemini(extracted_text: str) -> Dict[str, Any]:
+    """Return a single flat B/L dict (first Gemini record)."""
+    payload = extract_records_with_gemini(extracted_text)
     records = payload.get("records") or []
     if not records:
         raise ValueError(f"{_llm_label()} returned no B/L records.")
@@ -1064,6 +987,10 @@ def extract_with_azure_openai(extracted_text: str) -> Dict[str, Any]:
         first["confidence"] = {**(first.get("confidence") or {}), **payload["confidence"]}
     first["_document_layout"] = payload.get("document_layout")
     return first
+
+
+# Compatibility alias for older imports. No Azure client is used.
+extract_with_azure_openai = extract_with_gemini
 
 INVOICE_JSON_SCHEMA = {
     "name": "invoice_extraction",
