@@ -2520,6 +2520,15 @@ def _clean_invoice_bl(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
+def _invoice_missing_bl_error(bl_number: Any, *, kind: str = "B/L") -> str:
+    """Explain that invoice posting never creates a missing operation."""
+    label = str(bl_number or "").strip() or "unknown"
+    return (
+        f"{kind} {label} was not found in Dynamics; "
+        "invoice lines were not posted and no operation was created"
+    )
+
+
 def _parse_invoice_charge_rows(raw_text: str) -> List[Dict[str, Any]]:
     """Parse table-style invoice charge rows that include an HBL/CNT column."""
     rows: List[Dict[str, Any]] = []
@@ -3035,70 +3044,8 @@ async def extract_invoice(
             except Exception as search_err:
                 logger.warning("Failed to lookup operation in Dataverse: %s", search_err)
 
-        # Auto-create Operation structure if not found and post_to_dataverse is True
-        if not resolved_op_id and post_to_dataverse and client and (extracted_mbl or extracted_hbl):
-            try:
-                master_id = None
-                
-                # 1. Resolve or create Master Operation if MBL is present
-                if extracted_mbl:
-                    # Search for existing Master Operation
-                    mbl_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_xollsp_TariffQuote&$filter=mesco_masterblno eq '{extracted_mbl}' and mesco_bltype eq 886150001&$top=1"
-                    mbl_resp = client.get(mbl_url)
-                    if mbl_resp.status_code == 200:
-                        mbl_results = mbl_resp.json().get("value", [])
-                        if mbl_results:
-                            master_id = mbl_results[0]["mesco_operationid"]
-                            tariff_quote_id = mbl_results[0].get("_mesco_xollsp_tariffquote_value")
-                    
-                    if not master_id:
-                        # Create Master Operation
-                        op_fields = {
-                            "mesco_code": extracted_mbl,
-                            "mesco_masterblno": extracted_mbl,
-                            "mesco_bltype": 886150001,  # Master B/L
-                        }
-                        master_id = _create_entity(client, "mesco_operations", op_fields)
-                        logger.info("Auto-created Master Operation record: %s for MBL %s", master_id, extracted_mbl)
-                
-                # 2. Resolve or create House Operation if HBL is present
-                if extracted_hbl:
-                    house_id = None
-                    hbl_url = f"mesco_operations?$select=mesco_operationid,mesco_code,mesco_xollsp_TariffQuote&$filter=mesco_masterblno eq '{extracted_hbl}' and mesco_bltype eq 886150002&$top=1"
-                    hbl_resp = client.get(hbl_url)
-                    if hbl_resp.status_code == 200:
-                        hbl_results = hbl_resp.json().get("value", [])
-                        if hbl_results:
-                            house_id = hbl_results[0]["mesco_operationid"]
-                            tariff_quote_id = hbl_results[0].get("_mesco_xollsp_tariffquote_value")
-                    
-                    if not house_id:
-                        # Create House Operation
-                        op_fields = {
-                            "mesco_code": extracted_hbl,
-                            "mesco_masterblno": extracted_hbl,
-                            "mesco_bltype": 886150002,  # House B/L
-                        }
-                        if master_id:
-                            op_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({master_id})"
-                        house_id = _create_entity(client, "mesco_operations", op_fields)
-                        logger.info("Auto-created House Operation record: %s for HBL %s", house_id, extracted_hbl)
-                    
-                    resolved_op_id = house_id
-                    resolved_op_code = extracted_hbl
-                    resolved_op_bl = extracted_hbl
-                    is_master = False
-                    op_bl_number = extracted_hbl
-                else:
-                    # No HBL, use the Master Operation
-                    resolved_op_id = master_id
-                    resolved_op_code = extracted_mbl
-                    resolved_op_bl = extracted_mbl
-                    is_master = True
-                    op_bl_number = extracted_mbl
-                    
-            except Exception as create_err:
-                logger.exception("Failed to auto-create Operation structure: %s", create_err)
+        # Invoice posting never creates Master/House operations. If the B/L is
+        # not already in Dynamics, skip posting rather than inventing a record.
 
         # Fetch operation details if not resolved yet (e.g. if operation_id was passed explicitly)
         if resolved_op_id and client and not resolved_op_code:
@@ -3149,6 +3096,14 @@ async def extract_invoice(
         
         dataverse_results = []
         dataverse_error = None
+
+        if post_to_dataverse and not resolved_op_id:
+            if client_init_error:
+                dataverse_error = f"Dynamics client is unavailable: {client_init_error}"
+            else:
+                dataverse_error = _invoice_missing_bl_error(
+                    extracted_hbl or extracted_mbl or current_bl
+                )
         
         if post_to_dataverse and resolved_op_id and client:
             try:
@@ -3526,8 +3481,8 @@ async def extract_invoice_multi(
                 except Exception as e:
                     logger.warning("Failed to lookup fallback operation by MBL: %s", e)
 
-        # Auto-create the Master only after every Excel lookup has been
-        # validated.  This keeps a failed/ambiguous mapping fully atomic.
+        # Invoice posting never creates a Master operation. Existing masters
+        # are still refreshed below; missing masters are reported and skipped.
         if (
             not fallback_op_id
             and post_to_dataverse
@@ -3535,24 +3490,13 @@ async def extract_invoice_multi(
             and client
             and master_bl_number
         ):
-            try:
-                op_fields = (
-                    dict(mapping_validation["master_operation"]["fields"])
-                    if is_excel_invoice and mapping_validation
-                    else {
-                        "mesco_code": master_bl_number,
-                        "mesco_masterblno": master_bl_number,
-                        "mesco_bltype": 886150001,
-                    }
-                )
-                fallback_op_id = _create_entity(client, "mesco_operations", op_fields)
-                fallback_op_code = master_bl_number
-                fallback_is_master = True
-                logger.info("Auto-created fallback Master Operation record: %s for B/L %s", fallback_op_id, master_bl_number)
-            except Exception as create_err:
-                master_post_error = f"Master Operation creation failed: {create_err}"
-                strict_posting_ready = False
-                logger.exception("Failed to auto-create fallback Master Operation record: %s", create_err)
+            master_post_error = _invoice_missing_bl_error(
+                master_bl_number, kind="Master B/L"
+            )
+            logger.info(
+                "Skipping Master Operation creation for missing B/L %s",
+                master_bl_number,
+            )
 
         # Existing master records retain their operational code (for example
         # O-10212); all invoice-derived fields and lookup binds are refreshed.
@@ -3764,36 +3708,9 @@ async def extract_invoice_multi(
                     gr.errors.append(f"Operation lookup failed: {e}")
                     logger.warning("Failed to resolve operation for HBL %s: %s", hbl, e)
 
-            # Auto-create House Operation if not found and post_to_dataverse is True
-            if not group_op_id and post_to_dataverse and strict_posting_ready and client and hbl:
-                try:
-                    if is_excel_invoice and group_mapping:
-                        group_fields = dict(group_mapping["fields"])
-                    else:
-                        group_fields = {
-                            "mesco_code": hbl,
-                            "mesco_masterblno": hbl,
-                            "mesco_bltype": 886150002,
-                        }
-                        if group.get("cbm") is not None:
-                            group_fields["cr401_totalvolume"] = float(group["cbm"])
-                        if group.get("kgs") is not None:
-                            group_fields["cr401_totalgrossweight"] = float(group["kgs"])
-                        if group.get("packages") is not None:
-                            group_fields["cr401_totalpackages"] = float(group["packages"])
-
-                    if fallback_op_id:
-                        group_fields["mesco_Operation@odata.bind"] = f"/mesco_operations({fallback_op_id})"
-                    group_op_id = _create_entity(client, "mesco_operations", group_fields)
-                    group_op_code = hbl
-                    group_is_master = False
-                    logger.info("Auto-created House Operation record: %s for HBL %s", group_op_id, hbl)
-                except Exception as create_err:
-                    group_operation_ready = False
-                    gr.errors.append(f"Operation creation failed: {create_err}")
-                    logger.exception("Failed to auto-create House Operation record: %s", create_err)
-
-            # Fallback to MBL/provided operation
+            # Never create a House operation from an invoice. Post only when
+            # that HBL already exists; PDF invoices may still land on an
+            # already-resolved master as a fallback.
             if not group_op_id and not (is_excel_invoice and post_to_dataverse):
                 group_op_id = fallback_op_id
                 group_op_code = fallback_op_code
@@ -3806,7 +3723,7 @@ async def extract_invoice_multi(
                 gr.dynamics_url = f"{settings.base_url}/main.aspx?pagetype=entityrecord&etn=mesco_operation&id={group_op_id}"
             elif post_to_dataverse and strict_posting_ready:
                 group_operation_ready = False
-                gr.errors.append("Operation could not be resolved or created")
+                gr.errors.append(_invoice_missing_bl_error(hbl, kind="House B/L"))
 
             # Post cost lines for this group
             if post_to_dataverse and strict_posting_ready and group_operation_ready and group_op_id and client:
@@ -3823,7 +3740,7 @@ async def extract_invoice_multi(
                     except Exception as e:
                         gr.errors.append(f"Container creation failed: {e}")
 
-                if is_excel_invoice and not group_is_master:
+                if is_excel_invoice and not group_is_master and fallback_op_id:
                     try:
                         _ensure_invoice_house_cargo(
                             client,
@@ -3939,6 +3856,22 @@ async def extract_invoice_multi(
                         gr.errors.append(f"POST {desc}: {e}")
 
             group_results.append(gr)
+
+        skipped_hbls = [
+            str(gr.house_bl_number)
+            for gr in group_results
+            if gr.house_bl_number
+            and any("was not found in Dynamics" in err for err in gr.errors)
+        ]
+        if skipped_hbls:
+            skipped_msg = (
+                "Skipped HBL(s) with no existing operation: "
+                + ", ".join(skipped_hbls)
+                + ". No operations were created."
+            )
+            dataverse_error = (
+                f"{dataverse_error}; {skipped_msg}" if dataverse_error else skipped_msg
+            )
 
         master_dyn_url = None
         if fallback_op_id:

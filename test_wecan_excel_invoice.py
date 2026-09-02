@@ -361,3 +361,150 @@ def test_excel_posting_is_atomic_when_required_lookup_is_missing() -> None:
     assert body["dataverse_error"].startswith("Posting blocked")
     assert fake_client.posts == []
     assert fake_client.patches == []
+
+
+class _MissingOperationsClient(_FakeDataverseClient):
+    def get(self, url: str):
+        if url.startswith("mesco_operations") or "mesco_masterblno eq '" in url:
+            return _FakeResponse(body={"value": []})
+        return super().get(url)
+
+    def post(self, entity: str, json):
+        if entity == "mesco_operations":
+            raise AssertionError("Invoice posting must not create operations")
+        return super().post(entity, json)
+
+
+class _PartialOperationsClient(_FakeDataverseClient):
+    existing_hbl = "WYSE6050123"
+
+    def get(self, url: str):
+        if "mesco_masterblno eq 'COSU6501303560'" in url and "mesco_bltype eq 886150001" in url:
+            return super().get(url)
+        if f"mesco_masterblno eq '{self.existing_hbl}'" in url:
+            return super().get(url)
+        if url.startswith("mesco_operations") or "mesco_masterblno eq '" in url:
+            return _FakeResponse(body={"value": []})
+        return super().get(url)
+
+    def post(self, entity: str, json):
+        if entity == "mesco_operations":
+            raise AssertionError("Invoice posting must not create operations")
+        return super().post(entity, json)
+
+
+def test_excel_posting_does_not_create_missing_operations() -> None:
+    source = _fixture_path()
+    fake_client = _MissingOperationsClient()
+
+    with patch("main.DataverseClientService.get_instance", return_value=fake_client):
+        with source.open("rb") as stream:
+            response = TestClient(app).post(
+                "/extract/invoice/excel",
+                files={"file": (source.name, stream, "application/vnd.ms-excel")},
+                data={"post_to_dataverse": "true"},
+            )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["mapping_validation"]["ready_to_post"] is True
+    assert body["total_posted"] == 0
+    assert body["master_operation_id"] is None
+    assert "Master B/L COSU6501303560 was not found in Dynamics" in body["dataverse_error"]
+    assert "No operations were created" in body["dataverse_error"]
+    assert fake_client.posts == []
+    assert fake_client.patches == []
+    assert body["groups"]
+    assert all(
+        any("was not found in Dynamics" in error for error in group["errors"])
+        for group in body["groups"]
+    )
+
+
+def test_excel_posting_skips_missing_houses_and_posts_existing() -> None:
+    source = _fixture_path()
+    fake_client = _PartialOperationsClient()
+
+    with (
+        patch("main.DataverseClientService.get_instance", return_value=fake_client),
+        patch("main._ensure_invoice_container", return_value={
+            "id": "00000000-0000-0000-0000-000000000004",
+            "number": "CSGU7177299",
+            "action": "reused",
+        }),
+        patch(
+            "main._ensure_invoice_house_cargo",
+            return_value="00000000-0000-0000-5000-000000000001",
+        ),
+    ):
+        with source.open("rb") as stream:
+            response = TestClient(app).post(
+                "/extract/invoice/excel",
+                files={"file": (source.name, stream, "application/vnd.ms-excel")},
+                data={"post_to_dataverse": "true"},
+            )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["master_operation_id"] == "00000000-0000-0000-0000-000000000003"
+
+    existing = next(
+        group for group in body["groups"]
+        if group["house_bl_number"] == _PartialOperationsClient.existing_hbl
+    )
+    missing = [
+        group for group in body["groups"]
+        if group["house_bl_number"] != _PartialOperationsClient.existing_hbl
+    ]
+    assert existing["posted_count"] == existing["line_items_count"]
+    assert existing["posted_count"] > 0
+    assert body["total_posted"] == existing["posted_count"]
+    assert missing
+    assert all(group["posted_count"] == 0 for group in missing)
+    assert all(
+        any("was not found in Dynamics" in error for error in group["errors"])
+        for group in missing
+    )
+    assert "No operations were created" in body["dataverse_error"]
+    assert fake_client.posts
+    assert all("mesco_Operation@odata.bind" in post for post in fake_client.posts)
+
+
+def test_single_invoice_does_not_create_missing_operation() -> None:
+    extracted = {
+        "vendor_name": "We-Can International Logistics",
+        "vendor_invoice_number": "INV-1",
+        "master_bl_number": "MBLMISSING",
+        "house_bl_number": "HBLMISSING",
+        "currency": "USD",
+        "line_items": [{
+            "service_description": "THC",
+            "quantity": 1,
+            "unit_price": 10,
+            "total_amount": 10,
+        }],
+    }
+    fake_client = _MissingOperationsClient()
+
+    with (
+        patch("main.DataverseClientService.get_instance", return_value=fake_client),
+        patch("main.extract_document_text_professionally", return_value={"text": "invoice"}),
+        patch("ai_extractor.extract_invoice_with_llm", return_value=extracted),
+        patch("ai_extractor.normalize_invoice_result", return_value=extracted),
+    ):
+        response = TestClient(app).post(
+            "/extract/invoice",
+            files={"file": ("inv.pdf", b"%PDF-1.4 fake", "application/pdf")},
+            data={"post_to_dataverse": "true"},
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["resolved_operation_id"] is None
+    assert "HBLMISSING was not found in Dynamics" in body["dataverse_error"]
+    assert "no operation was created" in body["dataverse_error"]
+    assert fake_client.posts == []
+    assert fake_client.patches == []
