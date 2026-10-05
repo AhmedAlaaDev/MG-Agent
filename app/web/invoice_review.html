@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice review | MESCO</title>
+  <style>
+    :root { color-scheme: light; --ink:#172b4d; --muted:#5e6c84; --line:#dfe3e8; --paper:#fff; --canvas:#f4f6f8; --blue:#0759a5; --green:#16794b; --red:#b42318; --amber:#8a4b08; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI",Arial,sans-serif; }
+    .wrap { width:min(1100px, calc(100% - 32px)); margin:28px auto 56px; }
+    header { margin-bottom:20px; }
+    h1 { margin:0 0 4px; font-size:28px; }
+    h2 { margin:0 0 14px; font-size:20px; }
+    h3 { margin:18px 0 8px; font-size:16px; }
+    p { margin:6px 0 12px; color:var(--muted); }
+    a { color:var(--blue); }
+    .card { margin:16px 0; padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 8px #172b4d0b; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    label { display:block; margin-bottom:6px; color:var(--ink); font-weight:600; }
+    input[type=file], input[type=text], textarea { width:100%; padding:10px 12px; border:1px solid #b8c2cc; border-radius:7px; background:#fff; color:var(--ink); font:inherit; }
+    input[type=file] { padding:9px; }
+    textarea { min-height:330px; resize:vertical; font:13px/1.45 Consolas,"Courier New",monospace; }
+    .hint { margin-top:5px; font-size:13px; }
+    .actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:16px; }
+    button { border:0; border-radius:7px; padding:10px 16px; color:#fff; background:var(--blue); font:600 15px "Segoe UI",Arial,sans-serif; cursor:pointer; }
+    button.secondary { color:var(--ink); background:#e9edf2; }
+    button.post { background:#8d342c; }
+    button:disabled { cursor:not-allowed; opacity:.55; }
+    .status { display:none; margin-top:14px; padding:11px 13px; border-radius:7px; white-space:pre-wrap; }
+    .status.info { display:block; background:#eaf2fb; color:#174c7e; }
+    .status.success { display:block; background:#e8f5ee; color:var(--green); }
+    .status.error { display:block; background:#fff0ef; color:var(--red); }
+    .status.warning { display:block; background:#fff5e6; color:var(--amber); }
+    .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:12px 0 18px; }
+    .stat { padding:12px; background:#f4f7fa; border-radius:8px; }
+    .stat small { display:block; color:var(--muted); }
+    .stat strong { overflow-wrap:anywhere; }
+    .group { margin-top:14px; padding:15px; border:1px solid var(--line); border-radius:9px; }
+    .group-head { display:flex; justify-content:space-between; gap:12px; align-items:start; }
+    .group-head h3 { margin:0; }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; font-size:14px; }
+    th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; white-space:nowrap; }
+    td.number, th.number { text-align:right; white-space:nowrap; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; background:#edf0f3; color:#344563; font-size:12px; font-weight:700; }
+    .badge.good { background:#e8f5ee; color:var(--green); }
+    .badge.bad { background:#fff0ef; color:var(--red); }
+    .check { display:flex; align-items:flex-start; gap:9px; margin-top:16px; font-weight:500; }
+    .check input { margin-top:5px; }
+    details { margin-top:14px; }
+    summary { cursor:pointer; color:var(--blue); font-weight:600; }
+    .empty { padding:20px; text-align:center; color:var(--muted); }
+    @media (max-width:700px) { .grid { grid-template-columns:1fr; } .card { padding:16px; } .group-head { display:block; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Invoice upload and review</h1>
+      <p>Start with a dry run. Review the extracted invoice and mappings before choosing whether to post cost lines to Dynamics.</p>
+      <a href="/">Back to uploader home</a> · <a href="/tariffs/test">Tariff calculator</a> · <a href="/docs">API docs</a>
+    </header>
+
+    <section class="card" aria-labelledby="uploadTitle">
+      <h2 id="uploadTitle">1. Upload an invoice</h2>
+      <div class="grid">
+        <div>
+          <label for="tariffVendor">Tariff vendor</label>
+          <select id="tariffVendor"><option value="">Loading vendors from Dataverse…</option></select>
+          <p class="hint">Choose the vendor first. The current linked tariff card and charge rates will load before invoice review.</p>
+        </div>
+        <div>
+          <label for="tariffScheme">Tariff to apply</label>
+          <select id="tariffScheme" disabled><option value="">Select a vendor first</option></select>
+        </div>
+        <div>
+          <label for="invoiceFile">Invoice or debit note</label>
+          <input id="invoiceFile" type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.xls,.xlsx,application/pdf,image/*">
+          <p class="hint">PDF and image files use invoice extraction. XLS/XLSX files use the supported deterministic workbook parser.</p>
+        </div>
+        <div>
+          <label for="operationId">Operation ID override (optional)</label>
+          <input id="operationId" type="text" autocomplete="off" placeholder="Use only when B/L matching needs an override">
+          <p class="hint">The service also tries to resolve the operation from the invoice B/L.</p>
+        </div>
+      </div>
+      <div id="selectedTariff" class="group" hidden></div>
+      <div class="actions">
+        <button id="dryRunButton" type="button" disabled>Run dry review</button>
+        <button id="resetButton" type="button" class="secondary">Clear</button>
+      </div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="reviewSection" class="card" hidden aria-labelledby="reviewTitle">
+      <h2 id="reviewTitle">2. Review extracted invoice</h2>
+      <div id="invoiceSummary" class="summary"></div>
+      <div id="groupResults"></div>
+      <div id="mappingResults"></div>
+
+      <details>
+        <summary>Review or correct extracted data</summary>
+        <p class="hint">Changes here are sent as the reviewed payload. Keep the JSON valid; the review summary above reflects the original dry-run response.</p>
+        <label for="reviewedPayload">Reviewed invoice data</label>
+        <textarea id="reviewedPayload" spellcheck="false" aria-label="Reviewed invoice data JSON"></textarea>
+      </details>
+
+      <label class="check"><input id="confirmReview" type="checkbox"><span>I reviewed the invoice number, B/L groups, charge lines, currency, and Dynamics mapping results.</span></label>
+      <div class="actions">
+        <button id="postButton" class="post" type="button" disabled>Post reviewed invoice to Dynamics</button>
+      </div>
+      <p class="hint">Posting sends invoice cost lines through the existing Dynamics flow. It can create or update records according to the service's invoice matching rules.</p>
+    </section>
+
+    <section id="postResults" class="card" hidden aria-labelledby="postTitle">
+      <h2 id="postTitle">3. Posting result</h2>
+      <div id="postSummary"></div>
+    </section>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('invoiceFile');
+    const operationInput = document.getElementById('operationId');
+    const dryRunButton = document.getElementById('dryRunButton');
+    const postButton = document.getElementById('postButton');
+    const confirmReview = document.getElementById('confirmReview');
+    const statusEl = document.getElementById('status');
+    const reviewSection = document.getElementById('reviewSection');
+    const postResults = document.getElementById('postResults');
+    const payloadEditor = document.getElementById('reviewedPayload');
+    let uploadedFile = null;
+    let currentPayload = null;
+    let tariffVendor = null;
+    let tariffSchemes = [];
+    let selectedTariff = null;
+
+    function setStatus(message, kind = 'info') {
+      statusEl.textContent = message;
+      statusEl.className = 'status ' + kind;
+    }
+
+    function make(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      if (className) node.className = className;
+      return node;
+    }
+
+    function stat(label, value) {
+      const box = make('div', null, 'stat');
+      box.append(make('small', label), make('strong', value ?? '—'));
+      return box;
+    }
+
+    function money(value, currency) {
+      if (value === null || value === undefined || value === '') return '—';
+      const number = Number(value);
+      return (Number.isFinite(number) ? number.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:3}) : value) + (currency ? ' ' + currency : '');
+    }
+
+    function appendMapping(container, mapping, title) {
+      if (!mapping) return;
+      const section = make('div', null, 'group');
+      section.append(make('h3', title));
+      const ready = mapping.ready_to_post;
+      section.append(make('span', ready ? 'Ready to post' : 'Needs review', 'badge ' + (ready ? 'good' : 'bad')));
+      const errors = mapping.errors || [];
+      if (errors.length) {
+        const list = make('ul');
+        errors.forEach(error => list.append(make('li', error)));
+        section.append(list);
+      }
+      container.append(section);
+    }
+
+    function setDryRunAvailability() {
+      dryRunButton.disabled=!(uploadedFile && selectedTariff);
+    }
+
+    function invalidateInvoiceReview() {
+      currentPayload=null; confirmReview.checked=false; postButton.disabled=true;
+      reviewSection.hidden=true; postResults.hidden=true;
+    }
+
+    function showTariffSelection(tariff) {
+      const card=document.getElementById('selectedTariff');
+      if (!tariff) { card.hidden=true; card.replaceChildren(); return; }
+      card.hidden=false;
+      card.replaceChildren(make('h3',`${tariffVendor.name} · ${tariff.name}`));
+      card.append(make('p',`Valid ${tariff.lines[0]?.xollsp_validfrom || '—'} through ${tariff.lines[0]?.xollsp_validto || '—'} · ${tariff.config.c || 'currency unspecified'}`));
+      if(tariff.description) card.append(make('p',tariff.description));
+      const table=make('table');
+      const header=make('tr'); ['Tariff charge','Rate'].forEach(label=>header.append(make('th',label)));
+      const body=make('tbody');
+      tariff.lines.forEach(line=>{
+        const row=make('tr');
+        row.append(make('td',line.xollsp_name));
+        row.append(make('td',money(line.xollsp_fixedprice ?? line.xollsp_priceperunit1,tariff.config.c)));
+        body.append(row);
+      });
+      table.append(make('thead'),body); table.tHead.append(header); card.append(table);
+    }
+
+    async function loadTariffVendors() {
+      const select=document.getElementById('tariffVendor');
+      try {
+        const response=await fetch('/tariffs/vendors');
+        const payload=await response.json();
+        if (!response.ok) throw new Error(payload.detail || 'Dataverse vendors could not be loaded.');
+        select.replaceChildren(new Option('Select a vendor',''));
+        payload.vendors.forEach(vendor=>select.add(new Option(`${vendor.name} · ${vendor.id.slice(0,8)}`,vendor.id)));
+      } catch(error) {
+        select.replaceChildren(new Option('Vendor list unavailable',''));
+        setStatus(error.message,'error');
+      }
+    }
+
+    function resetTariffSelection(vendorId) {
+      tariffVendor=null; tariffSchemes=[]; selectedTariff=null;
+      invalidateInvoiceReview(); showTariffSelection(null); setDryRunAvailability();
+      const select=document.getElementById('tariffScheme');
+      select.replaceChildren(new Option(vendorId?'Loading current tariffs…':'Select a vendor first',''));
+      select.disabled=true; return select;
+    }
+
+    async function requestVendorTariffs(vendorId) {
+      const response=await fetch(`/tariffs/vendors/${encodeURIComponent(vendorId)}`);
+      const payload=await response.json();
+      if (!response.ok) throw new Error(payload.detail || 'Tariffs could not be loaded.');
+      return payload;
+    }
+
+    function fillTariffOptions(payload, select) {
+      tariffVendor=payload.vendor;
+      tariffSchemes=(payload.tariffs || []).filter(tariff=>tariff.current);
+      select.replaceChildren(new Option(tariffSchemes.length?'Select a tariff card':'No current tariff configured',''));
+      tariffSchemes.forEach(tariff=>select.add(new Option(tariff.name,tariff.id)));
+      select.disabled=!tariffSchemes.length;
+    }
+
+    async function loadVendorTariffs() {
+      const vendorId=document.getElementById('tariffVendor').value;
+      const select=resetTariffSelection(vendorId);
+      if (!vendorId) return;
+      try {
+        fillTariffOptions(await requestVendorTariffs(vendorId),select);
+        const hasTariff=tariffSchemes.length>0;
+        setStatus(hasTariff?'Select the tariff card for this invoice.':'No current vendor tariff is available in Dataverse. Add a current tariff card before invoice review.','warning');
+      } catch(error) {
+        select.replaceChildren(new Option('Tariff list unavailable',''));
+        setStatus(error.message,'error');
+      }
+    }
+
+    function selectTariff() {
+      selectedTariff=tariffSchemes.find(tariff=>tariff.id===document.getElementById('tariffScheme').value) || null;
+      invalidateInvoiceReview();
+      showTariffSelection(selectedTariff); setDryRunAvailability();
+      if (selectedTariff) setStatus(`${selectedTariff.name} selected from Dataverse. Upload an invoice to start a dry review.`,'success');
+    }
+
+    function renderInvoiceSummary(response) {
+      document.getElementById('invoiceSummary').replaceChildren(
+        stat('Vendor', response.vendor_name), stat('Invoice number', response.vendor_invoice_number),
+        stat('Master B/L', response.master_bl_number), stat('Currency', response.currency),
+        stat('Groups', response.groups_count), stat('Charge lines', response.total_line_items),
+        stat('Matched operation', response.master_operation_code || response.master_operation_id),
+        stat('Tariff applied', response.tariff_scheme_name || selectedTariff?.name)
+      );
+    }
+
+    function renderChargeLines(group, response) {
+      const lines = group.line_items || [];
+      if (!lines.length) return make('p', 'No charge lines were extracted.', 'hint');
+      const table = make('table');
+      const header = make('tr');
+      ['Charge description','Qty','Rate','Line total','Currency'].forEach((heading, index) => header.append(make('th', heading, index > 0 && index < 4 ? 'number' : '')));
+      const body = make('tbody');
+      lines.forEach(line => body.append(renderChargeLine(line, group, response)));
+      table.append(make('thead'), body);
+      table.tHead.append(header);
+      const wrapper = make('div', null, 'table-wrap'); wrapper.append(table); return wrapper;
+    }
+
+    function renderChargeLine(line, group, response) {
+      const row = make('tr');
+      const lineCurrency = line.currency || group.currency || response.currency;
+      row.append(make('td', line.service_description || 'Unlabeled charge'));
+      row.append(make('td', line.quantity ?? '—', 'number'));
+      row.append(make('td', money(line.unit_price, lineCurrency), 'number'));
+      row.append(make('td', money(line.total_amount, lineCurrency), 'number'));
+      row.append(make('td', lineCurrency || '—')); return row;
+    }
+
+    function renderGroup(group, index, response) {
+      const card = make('section', null, 'group');
+      const head = make('div', null, 'group-head');
+      const title = make('h3', `Group ${index + 1} · HBL ${group.house_bl_number || 'not found'}`);
+      const operation = group.resolved_operation_code || group.resolved_operation_id || 'Operation not matched';
+      head.append(title, make('span', operation, 'badge ' + (group.resolved_operation_id ? 'good' : 'bad')));
+      const metrics = make('div', null, 'summary');
+      metrics.append(stat('CBM', group.cbm), stat('Gross weight (kg)', group.kgs), stat('Chargeable W/M', group.charged_wm));
+      metrics.append(stat('Invoice total', money(group.total_amount, group.currency || response.currency)), stat('Invoice date', group.invoice_date));
+      card.append(head, metrics, renderChargeLines(group, response));
+      if (group.errors?.length) card.append(renderGroupErrors(group.errors));
+      appendMapping(card, group.mapping_validation, 'Dynamics mapping'); return card;
+    }
+
+    function renderGroupErrors(errors) {
+      const list=make('ul'); errors.forEach(error=>list.append(make('li', error))); return list;
+    }
+
+    function renderReview(response) {
+      currentPayload = response.extracted_payload || null;
+      reviewSection.hidden = false; postResults.hidden = true;
+      renderInvoiceSummary(response);
+      const groups=document.getElementById('groupResults'); groups.replaceChildren();
+      (response.groups || []).forEach((group,index)=>groups.append(renderGroup(group,index,response)));
+      const mappingArea=document.getElementById('mappingResults'); mappingArea.replaceChildren();
+      appendMapping(mappingArea,response.mapping_validation,'Invoice mapping check');
+      if(response.tariff_vendor_matches_invoice===false) {
+        mappingArea.append(make('div',`Selected tariff vendor (${response.tariff_vendor_name}) differs from extracted invoice vendor (${response.vendor_name}). Review before posting.`,'status warning'));
+      }
+      if(response.dataverse_error) mappingArea.append(make('div',response.dataverse_error,'status warning'));
+      payloadEditor.value=currentPayload ? JSON.stringify(currentPayload,null,2) : '{}';
+      confirmReview.checked=false; postButton.disabled=true;
+    }
+
+    function buildInvoiceForm(request) {
+      const form = new FormData();
+      form.append('file', uploadedFile);
+      const operationId = operationInput.value.trim();
+      if (operationId) form.append('operation_id', operationId);
+      form.append('post_to_dataverse', String(request.mode === 'post'));
+      form.append('tariff_vendor_id', tariffVendor.id);
+      form.append('tariff_scheme_id', selectedTariff.id);
+      if (request.mode === 'post') form.append('reviewed_json', JSON.stringify(readReviewedPayload()));
+      return form;
+    }
+
+    function readReviewedPayload() {
+      const payload = JSON.parse(payloadEditor.value);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Reviewed data must be a JSON object.');
+      return payload;
+    }
+
+    async function requestInvoice(form) {
+      const response = await fetch('/extract/invoice/multi', { method:'POST', body:form });
+      const responsePayload = await response.json();
+      if (!response.ok || !responsePayload.success) throw new Error(responsePayload.error || responsePayload.detail || response.statusText || 'Invoice processing failed.');
+      return responsePayload;
+    }
+
+    function showPostingResult(response) {
+      renderReview(response); postResults.hidden=false;
+      const summary=document.getElementById('postSummary');
+      summary.replaceChildren(
+        make('div',response.dataverse_error || `Completed. ${response.total_posted || 0} cost line(s) created or updated.`,response.dataverse_error ? 'status warning' : 'status success'),
+        make('p',`Invoice ${response.vendor_invoice_number || 'number unavailable'} · ${response.groups_count || 0} group(s) · ${response.total_posted || 0} posted line(s).`)
+      );
+    }
+
+    function presentInvoiceResponse(responsePayload, request) {
+      if (request.mode === 'post') {
+        showPostingResult(responsePayload);
+        setStatus('Posting request completed. Review the result below.', responsePayload.dataverse_error ? 'warning' : 'success');
+        return;
+      }
+      renderReview(responsePayload);
+      setStatus('Dry run complete. Review the extracted charge lines and mapping results before posting.', 'success');
+    }
+
+    function hasInvoiceSelection() {
+      if (!uploadedFile) { setStatus('Choose an invoice file first.', 'error'); return false; }
+      if (!selectedTariff) { setStatus('Select a vendor and current tariff before processing this invoice.', 'error'); return false; }
+      return true;
+    }
+
+    function setInvoiceBusy(request) {
+      dryRunButton.disabled=true; postButton.disabled=true;
+      const posting=request.mode==='post';
+      setStatus(posting?'Posting the reviewed invoice to Dynamics…':'Extracting invoice for review. No records will be changed…');
+    }
+
+    async function submitInvoice(request) {
+      if (!hasInvoiceSelection()) return;
+      setInvoiceBusy(request);
+      try {
+        const responsePayload=await requestInvoice(buildInvoiceForm(request));
+        presentInvoiceResponse(responsePayload, request);
+      } catch (error) {
+        setStatus(error.message || 'Invoice request failed.', 'error');
+      } finally {
+        setDryRunAvailability();
+        postButton.disabled = !(currentPayload && confirmReview.checked);
+      }
+    }
+
+    fileInput.addEventListener('change', () => {
+      uploadedFile = fileInput.files?.[0] || null;
+      setDryRunAvailability();
+      if (uploadedFile) setStatus(`${uploadedFile.name} selected (${(uploadedFile.size / 1024 / 1024).toFixed(2)} MB).`, 'info');
+    });
+    document.getElementById('tariffVendor').addEventListener('change',loadVendorTariffs);
+    document.getElementById('tariffScheme').addEventListener('change',selectTariff);
+    dryRunButton.addEventListener('click', () => submitInvoice({mode:'dry-run'}));
+    confirmReview.addEventListener('change', () => { postButton.disabled = !(currentPayload && confirmReview.checked); });
+    postButton.addEventListener('click', () => submitInvoice({mode:'post'}));
+    document.getElementById('resetButton').addEventListener('click', () => {
+      fileInput.value = '';
+      operationInput.value = '';
+      uploadedFile = null;
+      currentPayload = null;
+      payloadEditor.value = '';
+      confirmReview.checked = false;
+      postButton.disabled = true;
+      reviewSection.hidden = true;
+      postResults.hidden = true;
+      uploadedFile=null; tariffVendor=null; tariffSchemes=[]; selectedTariff=null;
+      document.getElementById('tariffVendor').value='';
+      document.getElementById('tariffScheme').replaceChildren(new Option('Select a vendor first',''));
+      document.getElementById('tariffScheme').disabled=true;
+      showTariffSelection(null); setDryRunAvailability();
+      statusEl.className = 'status';
+      statusEl.textContent = '';
+    });
+    loadTariffVendors();
+  </script>
+</body>
+</html>

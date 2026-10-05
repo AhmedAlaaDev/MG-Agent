@@ -1,0 +1,1717 @@
+import json
+import logging
+import re
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+from app.core.config import settings
+from app.core.llm_context import effective_llm_model, effective_llm_provider, uses_gemini  # noqa: F401
+from app.infrastructure.pdf.pdf_extractor import normalize_text
+
+def _bl_record_properties() -> Dict[str, Any]:
+    return {
+        "document_type": {"type": ["string", "null"]},
+        "source_page": {"type": ["integer", "null"]},
+        "mesco_masterblno": {"type": ["string", "null"]},
+        "mesco_houseblno": {"type": ["string", "null"]},
+        "mesco_bookingnumber": {"type": ["string", "null"]},
+        "mesco_acidnumber": {"type": ["string", "null"]},
+        "mesco_shippernamecontactno": {"type": ["string", "null"]},
+        "mesco_shipper": {"type": ["string", "null"]},
+        "mesco_shipperaddress": {"type": ["string", "null"]},
+        "mesco_shippercontactnumber": {"type": ["string", "null"]},
+        "mesco_consigneenamecontactno": {"type": ["string", "null"]},
+        "mesco_consignee": {"type": ["string", "null"]},
+        "mesco_consigneeaddress": {"type": ["string", "null"]},
+        "mesco_notify1": {"type": ["string", "null"]},
+        "mesco_notifyaddress": {"type": ["string", "null"]},
+        "mesco_country": {"type": ["string", "null"]},
+        "mesco_countryoforigin": {"type": ["string", "null"]},
+        "mesco_vessel": {"type": ["string", "null"]},
+        "mesco_voytruckno": {"type": ["string", "null"]},
+        "mesco_origin": {"type": ["string", "null"]},
+        "mesco_destination": {"type": ["string", "null"]},
+        "mesco_cargodescription": {"type": ["string", "null"]},
+        "cr401_totalgrossweight": {"type": ["string", "null"]},
+        "cr401_totalvolume": {"type": ["string", "null"]},
+        "cr401_totalpackages": {"type": ["string", "null"]},
+        "mesco_nooforgbls": {"type": ["string", "null"]},
+        "mesco_containertype": {"type": ["string", "null"]},
+        "mesco_containertype2": {"type": ["string", "null"]},
+        "mesco_containertype3": {"type": ["string", "null"]},
+        "mesco_handlinginformation": {"type": ["string", "null"]},
+        "mesco_freightpayableat": {"type": ["string", "null"]},
+        "mesco_ponumber": {"type": ["string", "null"]},
+        "mesco_customerreference": {"type": ["string", "null"]},
+        "mesco_bltype": {"type": ["integer", "null"]},
+        "mesco_transporttype": {"type": ["integer", "null"]},
+        "mesco_loadtype": {"type": ["integer", "null"]},
+        "mesco_direction": {"type": ["integer", "null"]},
+        "cr401_totalteus": {"type": ["string", "null"]},
+        "mesco_pcfreightterm": {"type": ["string", "null"]},
+        "mesco_bookingterm": {"type": ["string", "null"]},
+        "mesco_etdorigin": {"type": ["string", "null"]},
+        "mesco_etadestination": {"type": ["string", "null"]},
+        "mesco_pickupaddress": {"type": ["string", "null"]},
+        "mesco_deliveryaddress": {"type": ["string", "null"]},
+        "mesco_routenotes": {"type": ["string", "null"]},
+        "mesco_notes": {"type": ["string", "null"]},
+        "mesco_certificatenumber": {"type": ["string", "null"]},
+        "mesco_shippingline": {"type": ["string", "null"]},
+        "mesco_agent": {"type": ["string", "null"]},
+        "mesco_transhipmentport": {"type": ["string", "null"]},
+        "mesco_importerstaxno": {"type": ["string", "null"]},
+        "mesco_foreignsupplierregistrationnumber": {"type": ["string", "null"]},
+        "mesco_incoterm": {"type": ["string", "null"]},
+        "mesco_blstatus": {
+            "type": ["integer", "null"],
+            "description": "886150000=Original B/L, 886150001=Telex/Express release",
+        },
+        "mesco_telexrelease": {"type": ["boolean", "null"]},
+        "mesco_imoclass": {"type": ["string", "null"]},
+        "mesco_unnumber": {"type": ["string", "null"]},
+        "mesco_unno": {"type": ["string", "null"]},
+        "mesco_flashptc": {"type": ["string", "null"]},
+        "mesco_imo": {"type": ["boolean", "null"]},
+        "mesco_chemical": {"type": ["boolean", "null"]},
+        "dg_proper_shipping_name": {"type": ["string", "null"]},
+        "dg_packing_group": {"type": ["string", "null"]},
+        "dg_cas_no": {"type": ["string", "null"]},
+        "mesco_hscode": {"type": ["string", "null"]},
+        "mesco_dateofissue": {"type": ["string", "null"]},
+        "mesco_placeofissue": {"type": ["string", "null"]},
+        "mesco_shippedonboarddate": {"type": ["string", "null"]},
+        "container_number": {"type": ["string", "null"]},
+        "seal_number": {"type": ["string", "null"]},
+        "containers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "container_number": {"type": ["string", "null"]},
+                    "seal_number": {"type": ["string", "null"]},
+                    "container_type": {"type": ["string", "null"]},
+                    "packages": {"type": ["string", "null"]},
+                    "gross_weight_kg": {"type": ["string", "null"]},
+                    "measurement_cbm": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "container_number",
+                    "seal_number",
+                    "container_type",
+                    "packages",
+                    "gross_weight_kg",
+                    "measurement_cbm",
+                ],
+            },
+        },
+    }
+
+
+def _bl_record_required() -> List[str]:
+    props = _bl_record_properties()
+    return [k for k in props if k != "containers"] + ["containers"]
+
+
+BL_RECORD_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": _bl_record_properties(),
+    "required": _bl_record_required(),
+}
+
+
+MULTI_BL_JSON_SCHEMA = {
+    "name": "bill_of_lading_extractions",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "document_layout": {
+                "type": "string",
+                "enum": [
+                    "single_bl",
+                    "multi_bl_pages",
+                    "master_with_houses",
+                    "manifest",
+                    "unknown",
+                ],
+            },
+            "records": {
+                "type": "array",
+                "items": BL_RECORD_SCHEMA,
+                "minItems": 1,
+            },
+            "confidence": {"type": "object"},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["document_layout", "records", "confidence", "warnings"],
+    },
+}
+
+
+# Legacy single-object schema (kept for callers that still expect one B/L object).
+JSON_SCHEMA = {
+    "name": "bill_of_lading_extraction",
+    "schema": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_bl_record_properties(),
+            "confidence": {"type": "object"},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": _bl_record_required() + ["confidence", "warnings"],
+    },
+}
+
+
+SYSTEM_PROMPT = """
+You are a professional Bill of Lading extraction engine for Mesco CRM / Dynamics 365.
+
+You receive text extracted from a PDF or spreadsheet. It may be:
+- native PDF text from coordinate-based extraction,
+- OCR text from a scanned/image PDF (often with --- PAGE N --- markers and [OCR ...] blocks),
+- hybrid text containing both,
+- or spreadsheet text from XLSX/XLS/CSV rows.
+
+Return ONLY valid JSON matching the schema. Use null (not empty string) for any
+field you cannot find with high confidence on the relevant page.
+
+## Document layout (document_layout field)
+- single_bl: one ocean/master B/L in the document (possibly spanning continuation pages).
+- multi_bl_pages: two or more SEPARATE ocean B/L numbers, typically one full B/L form per page.
+- master_with_houses: one master B/L plus distinct house B/L numbers (attachment list / manifest).
+- manifest: spreadsheet-style manifest with many house rows under one master.
+- unknown: cannot determine.
+
+## Multiple B/L pages (CRITICAL)
+- When PAGE 1 has B/L number A and PAGE 2 has B/L number B, return TWO records in `records`.
+- NEVER merge data from different pages into one record.
+- Each record uses consignee, packages, gross weight, CBM, and ACID visible on THAT page only.
+- Set source_page to the page number (1, 2, ...) for each record.
+- Shared fields (same shipper, vessel, container on every page) may repeat on each record.
+
+## Continuation pages (CRITICAL — "Continued on Next Sheet")
+- When the SAME B/L number spans multiple sheets (page 1 shows "Continued on Next Sheet"
+  and the next page shows "Continued From Previous Sheet" with the same B/L number),
+  return ONE record that aggregates content from ALL continuation pages:
+    * mesco_cargodescription must include EVERY cargo line from every continuation page
+      (deduplicate exact repeats; preserve order).
+    * mesco_hscode must include EVERY HS code listed across continuation pages,
+      pipe-separated (e.g. "85334000|3809910000|39269090"), in document order, no duplicates.
+- This is the difference between page-anchored multi_bl_pages and continuation
+  single_bl. If the B/L number on page 2+ equals page 1, it is continuation, not multi.
+
+## Manifest / master-with-houses
+- For manifest layouts, emit ONE record per house row plus, if visible, a record for the
+  master B/L. Master totals (cr401_totalpackages / totalgrossweight / totalvolume) belong
+  on the master record only — do not copy them onto each house.
+- Per-house ACID, HS code, packages, weight, CBM must come from THAT house's row, never
+  from the master totals or another house.
+
+## Field rules
+- mesco_masterblno: ocean B/L number near "BILL OF LADING NO" / "B/L NO" / "MASTER B/L".
+  NOT the shipper name, NOT the ACID, NOT the booking number unless explicitly labeled.
+- mesco_houseblno: only when a distinct HOUSE B/L exists (manifest row, attached list).
+  Null on a straight master B/L.
+- mesco_bookingnumber: only when explicitly labeled "BOOKING NO" / "BOOKING REF".
+- mesco_acidnumber: Egyptian ACID is EXACTLY 19 digits. Strip any letters/spaces.
+  Do NOT concatenate adjacent numeric fields (KGS, CBM, weight) into the ACID — those
+  belong in their own fields. If OCR glues digits, return the first 19 contiguous digits.
+- mesco_importerstaxno / mesco_foreignsupplierregistrationnumber: Egyptian tax IDs.
+  Common Egyptian Freight Forwarder Tax ID lengths are 9 digits (e.g. "297923900").
+  These are NEVER HS codes — never copy them into mesco_hscode.
+- mesco_hscode: 6–10 digit numeric tariff codes appearing under a goods description and
+  explicitly labeled as HS CODE / TARIFF / COMMODITY CODE, or sitting on a goods line.
+  Pipe-separate multiple codes ("85334000|3809910000"). NEVER use:
+    * the B/L number, booking number, container number, ACID, vessel IMO,
+    * a Tax ID (any number adjacent to "TAX ID", "EXPORTER ID", "FORWARDER ID",
+      "REGISTRATION NO"),
+    * a weight, volume, or package count.
+- mesco_consigneenamecontactno: the party UNDER the CONSIGNEE header. CRITICAL rules:
+    * Form-printed boilerplate ("EXPORT REFERENCES", "FORWARDING AGENT REFERENCES",
+      "FOR DELIVERY PLEASE APPLY TO", "ALSO NOTIFY", "TO ORDER") is NEVER the consignee
+      — those are column titles, not party names.
+    * The delivery agent at destination (e.g. MESCO / "MARINE & ENGINEERING SERVICES
+      COMPANY") IS the consignee when the form lists them under CONSIGNEE; do not
+      confuse them with the notify party.
+    * Include the full multi-line address in mesco_consigneeaddress (street, city, country).
+- mesco_shippernamecontactno: only the SHIPPER company name (first 1–2 lines under SHIPPER).
+  Do NOT include the address (that goes in mesco_shipperaddress), HS codes, cargo
+  descriptions, exporter IDs, or marks-and-numbers.
+- mesco_notify1: literal "same as cnee" when document says "SAME AS CONSIGNEE".
+
+## Canonical lookup names (CRITICAL for CRM object mapping)
+These fields are resolved against existing Dataverse records (account / country /
+incoterm / shipping line) and bound as lookups. Output the CLEANEST canonical form
+so they can be matched — strip addresses, contact numbers, attn lines, and legal
+suffix noise. Use null when not confidently present.
+- mesco_shipper: the shipper's CLEAN legal COMPANY NAME only (e.g. "ELARABY GROUP",
+  "ARCELORMITTAL"). Same company as mesco_shippernamecontactno but name-only — no
+  address, no "ATTN/TEL/FAX/EMAIL", no marks. This is used to match a CRM account.
+- mesco_consignee: the consignee's CLEAN legal COMPANY NAME only. Same company as
+  mesco_consigneenamecontactno but name-only. Used to match a CRM account. Never a
+  column title ("TO ORDER", "EXPORT REFERENCES") and never a "SAME AS ..." reference.
+- mesco_country: full ENGLISH country NAME of the port of loading / shipper side
+  (e.g. "Turkey", "China", "Germany", "United Arab Emirates"). A COUNTRY, never a
+  city or port. Prefer the full name; a 2-letter ISO code (TR, CN, DE) is acceptable
+  if that is all the document shows.
+- mesco_countryoforigin: full ENGLISH country name stated as the goods' COUNTRY OF
+  ORIGIN / made-in country (e.g. "COUNTRY OF ORIGIN: CHINA" -> "China"). Null if not
+  explicitly stated.
+- mesco_shippingline: the canonical OCEAN carrier/line name ("EVERGREEN", "MAERSK",
+  "CMA CGM", "MSC", "HAPAG-LLOYD", "COSCO", "ONE", "YANG MING") — not the local agent.
+- mesco_agent: the ISSUING forwarder / NVOCC / MTO who signs or issues the document
+  (e.g. "BYTEPORT LOGISTICS TECHNOLOGIES PRIVATE LIMITED", "UTT LOGISTICS AND FOREIGN
+  TRADE LTD."). On MTD layouts this is the large company block beside the MTO
+  registration / notify-2 column, or the name after "For ..." / "Signed for ..." at the
+  bottom. NEVER the destination delivery agent (MESCO / "MARINE & ENGINEERING SERVICES
+  COMPANY" at "Destination Agent Address"), NEVER the shipper, consignee, or notify party,
+  and NEVER the ocean vessel operator unless they are clearly the document issuer.
+  On TP Cargo / TPALX house B/L forms, "CARRIER: TRANS PACIFIC CARGO LIMITED
+  (SHENZHEN)" and the TP CARGO logo identify the issuing NVOCC/agent. Set
+  mesco_agent = "TRANS PACIFIC CARGO LIMITED (SHENZHEN)" for those forms, not MESCO
+  and not the ocean shipping line.
+- mesco_incoterm: the 3-letter Incoterm code only (CIF, CFR, FOB, EXW, FCA, DAP, DDP,
+  CPT, CIP). Strip any trailing place ("CIF ALEXANDRIA" -> "CIF").
+- Container number: 4 letters + 6 digits + check digit. Preserve full form; OCR slash
+  forms (CSLU203520 / 4) are acceptable as-is.
+- mesco_containertype: ISO type ONLY ("40HC", "20GP", "40RF") with NO count prefix.
+  Strip leading "1 x ", "2x", "N X " etc. — that count belongs in cr401_totalteus.
+- Packages: count + unit verbatim from the goods row ("7 PALLETS", "101 ROLLS",
+  "9 PACKAGES", "243 CARTONS"). OCR may show "ALLETS" for "PALLETS" — infer.
+- Standard ocean B/L (MARKS AND NUMBERS | DESCRIPTIONS OF GOODS table): copy the
+  COMPLETE goods narrative from the goods column — every pallet/product line,
+  per-line net/gross weights, NON STACKABLE, inline HS CODE, ACID, and Egyptian
+  importer tax ID when printed there. Never summarize to a single short product name.
+- MULTI-MODAL TRANSPORT DOCUMENT (MTD): capture the FULL goods narrative between
+  the container/seal block and "Particulars above furnished" / "Shipped on Board".
+  Include pallet/drum counts, product name, PO/invoice refs, material number, batch,
+  origin — as one coherent mesco_cargodescription (dedupe repeated lines).
+- Weights/CBM: from the goods table on the same page (or continuation pages for one B/L).
+- Vessel/voyage: split correctly. Port of loading -> mesco_origin; discharge -> mesco_destination.
+- House/Master linking evidence: if a House B/L does NOT print the Master B/L
+  number, do not invent one. Instead preserve every shared join key visible:
+  container_number, seal_number, containers[], mesco_vessel, mesco_voytruckno,
+  mesco_origin, mesco_destination, mesco_etdorigin / shipped-on-board / laden
+  date, booking number, PO/customer reference. Example: a COSCO master and TP
+  Cargo house can be linked by CSNU6873347/CW794147 + CMA CGM SAO PAULO /
+  0BEN9W1MA + Shanghai -> Alexandria + 16 Mar 2026 even when the HBL omits
+  COSU6446151350.
+- Freight: FREIGHT PREPAID -> mesco_pcfreightterm "PREPAID"; FREIGHT COLLECT -> "COLLECT".
+  Downstream rules map Prepaid→Freehand booking + Origin payable; Collect→Nomination + Destination.
+- mesco_loadtype: choose FCL (300000000) vs LCL (300000001) by shipment meaning — LCL for
+  consolidation/CFS/groupage/cargo manifest/multiple houses under one container; FCL for a full
+  container load dedicated to one shipper/consignee. Do not guess FCL when the document is an
+  LCL manifest or mentions CFS/CFS or consolidated cargo.
+- mesco_blstatus (Dynamics BL Status toggle): 886150001 (Telex) when the document is
+  telex/express/seaway release or number of original B/Ls is ZERO; 886150000 (Original)
+  when original B/Ls are required (e.g. "THREE (3) ORIGINAL", "presentation of original B/L").
+  Set mesco_telexrelease true when Telex, false when Original.
+- mesco_transporttype: 300000000 for sea.
+- mesco_loadtype: LCL = 300000001; FCL = 300000000.
+  CRITICAL: one or more container numbers does NOT automatically mean FCL.
+  Use LCL when the document says LCL, CFS, groupage, consolidation,
+  consolidated cargo, N/M consolidation, attached house list, master with
+  houses, or multiple house B/Ls sharing one master/container.
+- mesco_direction: 300000000 (Import) when Egypt is destination/consignee; 300000001 (Export) when Egypt is origin/shipper.
+- MSDS / Safety Data Sheet / Dangerous Goods documents:
+  * Treat "Supplier's details", "Supplier details", "Manufacturer", or "Company Name"
+    as the shipper/supplier. Put the clean company name in mesco_shippernamecontactno
+    and mesco_shipper; put the following Address field in mesco_shipperaddress.
+  * GHS Product identifier / Product name / Sample Name -> mesco_cargodescription.
+  * Section 14 Transport Information:
+    - UN number -> mesco_unnumber as "UN####" and mesco_unno as the four digits.
+    - Transport hazard class(es) -> mesco_imoclass.
+    - UN proper shipping name -> dg_proper_shipping_name exactly, including
+      qualifiers such as "STABILIZED".
+    - Packing group -> dg_packing_group (I, II, or III).
+  * CAS No. from Section 3 composition -> dg_cas_no.
+  * Flash point -> mesco_flashptc numeric Celsius value when visible.
+  * Set mesco_imo=true and mesco_chemical=true when the document identifies
+    dangerous goods / UN transport information.
+  * Section 16 form/revision date -> mesco_dateofissue when no explicit issue
+    date exists elsewhere.
+- mesco_handlinginformation: short special-handling / clause summary only (MAX 100
+  chars in CRM). Examples: "***UNSTACKABLE***", "CONSOLIDATED CARGO IN TRANSIT",
+  "SHIPPER'S LOAD & COUNT". Put the full legal clause text in mesco_notes when longer.
+- Do not guess. Use null when not visible on that page/record.
+
+## Dataverse length limits (DO NOT EXCEED)
+- mesco_cargodescription: max 1500 chars. Deduplicate repeated lines; keep the cleanest
+  narrative. Do NOT repeat the container row, package totals, or numeric weight rows.
+- mesco_shippernamecontactno / mesco_consigneenamecontactno / mesco_notify1: max 100 chars.
+- mesco_shipperaddress / mesco_consigneeaddress: max 250 chars; mesco_deliveryaddress
+  and mesco_handlinginformation: max 100 chars.
+- mesco_masterblno / mesco_houseblno: max 100 chars.
+- If the source text is longer, return the most informative truncated value; the
+  downstream pipeline will not retry on overflow.
+
+## Spreadsheet / Excel / CSV (CRITICAL)
+- Text may include ``--- SHEET: Name ---`` blocks with ROW N / CELLS lines, or tab-separated
+  manifest tables with header rows (H/BL, SHIPPER, CONSIGNEE, POL, POD, GROSS, CBM, etc.).
+- document_layout ``manifest``: one master B/L (ocean MBL or job/booking number) plus ONE record
+  per house row in the table. Map each row's H/BL to mesco_houseblno; master totals stay on master.
+- Column headers map to CRM fields:
+    * H/BL, HBL, HOUSE B/L -> mesco_houseblno
+    * M/BL, MBL, MASTER B/L, OCEAN B/L -> mesco_masterblno (master row only)
+    * SHIPPER -> mesco_shippernamecontactno / mesco_shipper
+    * CONSIGNEE, CNEE -> mesco_consigneenamecontactno / mesco_consignee
+    * POL, PLACE OF RECEIPT -> mesco_origin
+    * POD, PLACE OF DELIVERY, DISCHARGE -> mesco_destination
+    * GROSS, WEIGHT, KGS, KGM -> cr401_totalgrossweight (numeric only)
+    * CBM, MEAS, VOLUME -> cr401_totalvolume (numeric only)
+    * PKGS, PACKAGES, NOS -> cr401_totalpackages (count + unit or integer)
+    * CONTAINER, CNTR -> container_number
+    * SEAL -> seal_number
+    * HS CODE, TARIFF -> mesco_hscode (that row only)
+    * CARGO, DESCRIPTION -> mesco_cargodescription (that row only)
+- Never copy master totals onto every house row. Never merge one row's cargo into another.
+- When the attached spreadsheet file is provided, prefer its column alignment over noisy OCR text.
+
+## OCR / PDF quirks
+- Prefer values tied to field labels over reading order.
+- Duplicate OCR blocks on the same page: use the clearest cargo row (Container:/PALLETS/CSLU/ACID).
+- Ignore boilerplate legal text and disclaimers ("RECEIVED IN APPARENT GOOD ORDER", "ON
+  BOARD CONDITION OF CARRIAGE", "SHIPPER'S LOAD STOW AND COUNT") for data fields.
+"""
+
+
+PAGE_SCOPE_PROMPT = """
+This text is a SINGLE page from a PDF that may be part of a multi-page scan.
+Extract exactly ONE Bill of Lading record for this page only.
+If the page is not a B/L, return document_layout unknown and a single record with nulls.
+"""
+
+
+class GeminiClient:
+    _client = None
+
+    @classmethod
+    def get_client(cls):
+        if cls._client is not None:
+            return cls._client
+
+        try:
+            from google import genai
+        except Exception as exc:
+            raise ImportError(
+                "Google Gen AI SDK is not available. Install: pip install google-genai"
+            ) from exc
+
+        api_key = (settings.gemini_api_key or "").strip()
+        if not api_key:
+            raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
+
+        cls._client = genai.Client(api_key=api_key)
+        return cls._client
+
+
+def _strip_json_fences(content: str) -> str:
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```\s*$", "", text)
+    return text.strip()
+
+
+def _parse_json_response(content: str, provider: str) -> Dict[str, Any]:
+    if not content:
+        raise ValueError(f"{provider} returned empty content.")
+    text = _strip_json_fences(content)
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise ValueError(f"{provider} returned invalid JSON (no parseable object).")
+
+
+def _response_usage_dict(response: Any, provider: str) -> Dict[str, Any]:
+    """Normalize provider token usage metadata into a small serializable dict."""
+    usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage") or response.get("usage_metadata")
+    if usage is None:
+        return {}
+
+    def _get(*names: str) -> Optional[int]:
+        for name in names:
+            value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    data: Dict[str, Any] = {
+        "provider": provider,
+        "model": effective_llm_model(),
+    }
+    prompt = _get("prompt_tokens", "prompt_token_count", "input_tokens")
+    completion = _get("completion_tokens", "candidates_token_count", "output_tokens")
+    total = _get("total_tokens", "total_token_count")
+    thoughts = _get("thoughts_token_count")
+    cached = _get("cached_content_token_count")
+
+    if prompt is not None:
+        data["prompt_tokens"] = prompt
+    if completion is not None:
+        data["completion_tokens"] = completion
+    if total is not None:
+        data["total_tokens"] = total
+    elif prompt is not None or completion is not None:
+        data["total_tokens"] = (prompt or 0) + (completion or 0)
+    if thoughts is not None:
+        data["thoughts_tokens"] = thoughts
+    if cached is not None:
+        data["cached_tokens"] = cached
+    return data
+
+
+def _attach_llm_usage(payload: Dict[str, Any], response: Any, provider: str, *, calls: int = 1) -> Dict[str, Any]:
+    usage = _response_usage_dict(response, provider)
+    if usage:
+        usage["calls"] = calls
+        payload["_llm_usage"] = usage
+    return payload
+
+
+def _merge_llm_usage(usages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for usage in usages:
+        if not isinstance(usage, dict):
+            continue
+        if not merged:
+            merged = {
+                "provider": usage.get("provider"),
+                "model": usage.get("model"),
+                "calls": 0,
+            }
+        merged["calls"] = int(merged.get("calls") or 0) + int(usage.get("calls") or 1)
+        for key in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "thoughts_tokens",
+            "cached_tokens",
+        ):
+            if usage.get(key) is not None:
+                merged[key] = int(merged.get(key) or 0) + int(usage.get(key) or 0)
+    return merged
+
+
+def _gemini_file_part(file_bytes: bytes, mime_type: str):
+    """Return a Gemini content Part for a file, inline for small files, Files API for large."""
+    from google.genai import types
+
+    max_inline = settings.gemini_inline_pdf_max_bytes
+    if len(file_bytes) <= max_inline:
+        return types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+
+    import io
+
+    client = GeminiClient.get_client()
+    uploaded = client.files.upload(
+        file=io.BytesIO(file_bytes),
+        config={"mime_type": mime_type},
+    )
+    return uploaded
+
+
+def _call_gemini_json(
+    system: str,
+    user: str,
+    schema: Dict[str, Any],
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    from google.genai import types
+
+    client = GeminiClient.get_client()
+    inner_schema = schema.get("schema") or schema
+    # Gemini Developer API cannot use our OpenAI-style schema (nullable unions,
+    # additionalProperties). JSON mode + schema in the prompt keeps the response stable.
+    schema_hint = json.dumps(inner_schema, indent=2)
+    combined_system = (
+        f"{system}\n\n"
+        "Return ONLY one valid JSON object matching this schema (use null for missing fields). "
+        "No markdown fences, no commentary, and no second JSON object after the first:\n"
+        f"{schema_hint}"
+    )
+
+    # Multimodal: when the original file is available, give Gemini the real
+    # document (visual layout, tables, multi-column blocks) plus extracted text as
+    # a hint. This dramatically improves field mapping over OCR/text alone.
+    contents: Any = user
+    mime = _native_mime_for_file(file_bytes, filename)
+    if file_bytes and mime:
+        try:
+            file_part = _gemini_file_part(file_bytes, mime)
+            if mime == "application/pdf":
+                guidance = (
+                    "The attached PDF is the authoritative source. Read its tables and "
+                    "layout directly to map each field. The text below is OCR/native-text "
+                    "extraction of the same document, provided only as a hint:\n\n"
+                )
+            else:
+                guidance = (
+                    "The attached spreadsheet/workbook is the authoritative source. Read "
+                    "sheet tabs, column headers, and row alignment directly to map each "
+                    "house/manifest row. The text below is a flattened export of the same "
+                    "workbook, provided only as a hint:\n\n"
+                )
+            contents = [file_part, guidance + user]
+        except Exception:
+            contents = user
+
+    def _generate(payload: Any):
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return client.models.generate_content(
+                    model=effective_llm_model(),
+                    contents=payload,
+                    config=types.GenerateContentConfig(
+                        system_instruction=combined_system,
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
+                )
+            except Exception as exc:
+                exc_str = str(exc)
+                if ("503" in exc_str or "UNAVAILABLE" in exc_str or "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str) and attempt < max_retries - 1:
+                    wait_sec = (attempt + 1) * 3
+                    logger.warning("Gemini 503/429 rate spike detected. Retrying in %ds... (attempt %d/%d)", wait_sec, attempt + 1, max_retries)
+                    time.sleep(wait_sec)
+                else:
+                    raise
+
+    response = _generate(contents)
+    content = (response.text or "").strip()
+    try:
+        payload = _parse_json_response(content, "Gemini")
+        return _attach_llm_usage(payload, response, "gemini")
+    except ValueError:
+        first_usage = _response_usage_dict(response, "gemini")
+        if first_usage:
+            first_usage["calls"] = 1
+        retry_note = (
+            "\n\nSTRICT RETRY: return exactly one JSON object matching the schema. "
+            "Do not include markdown, explanations, duplicate JSON objects, or trailing text."
+        )
+        retry_contents = contents
+        if isinstance(contents, list) and contents:
+            retry_contents = list(contents)
+            if isinstance(retry_contents[-1], str):
+                retry_contents[-1] = retry_contents[-1] + retry_note
+            else:
+                retry_contents.append(retry_note)
+        elif isinstance(contents, str):
+            retry_contents = contents + retry_note
+        response = _generate(retry_contents)
+        content = (response.text or "").strip()
+        payload = _parse_json_response(content, "Gemini")
+        second_usage = _response_usage_dict(response, "gemini")
+        if second_usage:
+            second_usage["calls"] = 1
+        merged_usage = _merge_llm_usage([first_usage, second_usage])
+        if merged_usage:
+            payload["_llm_usage"] = merged_usage
+        return payload
+
+
+def _call_llm_json(
+    system: str,
+    user: str,
+    schema: Dict[str, Any],
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    provider = effective_llm_provider()
+    if provider != "gemini":
+        raise RuntimeError("Only the Gemini API is supported for document extraction.")
+    if not (settings.gemini_api_key or "").strip():
+        raise ValueError("Gemini is not configured. Set GEMINI_API_KEY in .env.")
+    return _call_gemini_json(
+        system, user, schema, file_bytes=file_bytes, filename=filename
+    )
+
+
+def _llm_label() -> str:
+    return "Gemini"
+
+
+def _input_char_budget() -> int:
+    """Per-call input budget for Gemini's large context window."""
+    return max(settings.gemini_max_input_chars, settings.max_input_chars)
+
+
+_PAGE_MARKER_RE = re.compile(r"(?=^---\s*PAGE\s+\d+\s*---)", re.I | re.M)
+_SHEET_MARKER_RE = re.compile(r"(?=^---\s*SHEET\s*:)", re.I | re.M)
+
+
+def _native_mime_for_file(file_bytes: Optional[bytes], filename: Optional[str] = None) -> Optional[str]:
+    """Detect MIME type for Gemini native multimodal upload."""
+    if not file_bytes:
+        return None
+    if file_bytes[:5] == b"%PDF-":
+        return "application/pdf"
+    if file_bytes[:2] == b"PK":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if file_bytes[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "application/vnd.ms-excel"
+    ext = ""
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+    if ext == "csv":
+        return "text/csv"
+    if ext in ("xlsx", "xlsm"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == "xls":
+        return "application/vnd.ms-excel"
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
+    return None
+
+
+def _should_send_native_file(
+    mime: Optional[str],
+    *,
+    page_scope: bool,
+) -> bool:
+    if not mime or page_scope:
+        return False
+    if mime == "application/pdf":
+        return bool(settings.gemini_native_pdf)
+    if mime in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "text/csv",
+    ):
+        return bool(settings.gemini_native_spreadsheet)
+    if mime.startswith("image/"):
+        return True
+    return False
+
+
+def _chunk_long_text(text: str, max_chars: int) -> List[str]:
+    """
+    Split very long text into chunks that each fit in ``max_chars``.
+
+    Prefers ``--- PAGE N ---`` boundaries (multi-page PDFs), then ``--- SHEET:`` blocks
+    (Excel workbooks); otherwise falls back to line boundaries (long CSV). A single
+    oversized unit is hard sliced so nothing is dropped.
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    pages = [p for p in _PAGE_MARKER_RE.split(text) if p.strip()]
+    if len(pages) <= 1:
+        pages = [p for p in _SHEET_MARKER_RE.split(text) if p.strip()]
+    units = pages if len(pages) > 1 else text.splitlines(keepends=True)
+
+    chunks: List[str] = []
+    buf = ""
+    for unit in units:
+        if len(unit) > max_chars:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(unit), max_chars):
+                chunks.append(unit[i : i + max_chars])
+            continue
+        if len(buf) + len(unit) > max_chars:
+            chunks.append(buf)
+            buf = unit
+        else:
+            buf += unit
+    if buf.strip():
+        chunks.append(buf)
+    return chunks or [text[:max_chars]]
+
+
+def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-chunk LLM payloads into one, de-duplicating records by B/L number."""
+    from app.application.record_reconciliation import dedupe_records_by_bl
+
+    all_records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    confidence: Dict[str, Any] = {}
+    layout = "unknown"
+    for payload in payloads:
+        all_records.extend(payload.get("records") or [])
+        warnings.extend(payload.get("warnings") or [])
+        if isinstance(payload.get("confidence"), dict):
+            confidence.update(payload["confidence"])
+        cand = payload.get("document_layout")
+        if cand and (layout == "unknown" or layout == "single_bl"):
+            layout = cand
+
+    merged_records = dedupe_records_by_bl(all_records)
+    if len(merged_records) >= 2 and layout in ("unknown", "single_bl"):
+        layout = "multi_bl_pages"
+    return {
+        "document_layout": layout,
+        "records": merged_records,
+        "confidence": confidence,
+        "warnings": warnings,
+        "_llm_usage": _merge_llm_usage([p.get("_llm_usage") or {} for p in payloads]),
+    }
+
+
+def extract_records_with_gemini(
+    extracted_text: str,
+    *,
+    page_scope: bool = False,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+    pdf_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """
+    Intelligent extraction: returns { document_layout, records[], confidence, warnings }.
+
+    Long documents that exceed the model input budget are split into page/sheet/line
+    chunks and merged, so no content is silently truncated. When ``file_bytes`` is
+    supplied and the provider is Gemini, the original PDF or spreadsheet is sent
+    natively for true layout/table understanding.
+    """
+    # Backward-compatible argument alias used by older callers.
+    if file_bytes is None and pdf_bytes is not None:
+        file_bytes = pdf_bytes
+
+    text = normalize_text(extracted_text)
+    if not text:
+        raise ValueError("No text was extracted from the document.")
+
+    system = SYSTEM_PROMPT + (PAGE_SCOPE_PROMPT if page_scope else "")
+    user_prefix = "Extract all Bill(s) of Lading from this document:\n\n"
+    if page_scope:
+        user_prefix = "Extract the Bill of Lading on this page only:\n\n"
+
+    budget = _input_char_budget()
+    mime = _native_mime_for_file(file_bytes, filename)
+    native_file = _should_send_native_file(mime, page_scope=page_scope)
+    if native_file:
+        return _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_BL_JSON_SCHEMA,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+
+    if len(text) <= budget or page_scope:
+        return _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_BL_JSON_SCHEMA,
+            file_bytes=None,
+            filename=filename,
+        )
+
+    chunks = _chunk_long_text(text, budget)
+    payloads: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        try:
+            payloads.append(
+                _call_llm_json(system, user_prefix + chunk, MULTI_BL_JSON_SCHEMA)
+            )
+        except Exception:
+            continue
+    if not payloads:
+        return _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_BL_JSON_SCHEMA,
+            file_bytes=file_bytes if native_file else None,
+            filename=filename,
+        )
+    merged = _merge_chunk_payloads(payloads)
+    merged.setdefault("warnings", []).append(
+        f"long_document_chunked: {len(chunks)} segments merged"
+    )
+    return merged
+
+
+# Compatibility alias for older imports. The implementation above uses Gemini only.
+extract_records_with_azure_openai = extract_records_with_gemini
+
+
+def _llm_label() -> str:
+    return "Gemini"
+
+
+def _input_char_budget() -> int:
+    """Per-call input budget for Gemini's large context window."""
+    return max(settings.gemini_max_input_chars, settings.max_input_chars)
+
+
+_PAGE_MARKER_RE = re.compile(r"(?=^---\s*PAGE\s+\d+\s*---)", re.I | re.M)
+_SHEET_MARKER_RE = re.compile(r"(?=^---\s*SHEET\s*:)", re.I | re.M)
+
+
+def _native_mime_for_file(file_bytes: Optional[bytes], filename: Optional[str] = None) -> Optional[str]:
+    """Detect MIME type for Gemini native multimodal upload."""
+    if not file_bytes:
+        return None
+    if file_bytes[:5] == b"%PDF-":
+        return "application/pdf"
+    if file_bytes[:2] == b"PK":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if file_bytes[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "application/vnd.ms-excel"
+    ext = ""
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+    if ext == "csv":
+        return "text/csv"
+    if ext in ("xlsx", "xlsm"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == "xls":
+        return "application/vnd.ms-excel"
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
+    return None
+
+
+def _should_send_native_file(
+    mime: Optional[str],
+    *,
+    page_scope: bool,
+) -> bool:
+    if not mime or page_scope:
+        return False
+    if mime == "application/pdf":
+        return bool(settings.gemini_native_pdf)
+    if mime in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "text/csv",
+    ):
+        return bool(settings.gemini_native_spreadsheet)
+    if mime.startswith("image/"):
+        return True
+    return False
+
+
+def _chunk_long_text(text: str, max_chars: int) -> List[str]:
+    """
+    Split very long text into chunks that each fit in ``max_chars``.
+
+    Prefers ``--- PAGE N ---`` boundaries (multi-page PDFs), then ``--- SHEET:`` blocks
+    (Excel workbooks); otherwise falls back to line boundaries (long CSV). A single
+    oversized unit is hard sliced so nothing is dropped.
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    pages = [p for p in _PAGE_MARKER_RE.split(text) if p.strip()]
+    if len(pages) <= 1:
+        pages = [p for p in _SHEET_MARKER_RE.split(text) if p.strip()]
+    units = pages if len(pages) > 1 else text.splitlines(keepends=True)
+
+    chunks: List[str] = []
+    buf = ""
+    for unit in units:
+        if len(unit) > max_chars:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(unit), max_chars):
+                chunks.append(unit[i : i + max_chars])
+            continue
+        if len(buf) + len(unit) > max_chars:
+            chunks.append(buf)
+            buf = unit
+        else:
+            buf += unit
+    if buf.strip():
+        chunks.append(buf)
+    return chunks or [text[:max_chars]]
+
+
+def _merge_chunk_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-chunk LLM payloads into one, de-duplicating records by B/L number."""
+    from app.application.record_reconciliation import dedupe_records_by_bl
+
+    all_records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    confidence: Dict[str, Any] = {}
+    layout = "unknown"
+    for payload in payloads:
+        all_records.extend(payload.get("records") or [])
+        warnings.extend(payload.get("warnings") or [])
+        if isinstance(payload.get("confidence"), dict):
+            confidence.update(payload["confidence"])
+        cand = payload.get("document_layout")
+        if cand and (layout == "unknown" or layout == "single_bl"):
+            layout = cand
+
+    merged_records = dedupe_records_by_bl(all_records)
+    if len(merged_records) >= 2 and layout in ("unknown", "single_bl"):
+        layout = "multi_bl_pages"
+    return {
+        "document_layout": layout,
+        "records": merged_records,
+        "confidence": confidence,
+        "warnings": warnings,
+    }
+
+
+
+
+def extract_with_gemini(extracted_text: str) -> Dict[str, Any]:
+    """Return a single flat B/L dict (first Gemini record)."""
+    payload = extract_records_with_gemini(extracted_text)
+    records = payload.get("records") or []
+    if not records:
+        raise ValueError(f"{_llm_label()} returned no B/L records.")
+    first = dict(records[0])
+    if payload.get("warnings"):
+        first.setdefault("warnings", [])
+        first["warnings"] = list(first.get("warnings") or []) + list(payload["warnings"])
+    if payload.get("confidence"):
+        first["confidence"] = {**(first.get("confidence") or {}), **payload["confidence"]}
+    first["_document_layout"] = payload.get("document_layout")
+    return first
+
+
+# Compatibility alias for older imports. No Azure client is used.
+extract_with_azure_openai = extract_with_gemini
+
+INVOICE_JSON_SCHEMA = {
+    "name": "invoice_extraction",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "document_type": {"type": ["string", "null"], "description": "Document type e.g. DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE"},
+            "invoice_date": {"type": ["string", "null"], "description": "Invoice/Debit note date (e.g. 16-Jul-26)"},
+            "payment_request_reference": {"type": ["string", "null"], "description": "Payment Request Ref value; never use this as the vendor invoice number"},
+            "payment_request_date": {"type": ["string", "null"], "description": "Date printed on a PAYMENT REQUEST"},
+            "due_date": {"type": ["string", "null"], "description": "Payment due date (e.g. 16-Jul-26)"},
+            "vendor_name": {"type": ["string", "null"], "description": "Vendor/Supplier company name"},
+            "vendor_vat_number": {"type": ["string", "null"], "description": "Vendor VAT / GST / Tax ID / TRN printed on the invoice for the supplier. Never copy client, consignee, or shipper tax IDs."},
+            "vendor_address": {"type": ["string", "null"], "description": "Vendor address and tax/GST registration info"},
+            "vendor_invoice_number": {"type": ["string", "null"], "description": "Invoice or Debit Note number (e.g. 137-26MU000909)"},
+            "master_bl_number": {"type": ["string", "null"], "description": "Master B/L number (e.g. NSA26060443)"},
+            "house_bl_number": {"type": ["string", "null"], "description": "House B/L number (e.g. NAV26MU1470)"},
+            "shipment_ref": {"type": ["string", "null"], "description": "Shipment ref or booking number (e.g. SHP0002096)"},
+            "container_number": {"type": ["string", "null"], "description": "ISO Container number (4 letters + 7 digits, e.g. TRKU4465372)"},
+            "seal_number": {"type": ["string", "null"], "description": "Seal number"},
+            "container_type": {"type": ["string", "null"], "description": "Container type/size (e.g. 40' HIGHCUBE)"},
+            "shipper_name": {"type": ["string", "null"], "description": "Shipper company name"},
+            "shipper_address": {"type": ["string", "null"], "description": "Shipper address"},
+            "consignee_name": {"type": ["string", "null"], "description": "Consignee company name"},
+            "consignee_address": {"type": ["string", "null"], "description": "Consignee address"},
+            "client_name": {"type": ["string", "null"], "description": "Company explicitly labelled Client Name; do not map it to consignee"},
+            "agent_name": {"type": ["string", "null"], "description": "Agent company name"},
+            "acid_number": {"type": ["string", "null"], "description": "ACID number for Egypt customs (e.g. 1000151581013510028)"},
+            "vessel_name": {"type": ["string", "null"], "description": "Vessel name (e.g. VIVIEN A)"},
+            "voyage_number": {"type": ["string", "null"], "description": "Voyage number (e.g. 0TI46E1TK)"},
+            "port_of_loading": {"type": ["string", "null"], "description": "Port of Origin / Loading (e.g. NHAVA SHEVA, INDIA)"},
+            "port_of_discharge": {"type": ["string", "null"], "description": "Port of Discharge / Destination (e.g. ALEXANDRIA)"},
+            "incoterm": {"type": ["string", "null"], "description": "Incoterm (e.g. FOB - FREE ON BOARD)"},
+            "custody_type": {"type": ["string", "null"], "description": "Value printed beside Custody, e.g. SUPPLIER"},
+            "payment_method": {"type": ["string", "null"], "description": "Value printed beside Payment, e.g. Cash"},
+            "client_payment_term": {"type": ["string", "null"], "description": "Value explicitly labelled Client Payment Term"},
+            "activity": {"type": ["string", "null"], "description": "Payment request activity, e.g. LCL"},
+            "account_code": {"type": ["string", "null"]},
+            "account_name": {"type": ["string", "null"]},
+            "sub_account_code": {"type": ["string", "null"]},
+            "sub_account_name": {"type": ["string", "null"]},
+            "salesman_name": {"type": ["string", "null"]},
+            "operation_manager_name": {"type": ["string", "null"]},
+            "shipping_line_name": {"type": ["string", "null"], "description": "Carrier/Line printed in operation details"},
+            "booking_status": {"type": ["string", "null"]},
+            "booking_creation_date": {"type": ["string", "null"]},
+            "number_of_packages": {"type": ["number", "null"], "description": "Number of packs/packages (e.g. 12)"},
+            "gross_weight_kg": {"type": ["number", "null"], "description": "Gross weight in KG (e.g. 5450.0)"},
+            "volume_cbm": {"type": ["number", "null"], "description": "Volume in CBM (e.g. 6.174)"},
+            "chargeable_volume": {"type": ["number", "null"], "description": "Chargeable volume in CBM (e.g. 6.174)"},
+            "currency": {"type": ["string", "null"], "description": "3-letter ISO currency code (e.g. USD)"},
+            "exchange_rate": {"type": ["number", "null"], "description": "Rate of exchange (ROE, e.g. 1.00)"},
+            "subtotal_amount": {"type": ["number", "null"], "description": "Subtotal / Taxable amount (e.g. 629.75)"},
+            "tax_amount": {"type": ["number", "null"], "description": "Total tax / IGST amount"},
+            "withholding_tax_amount": {"type": ["number", "null"], "description": "Total withholding tax amount"},
+            "total_amount": {"type": ["number", "null"], "description": "Grand total net amount (e.g. 629.75)"},
+            "amount_in_words": {"type": ["string", "null"], "description": "Total amount written in words"},
+            "creator_name": {"type": ["string", "null"], "description": "Creator printed on an internal payment request"},
+            "bank_details": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "properties": {
+                    "bank_name": {"type": ["string", "null"]},
+                    "account_number": {"type": ["string", "null"]},
+                    "eefc_account": {"type": ["string", "null"]},
+                    "ifsc_code": {"type": ["string", "null"]},
+                    "swift_code": {"type": ["string", "null"]},
+                    "iban": {"type": ["string", "null"]},
+                },
+                "required": ["bank_name", "account_number", "eefc_account", "ifsc_code", "swift_code", "iban"],
+            },
+            "line_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "category": {"type": ["string", "null"], "description": "Payment request Category column"},
+                        "item_description": {"type": ["string", "null"], "description": "Payment request Item column"},
+                        "service_description": {"type": ["string", "null"]},
+                        "hsn_sac": {"type": ["string", "null"]},
+                        "quantity": {"type": ["number", "null"]},
+                        "unit_price": {"type": ["number", "null"]},
+                        "currency": {"type": ["string", "null"]},
+                        "exchange_rate": {"type": ["number", "null"]},
+                        "taxable_amount": {"type": ["number", "null"]},
+                        "tax_rate": {"type": ["string", "null"]},
+                        "tax_amount": {"type": ["number", "null"]},
+                        "estimated_amount": {"type": ["number", "null"]},
+                        "total_amount": {"type": ["number", "null"]},
+                    },
+                    "required": [
+                        "category", "item_description", "service_description", "hsn_sac", "quantity", "unit_price",
+                        "currency", "exchange_rate", "taxable_amount", "tax_rate",
+                        "tax_amount", "estimated_amount", "total_amount"
+                    ],
+                },
+            },
+        },
+        "required": [
+            "document_type", "invoice_date", "payment_request_reference", "payment_request_date",
+            "due_date", "vendor_name", "vendor_vat_number", "vendor_address",
+            "vendor_invoice_number", "master_bl_number", "house_bl_number", "shipment_ref",
+            "container_number", "seal_number", "container_type", "shipper_name", "shipper_address",
+            "consignee_name", "consignee_address", "client_name", "agent_name", "acid_number", "vessel_name",
+            "voyage_number", "port_of_loading", "port_of_discharge", "incoterm",
+            "custody_type", "payment_method", "client_payment_term", "activity",
+            "account_code", "account_name", "sub_account_code", "sub_account_name",
+            "salesman_name", "operation_manager_name", "shipping_line_name",
+            "booking_status", "booking_creation_date",
+            "number_of_packages", "gross_weight_kg", "volume_cbm", "chargeable_volume",
+            "currency", "exchange_rate", "subtotal_amount", "tax_amount",
+            "withholding_tax_amount", "total_amount", "amount_in_words", "creator_name",
+            "bank_details", "line_items"
+        ],
+    },
+}
+
+INVOICE_SYSTEM_PROMPT = """
+You are a professional invoice and debit note data extraction engine for shipping and logistics.
+
+Analyze the raw text and visual layout of the invoice/debit note to extract all available metadata:
+1. Header & Identifiers:
+   - document_type: Document type (DEBIT NOTE, INVOICE, CREDIT NOTE, TAX INVOICE, PAYMENT REQUEST)
+   - invoice_date: Document date (e.g. 16-Jul-26)
+   - payment_request_reference: ONLY the value labelled `Ref` on a PAYMENT REQUEST
+   - payment_request_date: Date printed on a PAYMENT REQUEST
+   - due_date: Payment due date
+   - vendor_name: Billing company/supplier issuing the document (e.g. BYTEPORT LOGISTICS)
+   - vendor_vat_number: VAT / GSTIN / Tax ID / TRN printed for that vendor only. Do not copy the client, consignee, or shipper tax number, and do not copy invoice totals tax.
+   - vendor_address: Address and tax registration/GST info
+   - vendor_invoice_number: Invoice/Debit Note Number (e.g. 137-26MU000909)
+     On a PAYMENT REQUEST, read this from the Vendor cell text `(Invoice : nnn)`.
+     Never copy the header `Ref` into vendor_invoice_number.
+   - master_bl_number: Master B/L Number (e.g. NSA26060443)
+   - house_bl_number: House B/L Number (e.g. NAV26MU1470)
+   - shipment_ref: Shipment Reference or Booking number (e.g. SHP0002096)
+
+2. Parties & Customs:
+   - shipper_name: Shipper company name (e.g. ZNL BEARINGS PRIVATE LIMITED)
+   - shipper_address: Full shipper address
+   - consignee_name: Consignee company name (e.g. DOCTOR ESTABLISHMENT IMP AND EXP)
+   - consignee_address: Full consignee address
+   - agent_name: Agent company name (e.g. MESCO MARINE AND ENGINEERING SERVICES CO)
+   - acid_number: Egypt Customs ACID number (e.g. 1000151581013510028)
+   - client_name: value explicitly labelled `Client Name`; a Client is not a Consignee
+
+3. Logistics & Vessel Info:
+   - vessel_name: Vessel name (e.g. VIVIEN A)
+   - voyage_number: Voyage number (e.g. 0TI46E1TK)
+   - port_of_loading: Port of Origin / POL (e.g. NHAVA SHEVA, INDIA)
+   - port_of_discharge: Port of Discharge / POD (e.g. ALEXANDRIA)
+   - incoterm: Incoterm (e.g. FOB - FREE ON BOARD)
+   - container_number: ISO container number (4 letters + 7 digits, e.g. TRKU4465372)
+   - seal_number: Carrier seal number
+   - container_type: Container type/size (e.g. 40' HIGHCUBE)
+   - number_of_packages: Package count (e.g. 12)
+   - gross_weight_kg: Gross weight in KG (e.g. 5450.0)
+   - volume_cbm: Volume in CBM (e.g. 6.174)
+   - chargeable_volume: Chargeable volume in CBM (e.g. 6.174)
+
+4. Financial Totals & Banking:
+   - currency: 3-letter ISO code (e.g. USD)
+   - exchange_rate: ROE / exchange rate (e.g. 1.00)
+   - subtotal_amount: Taxable amount / subtotal
+   - tax_amount: Total tax / IGST
+   - withholding_tax_amount: value labelled Total with holding tax amount
+   - total_amount: Grand total amount
+   - amount_in_words: Spelled out total amount in words
+   - bank_details: Bank name, INR/EEFC account numbers, IFSC code, SWIFT code, IBAN
+
+5. Itemized Line Items:
+   - category: exact Category column text
+   - item_description: exact Item column text
+   - service_description: Description of fee or charge (e.g. OCEAN FREIGHT LCL)
+   - hsn_sac: HSN/SAC code (e.g. 996521)
+   - quantity: Number of units (e.g. 6.174)
+   - unit_price: Price per unit (e.g. 102.00)
+   - currency: Line item currency (e.g. USD)
+   - exchange_rate: Line item ROE
+   - taxable_amount: Taxable amount (e.g. 629.75)
+   - tax_rate: Tax rate percentage (e.g. 0%)
+   - tax_amount: Tax amount (e.g. 0.00)
+   - total_amount: Total amount for this row (e.g. 629.75)
+   - estimated_amount: value in the Estimated column
+
+6. PAYMENT REQUEST fields:
+   - custody_type, payment_method, client_payment_term, activity
+   - account_code/account_name and sub_account_code/sub_account_name
+   - salesman_name, operation_manager_name, shipping_line_name
+   - booking_status, booking_creation_date, creator_name
+
+Rules:
+- Do not omit fields if present in the document. Use null only for unprinted fields.
+- Keep quantities, prices, weights, and volumes as numbers.
+- Preserve source labels exactly. Do not reinterpret Client as Consignee or Ref as Invoice Number.
+- Do not invent quantity, unit price, exchange rate, line tax rate, or amount in words from totals/currency.
+"""
+
+
+def _payment_request_number(value: Any) -> Optional[float]:
+    text = str(value or "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _repair_payment_request_result(
+    result: Dict[str, Any],
+    text_to_search: str,
+) -> Dict[str, Any]:
+    """Enforce label-faithful mappings for MESCO FastReport payment requests.
+
+    These documents contain both a header ``Ref`` and a vendor-cell
+    ``(Invoice: ...)`` value.  Treating the former as the latter breaks
+    Dynamics de-duplication, so the printed labels always win over an LLM
+    guess.  The function is intentionally conservative for values that are
+    not printed (quantity, unit price, ROE, and line tax rate).
+    """
+    document_type = str(result.get("document_type") or "")
+    is_payment_request = bool(
+        re.search(r"\bPayment\s+Request\b", text_to_search, re.I)
+        or re.search(r"\bPayment\s+Request\b", document_type, re.I)
+    )
+    if not is_payment_request:
+        return result
+
+    result["document_type"] = "PAYMENT REQUEST"
+
+    def first(pattern: str, flags: int = re.I) -> Optional[str]:
+        match = re.search(pattern, text_to_search, flags)
+        return match.group(1).strip() if match else None
+
+    reference = first(r"\bRef\s*:\s*([A-Z0-9][A-Z0-9./_-]*)")
+    invoice_number = first(
+        r"\(\s*Invoice\s*:\s*([A-Z0-9][A-Z0-9./_-]*)\s*\)"
+    ) or first(r"\bInvoice\s*:\s*([A-Z0-9][A-Z0-9./_-]*)")
+    payment_request_date = first(r"\bDate\s*:\s*(\d{1,2}/\d{1,2}/\d{4})")
+
+    if reference:
+        result["payment_request_reference"] = reference
+    if invoice_number:
+        result["vendor_invoice_number"] = invoice_number
+    if payment_request_date:
+        result["payment_request_date"] = payment_request_date
+        # Retain the generic field for backward-compatible API clients, while
+        # exposing its precise semantic label above.
+        result["invoice_date"] = payment_request_date
+
+    scalar_patterns = {
+        "custody_type": r"\bCustody\s*:\s*([A-Z]+)",
+        "payment_method": r"\bPayment\s*:\s*([A-Za-z]+)",
+        "activity": r"\bActivity\s*:\s*([A-Z0-9]+)",
+        "currency": r"\bCurrency\s*:\s*([A-Z]{3})\b",
+        "account_code": r"\bAccount\s*:\s*(\d{5,})",
+        "sub_account_code": r"\bSub\s*Account\s*:\s*(\d{5,})",
+    }
+    for key, pattern in scalar_patterns.items():
+        value = first(pattern)
+        if value:
+            result[key] = value
+
+    if re.search(r"\bCreator\b", text_to_search, re.I):
+        creator_candidates = re.findall(
+            r"(?m)^[ \t]*([A-Z]{2,}(?:[ \t]+[A-Z]{2,}){1,3})[ \t]*$",
+            text_to_search,
+        )
+        excluded_creator_lines = {
+            "ACCOUNTANT APPROVED BY",
+            "PAYABLE SUPERVISOR APPROVED BY",
+            "TREASURY SUPERVISOR APPROVED BY",
+            "LCL THC FEES",
+        }
+        creator = next(
+            (
+                candidate.strip()
+                for candidate in reversed(creator_candidates)
+                if candidate.strip() not in excluded_creator_lines
+                and "APPROVED BY" not in candidate
+            ),
+            None,
+        )
+        if creator:
+            result["creator_name"] = creator
+
+    amount_patterns = {
+        "subtotal_amount": r"Total\s+amount\s+without\s+VAT\s+([\d,.]+)",
+        "tax_amount": r"Total\s+tax\s+amount\s+([\d,.]+)",
+        "withholding_tax_amount": r"Total\s+with\s*holding\s+tax\s+amount\s+([\d,.]+)",
+        "total_amount": r"Total\s+amount\s+([\d,.]+)(?![\s\S]*Total\s+amount)",
+    }
+    for key, pattern in amount_patterns.items():
+        value = first(pattern)
+        parsed = _payment_request_number(value)
+        if parsed is not None:
+            result[key] = parsed
+
+    # A Payment Request's Client Name is not evidence of a consignee role.
+    if not result.get("client_name") and result.get("consignee_name"):
+        result["client_name"] = result["consignee_name"]
+    if not re.search(r"\bConsignee\b", text_to_search, re.I):
+        result["consignee_name"] = None
+        result["consignee_address"] = None
+
+    # These values were frequently hallucinated from Currency/Total cells.
+    if not re.search(r"Amount\s+in\s+Words|Total\s+in\s+Words", text_to_search, re.I):
+        result["amount_in_words"] = None
+    if not re.search(r"\b(?:ROE|Exchange\s+Rate)\b", text_to_search, re.I):
+        result["exchange_rate"] = None
+
+    line_items = result.get("line_items") or []
+    if isinstance(line_items, list):
+        one_line = len(line_items) == 1
+        table_amounts = re.search(
+            r"\b[A-Z]{4}\d{7}\s+([\d,.]+)\s+([\d,.]+)\b",
+            text_to_search,
+        )
+        for item in line_items:
+            if not isinstance(item, dict):
+                continue
+            item["quantity"] = None
+            item["unit_price"] = None
+            item["exchange_rate"] = None
+            item["taxable_amount"] = None
+            item["tax_rate"] = None
+            item["tax_amount"] = None
+            if not item.get("category"):
+                category = first(r"\b(LCL\s+THC\s+FEES)\b")
+                if category:
+                    item["category"] = category
+            description = str(item.get("service_description") or "").strip()
+            category = str(item.get("category") or "").strip()
+            if not item.get("item_description") and category and description:
+                remainder = re.sub(
+                    rf"^{re.escape(category)}\s*[-:]?\s*",
+                    "",
+                    description,
+                    flags=re.I,
+                ).strip()
+                if remainder and remainder != description:
+                    item["item_description"] = remainder
+            if one_line and table_amounts:
+                item["estimated_amount"] = _payment_request_number(table_amounts.group(1))
+                item["total_amount"] = _payment_request_number(table_amounts.group(2))
+            elif one_line and item.get("total_amount") in (None, ""):
+                item["total_amount"] = result.get("total_amount")
+            if not item.get("service_description"):
+                parts = [item.get("category"), item.get("item_description")]
+                item["service_description"] = " - ".join(str(x) for x in parts if x) or None
+
+    return result
+
+
+def _enrich_invoice_result(
+    result: Dict[str, Any],
+    raw_text: str,
+    filename: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Fallback regex enrichment for debit note & invoice metadata."""
+    if not isinstance(result, dict):
+        return result
+
+    import re
+
+    # Try PyMuPDF visual lines text if PDF bytes present
+    text_to_search = raw_text or ""
+    if file_bytes and file_bytes[:5] == b"%PDF-":
+        try:
+            import fitz
+            from app.infrastructure.pdf.pdf_extractor import _words_to_visual_lines
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            if len(doc) > 0:
+                words = doc[0].get_text("words")
+                if words:
+                    text_to_search = "\n".join(_words_to_visual_lines(words)) + "\n" + text_to_search
+        except Exception:
+            pass
+
+    # Debit Note deterministic repair
+    try:
+        from app.infrastructure.pdf.parsers.pdf_debit_note import parse_freight_debit_note
+        dn = parse_freight_debit_note(text_to_search)
+        if dn:
+            result.setdefault("document_type", dn.get("document_type") or "debit_note")
+            if not result.get("house_bl_number") and dn.get("mesco_houseblno"):
+                result["house_bl_number"] = dn["mesco_houseblno"]
+            if not result.get("master_bl_number") and dn.get("mesco_masterblno"):
+                result["master_bl_number"] = dn["mesco_masterblno"]
+            if not result.get("shipper_name") and dn.get("mesco_shippernamecontactno"):
+                result["shipper_name"] = dn["mesco_shippernamecontactno"]
+            if not result.get("shipper_address") and dn.get("mesco_shipperaddress"):
+                result["shipper_address"] = dn["mesco_shipperaddress"]
+            if not result.get("consignee_name") and dn.get("mesco_consigneenamecontactno"):
+                result["consignee_name"] = dn["mesco_consigneenamecontactno"]
+            if not result.get("consignee_address") and dn.get("mesco_consigneeaddress"):
+                result["consignee_address"] = dn["mesco_consigneeaddress"]
+            if not result.get("port_of_loading") and dn.get("mesco_origin"):
+                result["port_of_loading"] = dn["mesco_origin"]
+            if not result.get("port_of_discharge") and dn.get("mesco_destination"):
+                result["port_of_discharge"] = dn["mesco_destination"]
+            if not result.get("vessel_name") and dn.get("mesco_vessel"):
+                result["vessel_name"] = dn["mesco_vessel"]
+            if not result.get("voyage_number") and dn.get("mesco_voytruckno"):
+                result["voyage_number"] = dn["mesco_voytruckno"]
+            if not result.get("incoterm") and dn.get("mesco_incoterm"):
+                result["incoterm"] = dn["mesco_incoterm"]
+            if not result.get("number_of_packages") and dn.get("cr401_totalpackages"):
+                result["number_of_packages"] = dn["cr401_totalpackages"]
+            if not result.get("gross_weight_kg") and dn.get("cr401_totalgrossweight"):
+                result["gross_weight_kg"] = dn["cr401_totalgrossweight"]
+            if not result.get("volume_cbm") and dn.get("cr401_totalvolume"):
+                result["volume_cbm"] = dn["cr401_totalvolume"]
+            if not result.get("container_number") and dn.get("container_number"):
+                result["container_number"] = dn["container_number"]
+            if dn.get("containers") and isinstance(dn["containers"], list) and dn["containers"]:
+                c_type = dn["containers"][0].get("container_type")
+                if c_type and not result.get("container_type"):
+                    result["container_type"] = c_type
+            if not result.get("shipment_ref") and dn.get("mesco_bookingnumber"):
+                result["shipment_ref"] = dn["mesco_bookingnumber"]
+    except Exception as exc:
+        logger.debug("Debit note repair fallback skipped: %s", exc)
+
+    # Regex extractions for common fields
+    inv_no = str(result.get("vendor_invoice_number") or "").strip()
+    if not inv_no or inv_no in ("0", "0.0", "null", "None"):
+        if filename:
+            from pathlib import Path
+            stem = Path(filename).stem.strip()
+            if stem and not stem.lower().startswith("browser_extracted") and len(stem) >= 3:
+                result["vendor_invoice_number"] = stem
+                inv_no = stem
+        if not result.get("vendor_invoice_number") or str(result.get("vendor_invoice_number")).strip() in ("0", "0.0", "null", "None"):
+            inv_m = re.search(r"Invoice\s*(?:No\.?|Number|#)?\s*:?\s*([A-Z0-9\-\\/,]+)", text_to_search, re.I)
+            if inv_m and inv_m.group(1).strip() not in ("0", "0.0"):
+                result["vendor_invoice_number"] = inv_m.group(1).strip()
+
+    if not result.get("acid_number"):
+        acid_m = re.search(r"ACID\s*(?:NO\.?)?\s*:?\s*(\d{15,25})", text_to_search, re.I)
+        if acid_m:
+            result["acid_number"] = acid_m.group(1)
+
+    if not result.get("invoice_date"):
+        date_m = re.search(r"\bDate\s*:\s*([\d]{1,2}-[A-Za-z]{3}-[\d]{2,4}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text_to_search, re.I)
+        if date_m:
+            result["invoice_date"] = date_m.group(1)
+
+    if not result.get("due_date"):
+        due_m = re.search(r"\bPayment\s+Due\s+Date\s*:\s*([\d]{1,2}-[A-Za-z]{3}-[\d]{2,4}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})", text_to_search, re.I)
+        if due_m:
+            result["due_date"] = due_m.group(1)
+
+    if not str(result.get("vendor_vat_number") or "").strip():
+        vat_m = re.search(
+            r"(?:VAT(?:\s*(?:No\.?|Number|Reg(?:istration)?(?:\s*No\.?)?)?)|GSTIN|GST\s*(?:No\.?|Number)?|Tax\s*ID|TRN)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{5,20})",
+            text_to_search,
+            re.I,
+        )
+        if vat_m:
+            result["vendor_vat_number"] = vat_m.group(1).strip()
+
+    if not result.get("amount_in_words"):
+        words_m = re.search(r"(?:Total\s+in\s+[A-Z]{3}.*?\n)?\s*([A-Z][a-z\s\-]+(?:Dollar|Cent|Pound|Euro|EGP|USD)[a-zA-Z\s\-]*)\b", text_to_search)
+        if words_m:
+            result["amount_in_words"] = words_m.group(1).strip()
+
+    if not result.get("bank_details"):
+        bank_m = re.search(r"Bank\s+Name\s*:\s*([^\n]+)", text_to_search, re.I)
+        acc_m = re.search(r"Account\s+Number\s*:\s*([^\n]+)", text_to_search, re.I)
+        if bank_m or acc_m:
+            eefc_m = re.search(r"EEFC\s+Account.*?Account\s+Number\s*:\s*([^\n]+)", text_to_search, re.I | re.S)
+            ifsc_m = re.search(r"IFSC\s+Code\s*:\s*([^\n]+)", text_to_search, re.I)
+            swift_m = re.search(r"SWIFT\s+Code\s*:\s*([^\n]+)", text_to_search, re.I)
+            result["bank_details"] = {
+                "bank_name": bank_m.group(1).strip() if bank_m else None,
+                "account_number": acc_m.group(1).strip() if acc_m else None,
+                "eefc_account": eefc_m.group(1).strip() if eefc_m else None,
+                "ifsc_code": ifsc_m.group(1).strip() if ifsc_m else None,
+                "swift_code": swift_m.group(1).strip() if swift_m else None,
+                "iban": None,
+            }
+
+    return _repair_payment_request_result(result, text_to_search)
+
+
+def normalize_invoice_result(
+    result: Dict[str, Any],
+    raw_text: str,
+    *,
+    filename: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Normalize either LLM output or browser-supplied invoice JSON."""
+    return _enrich_invoice_result(
+        result,
+        raw_text,
+        filename=filename,
+        file_bytes=file_bytes,
+    )
+
+
+def extract_invoice_with_llm(
+    extracted_text: str,
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    text = normalize_text(extracted_text)
+    if not text:
+        raise ValueError("No text was extracted from the document.")
+
+    system = INVOICE_SYSTEM_PROMPT
+    user_prefix = "Extract all line items and headers from this invoice/debit note:\n\n"
+    budget = _input_char_budget()
+    mime = _native_mime_for_file(file_bytes, filename)
+    native_file = _should_send_native_file(mime, page_scope=False)
+
+    if native_file:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            INVOICE_JSON_SCHEMA,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+    else:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            INVOICE_JSON_SCHEMA,
+            file_bytes=None,
+            filename=filename,
+        )
+
+    return _enrich_invoice_result(res, text, filename=filename, file_bytes=file_bytes)
+
+
+# ---------------------------------------------------------------------------
+# Multi-HBL Invoice / Debit Note Extraction
+# ---------------------------------------------------------------------------
+
+MULTI_INVOICE_JSON_SCHEMA = {
+    "name": "multi_invoice_extraction",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "document_type": {"type": ["string", "null"]},
+            "invoice_date": {"type": ["string", "null"]},
+            "due_date": {"type": ["string", "null"]},
+            "vendor_name": {"type": ["string", "null"]},
+            "vendor_vat_number": {"type": ["string", "null"]},
+            "vendor_address": {"type": ["string", "null"]},
+            "vendor_invoice_number": {"type": ["string", "null"]},
+            "master_bl_number": {"type": ["string", "null"]},
+            "container_number": {"type": ["string", "null"]},
+            "seal_number": {"type": ["string", "null"]},
+            "container_type": {"type": ["string", "null"]},
+            "shipper_name": {"type": ["string", "null"]},
+            "consignee_name": {"type": ["string", "null"]},
+            "agent_name": {"type": ["string", "null"]},
+            "acid_number": {"type": ["string", "null"]},
+            "vessel_name": {"type": ["string", "null"]},
+            "voyage_number": {"type": ["string", "null"]},
+            "port_of_loading": {"type": ["string", "null"]},
+            "port_of_discharge": {"type": ["string", "null"]},
+            "incoterm": {"type": ["string", "null"]},
+            "currency": {"type": ["string", "null"]},
+            "exchange_rate": {"type": ["number", "null"]},
+            "subtotal_amount": {"type": ["number", "null"]},
+            "tax_amount": {"type": ["number", "null"]},
+            "total_amount": {"type": ["number", "null"]},
+            "amount_in_words": {"type": ["string", "null"]},
+            "bank_details": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "properties": {
+                    "bank_name": {"type": ["string", "null"]},
+                    "account_number": {"type": ["string", "null"]},
+                    "eefc_account": {"type": ["string", "null"]},
+                    "ifsc_code": {"type": ["string", "null"]},
+                    "swift_code": {"type": ["string", "null"]},
+                    "iban": {"type": ["string", "null"]},
+                },
+                "required": ["bank_name", "account_number", "eefc_account", "ifsc_code", "swift_code", "iban"],
+            },
+            "groups": {
+                "type": "array",
+                "description": "Groups of line items by House B/L (HBL), Page, or Invoice section / Currency.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "house_bl_number": {"type": ["string", "null"]},
+                        "vendor_invoice_number": {"type": ["string", "null"]},
+                        "invoice_date": {"type": ["string", "null"]},
+                        "currency": {"type": ["string", "null"]},
+                        "shipment_ref": {"type": ["string", "null"]},
+                        "container_number": {"type": ["string", "null"]},
+                        "container_type": {"type": ["string", "null"]},
+                        "seal_number": {"type": ["string", "null"]},
+                        "cbm": {"type": ["number", "null"]},
+                        "kgs": {"type": ["number", "null"]},
+                        "packages": {"type": ["number", "null"]},
+                        "subtotal_amount": {"type": ["number", "null"]},
+                        "tax_amount": {"type": ["number", "null"]},
+                        "total_amount": {"type": ["number", "null"]},
+                        "line_items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "service_description": {"type": ["string", "null"]},
+                                    "hsn_sac": {"type": ["string", "null"]},
+                                    "quantity": {"type": ["number", "null"]},
+                                    "unit_price": {"type": ["number", "null"]},
+                                    "currency": {"type": ["string", "null"]},
+                                    "exchange_rate": {"type": ["number", "null"]},
+                                    "taxable_amount": {"type": ["number", "null"]},
+                                    "tax_rate": {"type": ["string", "null"]},
+                                    "tax_amount": {"type": ["number", "null"]},
+                                    "total_amount": {"type": ["number", "null"]},
+                                },
+                                "required": [
+                                    "service_description", "hsn_sac", "quantity", "unit_price",
+                                    "currency", "exchange_rate", "taxable_amount", "tax_rate",
+                                    "tax_amount", "total_amount"
+                                ],
+                            },
+                        },
+                    },
+                    "required": [
+                        "house_bl_number", "vendor_invoice_number", "invoice_date", "currency",
+                        "shipment_ref", "container_number", "container_type", "seal_number",
+                        "cbm", "kgs", "packages", "subtotal_amount", "tax_amount",
+                        "total_amount", "line_items"
+                    ],
+                },
+            },
+        },
+        "required": [
+            "document_type", "invoice_date", "due_date", "vendor_name", "vendor_vat_number", "vendor_address",
+            "vendor_invoice_number", "master_bl_number", "container_number", "seal_number",
+            "container_type", "shipper_name", "consignee_name", "agent_name", "acid_number",
+            "vessel_name", "voyage_number", "port_of_loading", "port_of_discharge",
+            "incoterm", "currency", "exchange_rate", "subtotal_amount", "tax_amount",
+            "total_amount", "amount_in_words", "bank_details", "groups"
+        ],
+    },
+}
+
+MULTI_INVOICE_SYSTEM_PROMPT = """\
+You are a professional invoice and debit note data extraction engine for shipping and logistics.
+
+A single PDF document may contain multiple pages, multiple invoice sections, multiple currencies (e.g. Page 1 in LE / EGP and Page 2 in USD), or multiple House B/L (HBL) shipments.
+
+Your task:
+1. Extract top-level shared header fields: document_type, dates, vendor, vendor VAT/tax ID, vendor invoice number, master_bl, container, seal, vessel, voyage, ports, acid, currency, total amounts, and bank details.
+2. Group line items into separate groups inside `groups`:
+   - Group by House B/L (HBL) if different HBL numbers are present.
+   - Group by Page / Invoice Section / Currency if the document has multiple pages or multiple currencies (e.g. Page 1 in LE / EGP vs Page 2 in USD).
+3. For each group in `groups`, extract house_bl_number, vendor_invoice_number, invoice_date, currency (e.g. "LE", "USD", "EUR"), shipment_ref, container, cbm, kgs, packages, subtotal_amount, tax_amount, total_amount, and ALL line items.
+4. For EVERY line item, extract service_description, quantity, unit_price, taxable_amount, tax_rate, tax_amount, total_amount, and currency (e.g. "LE", "USD", "EUR").
+5. Do NOT omit any page, table, or currency section. Extract ALL line items across ALL pages.
+"""
+
+
+def extract_multi_invoice_with_llm(
+    extracted_text: str,
+    *,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Extract a multi-HBL / multi-page / multi-currency invoice into grouped line items."""
+    text = normalize_text(extracted_text)
+    if not text:
+        raise ValueError("No text was extracted from the document.")
+
+    system = MULTI_INVOICE_SYSTEM_PROMPT
+    user_prefix = "Extract all groups and their line items across all pages/currencies from this invoice/debit note:\n\n"
+    budget = _input_char_budget()
+    mime = _native_mime_for_file(file_bytes, filename)
+    native_file = _should_send_native_file(mime, page_scope=False)
+
+    if native_file:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_INVOICE_JSON_SCHEMA,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+    else:
+        res = _call_llm_json(
+            system,
+            user_prefix + text[:budget],
+            MULTI_INVOICE_JSON_SCHEMA,
+            file_bytes=None,
+            filename=filename,
+        )
+
+    return _enrich_invoice_result(res, text, filename=filename, file_bytes=file_bytes)

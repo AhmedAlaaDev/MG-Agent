@@ -168,3 +168,4 @@ upload_audit/
 scratch/
 logs/
 tmp/
+_last_*.json

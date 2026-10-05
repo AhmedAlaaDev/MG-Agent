@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tariff calculator | MESCO</title>
+  <style>
+    :root { --ink:#172b4d; --muted:#5e6c84; --line:#dfe3e8; --paper:#fff; --canvas:#f4f6f8; --blue:#0759a5; --amber:#8a4b08; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI",Arial,sans-serif; }
+    .wrap { width:min(1100px,calc(100% - 32px)); margin:28px auto 56px; }
+    h1 { margin:0 0 4px; font-size:28px; }
+    h2 { margin:0 0 14px; font-size:20px; }
+    h3 { margin:0 0 10px; font-size:16px; }
+    p { margin:6px 0 12px; color:var(--muted); }
+    a { color:var(--blue); }
+    .card { margin:16px 0; padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 8px #172b4d0b; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .field { min-width:0; }
+    label { display:block; margin-bottom:5px; font-weight:600; }
+    input[type=number],input[type=date],select { width:100%; padding:9px 10px; border:1px solid #b8c2cc; border-radius:7px; background:#fff; color:var(--ink); font:inherit; }
+    .switch { display:flex; gap:8px; align-items:flex-start; margin:10px 0; font-weight:500; }
+    .switch input { margin:5px 0 0; }
+    .hint { font-size:13px; }
+    .warning { margin:12px 0; padding:12px 14px; border-radius:8px; background:#fff5e6; color:var(--amber); }
+    .actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:16px; }
+    button { border:0; border-radius:7px; padding:10px 16px; color:#fff; background:var(--blue); font:600 15px "Segoe UI",Arial,sans-serif; cursor:pointer; }
+    button.secondary { color:var(--ink); background:#e9edf2; }
+    .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:10px; margin:14px 0; }
+    .stat { padding:12px; background:#f4f7fa; border-radius:8px; }
+    .stat small { display:block; color:var(--muted); }
+    .stat strong { font-size:18px; }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:left; }
+    th { color:var(--muted); font-weight:600; }
+    td:last-child,th:last-child { text-align:right; white-space:nowrap; }
+    .total { font-weight:700; }
+    [hidden] { display:none !important; }
+    @media(max-width:760px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .card { padding:16px; } }
+    @media(max-width:480px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Tariff calculator</h1>
+      <p>Select a Dataverse vendor first, then load its current buy tariff. Rates are editable for testing only.</p>
+      <a href="/">Uploader home</a> · <a href="/invoice">Invoice review</a>
+    </header>
+
+    <section class="card">
+      <h2>Choose a tariff</h2>
+      <div class="grid">
+        <div class="field"><label for="vendor">Vendor account</label><select id="vendor"><option value="">Loading Dataverse vendors…</option></select></div>
+        <div class="field"><label for="tariffScheme">Applicable tariff</label><select id="tariffScheme" disabled><option value="">Select a vendor first</option></select></div>
+        <div class="field"><label for="currency">Currency label (optional)</label><input id="currency" type="text" maxlength="8" placeholder="Not specified by tariff"></div>
+      </div>
+      <div id="tariffStatus" class="warning" hidden></div>
+      <div id="tariffDetails" class="summary" hidden></div>
+    </section>
+
+    <section class="card" id="cargoCard">
+      <h2>Cargo and storage inputs</h2>
+      <div class="grid">
+        <div class="field"><label for="cbm">Volume (CBM)</label><input id="cbm" type="number" min="0" step="0.001" value="12"></div>
+        <div class="field" id="weightField" hidden><label for="weight">Gross weight (kg)</label><input id="weight" type="number" min="0" step="0.001" value="12000"></div>
+        <div class="field" id="daysField"><label for="days">Storage days</label><input id="days" type="number" min="0" step="1" value="1"></div>
+        <div class="field" id="startField" hidden><label for="startDate">Storage start date</label><input id="startDate" type="date"></div>
+        <div class="field" id="endField" hidden><label for="endDate">Storage end date</label><input id="endDate" type="date"></div>
+      </div>
+      <p class="hint" id="dateHint" hidden>When both dates are entered, storage days include the start and end dates. Otherwise, the Storage days value is used.</p>
+    </section>
+
+    <section class="card" id="sacoRates">
+      <h2>SACO rates and charge options</h2>
+      <div id="thcRates">
+        <h3>THC</h3>
+        <div class="grid">
+          <div class="field"><label for="thcDischarge">Discharging per CBM</label><input id="thcDischarge" type="number" step="0.01"></div>
+          <div class="field"><label for="blAdmin">B/L administration</label><input id="blAdmin" type="number" step="0.01"></div>
+          <div class="field"><label for="deliveryOrder">Delivery order processing</label><input id="deliveryOrder" type="number" step="0.01"></div>
+          <div class="field"><label for="imoRate">IMO surcharge</label><input id="imoRate" type="number" step="0.01"></div>
+          <div class="field"><label for="thcVat">VAT rate (%)</label><input id="thcVat" type="number" min="0" step="0.01"></div>
+        </div>
+        <label class="switch"><input id="isImo" type="checkbox"><span>Apply IMO surcharge</span></label>
+        <label class="switch"><input id="imoTaxable" type="checkbox"><span>Include IMO surcharge in VAT base</span></label>
+        <p class="hint">The workbook places the IMO note outside the invoice rows; its VAT treatment is an open business choice.</p>
+      </div>
+      <div id="storageRates" hidden>
+        <h3>Storage</h3>
+        <div class="grid">
+          <div class="field"><label for="storageRate">Storage per CBM/day</label><input id="storageRate" type="number" step="0.01"></div>
+          <div class="field"><label for="warehouseDischarge">Warehouse discharging per CBM</label><input id="warehouseDischarge" type="number" step="0.01"></div>
+          <div class="field"><label for="stowage">Warehouse stowage per CBM</label><input id="stowage" type="number" step="0.01"></div>
+          <div class="field"><label for="warehouseLoading">Warehouse loading per CBM</label><input id="warehouseLoading" type="number" step="0.01"></div>
+          <div class="field"><label for="storageAdmin">B/L administration</label><input id="storageAdmin" type="number" step="0.01"></div>
+          <div class="field"><label for="servicesRate">Services rate (%)</label><input id="servicesRate" type="number" min="0" step="0.01"></div>
+          <div class="field"><label for="storageVat">VAT rate (%)</label><input id="storageVat" type="number" min="0" step="0.01"></div>
+        </div>
+        <div class="warning">SACO storage workbook applies 20% services to the charge subtotal, then 14% VAT to that subtotal plus services.</div>
+      </div>
+    </section>
+
+    <section class="card" id="globelinkRates" hidden>
+      <h2>GLOBELINK rates and charge options</h2>
+      <div class="grid">
+        <div class="field"><label for="glStorage">Storage per W/M/day</label><input id="glStorage" type="number" step="0.01"></div>
+        <div class="field"><label for="glDischarge">Discharging per W/M</label><input id="glDischarge" type="number" step="0.01"></div>
+        <div class="field"><label for="glLoading">Loading per W/M</label><input id="glLoading" type="number" step="0.01"></div>
+        <div class="field"><label for="glInspection">Inspection rate</label><input id="glInspection" type="number" step="0.01"></div>
+        <div class="field"><label for="glCleaning">Cleaning rate</label><input id="glCleaning" type="number" step="0.01"></div>
+        <div class="field"><label for="glSamples">Sampling rate</label><input id="glSamples" type="number" step="0.01"></div>
+        <div class="field"><label for="glServices">Services rate (%)</label><input id="glServices" type="number" min="0" step="0.01"></div>
+        <div class="field"><label for="fridayRate">Friday surcharge</label><input id="fridayRate" type="number" step="0.01"></div>
+      </div>
+      <div id="consolOptions">
+        <label class="switch"><input id="applyInspection" type="checkbox" checked><span>Apply inspection</span></label>
+        <label class="switch"><input id="applyCleaning" type="checkbox" checked><span>Apply cleaning</span></label>
+        <label class="switch"><input id="applySamples" type="checkbox" checked><span>Apply sampling</span></label>
+        <label class="switch"><input id="applyServices" type="checkbox" checked><span>Apply 9% services</span></label>
+      </div>
+      <div id="coloadOptions" hidden>
+        <label class="switch"><input id="coloadCleaning" type="checkbox"><span>Apply cleaning (rate is configured; workbook formula uses zero)</span></label>
+        <label class="switch"><input id="coloadSamples" type="checkbox"><span>Apply sampling (rate is configured; workbook formula uses zero)</span></label>
+        <label class="switch"><input id="coloadServices" type="checkbox"><span>Apply services (9% rate is configured; workbook formula uses zero and heading says 6%)</span></label>
+        <p class="hint">These controls expose the Co-Load workbook discrepancies for comparison. Confirm the intended business rule before relying on a result.</p>
+      </div>
+      <label id="inspectionBasisOption" class="switch"><input id="fixedInspection" type="checkbox"><span>Use fixed inspection (test override; workbook formula is per W/M)</span></label>
+      <label class="switch"><input id="applyFriday" type="checkbox"><span>Apply Friday surcharge (manual selection)</span></label>
+    </section>
+
+    <section class="card">
+      <h2>Calculation</h2>
+      <div class="actions"><button id="calculate" type="button">Calculate charges</button><button id="reset" class="secondary" type="button">Reset rates and inputs</button></div>
+      <div id="chargeableSummary" class="summary"></div>
+      <div class="table-wrap"><table><thead><tr><th>Charge</th><th>Basis</th><th>Amount</th></tr></thead><tbody id="chargeLines"></tbody><tfoot id="chargeTotals"></tfoot></table></div>
+      <p id="calcNotice" class="hint"></p>
+    </section>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    const inputNumber = id => Number(byId(id).value) || 0;
+    const checked = id => byId(id).checked;
+    const percent = id => inputNumber(id) / 100;
+    const currency = () => byId('currency').value.trim();
+    let activeTariff = null;
+
+    const isGlobelink = () => activeTariff?.config.p === 'GLOBELINK';
+    const isCoload = () => activeTariff?.config.t === 'coload';
+    const isSacoStorage = () => activeTariff?.config.t === 'storage';
+
+    function setHidden(id, hidden) { byId(id).hidden = hidden; }
+    function configureSections() {
+      const globelink = isGlobelink();
+      const storage = isSacoStorage();
+      const coload = globelink && isCoload();
+      setHidden('sacoRates', globelink);
+      setHidden('globelinkRates', !globelink);
+      setHidden('weightField', !globelink);
+      setHidden('daysField', globelink);
+      setHidden('startField', !globelink);
+      setHidden('endField', !globelink);
+      setHidden('dateHint', !globelink);
+      setHidden('thcRates', storage || globelink);
+      setHidden('storageRates', !storage || globelink);
+      setHidden('consolOptions', !globelink || coload);
+      setHidden('coloadOptions', !coload);
+      setHidden('inspectionBasisOption', !globelink);
+      setHidden('applyFriday', !globelink);
+      calculate();
+    }
+
+    function tariffRate(code) {
+      const line = activeTariff?.lines.find(charge => charge.code === code);
+      return line ? (line.xollsp_fixedprice ?? line.xollsp_priceperunit1 ?? '') : '';
+    }
+
+    function setRates(rateMap) {
+      Object.entries(rateMap).forEach(([inputId, code])=>{ byId(inputId).value=tariffRate(code); });
+    }
+
+    function setSacoRates() {
+      const thc={thcDischarge:'thc.discharge.cbm',blAdmin:'thc.bl_admin.fixed',deliveryOrder:'thc.delivery_order.fixed',imoRate:'thc.imo.fixed',thcVat:'thc.vat.percent'};
+      const storage={storageRate:'storage.storage.cbm_day',warehouseDischarge:'storage.warehouse_discharge.cbm',stowage:'storage.warehouse_stowage.cbm',warehouseLoading:'storage.warehouse_loading.cbm',storageAdmin:'storage.bl_admin.fixed',servicesRate:'storage.services.percent',storageVat:'storage.vat.percent'};
+      setRates(isSacoStorage()?storage:thc);
+    }
+
+    function setGlobelinkRates() {
+      const variant=isCoload()?'coload':'consol';
+      setRates({glStorage:`${variant}.storage.wm_day`,glDischarge:`${variant}.discharge.wm`,glLoading:`${variant}.loading.wm`,glInspection:`${variant}.inspection.wm`,glCleaning:`${variant}.cleaning.fixed`,glSamples:`${variant}.samples.fixed`,glServices:`${variant}.services.percent`,fridayRate:`${variant}.friday.fixed`});
+    }
+
+    function setTariffDefaults() {
+      const defaults=activeTariff?.config.on || {};
+      byId('isImo').checked=defaults['thc.imo.fixed'] === true;
+      byId('applyInspection').checked=defaults[isCoload()?'coload.inspection.wm':'consol.inspection.wm'] !== false;
+      byId('applyCleaning').checked=defaults['consol.cleaning.fixed'] !== false;
+      byId('applySamples').checked=defaults['consol.samples.fixed'] !== false;
+      byId('applyServices').checked=defaults['consol.services.percent'] !== false;
+      byId('coloadCleaning').checked=defaults['coload.cleaning.fixed'] === true;
+      byId('coloadSamples').checked=defaults['coload.samples.fixed'] === true;
+      byId('coloadServices').checked=defaults['coload.services.percent'] === true;
+      byId('applyFriday').checked=false;
+      byId('imoTaxable').checked=activeTariff?.config.o?.imo_taxable === true;
+      byId('fixedInspection').checked=activeTariff?.config.o?.inspection_fixed !== false;
+    }
+
+    function setTariffInputs() {
+      if (!activeTariff) return;
+      if (isGlobelink()) setGlobelinkRates(); else setSacoRates();
+      byId('currency').value=activeTariff.config.c || '';
+      setTariffDefaults();
+    }
+
+    function renderTariffDetails() {
+      const details=byId('tariffDetails');
+      if (!activeTariff) { details.hidden=true; details.replaceChildren(); return; }
+      details.hidden=false;
+      const lines=activeTariff.lines;
+      const starts=lines.map(line=>line.xollsp_validfrom).sort();
+      const ends=lines.map(line=>line.xollsp_validto).sort();
+      details.replaceChildren(
+        summary('Selected tariff', activeTariff.name),
+        summary('Currency', activeTariff.config.c || 'Not configured'),
+        summary('Valid from', starts[0] || '—'), summary('Valid to', ends.at(-1) || '—'),
+        summary('Configured charges', lines.length), summary('Description', activeTariff.description || '—')
+      );
+    }
+
+    function renderVendorTariffs(payload) {
+      const select=byId('tariffScheme');
+      select.replaceChildren(new Option('Select the tariff to apply',''));
+      payload.tariffs.filter(tariff=>tariff.current).forEach(tariff=>select.add(new Option(tariff.name,tariff.id)));
+      select.disabled=select.options.length===1;
+      activeTariff=null; renderTariffDetails(); configureSections();
+      const notice=byId('tariffStatus');
+      if (select.disabled) {
+        notice.textContent='No current tariff is configured for this vendor in Dataverse.';
+        notice.hidden=false;
+      } else {
+        notice.hidden=true;
+        select.dataset.tariffs=JSON.stringify(payload.tariffs);
+      }
+    }
+
+    async function loadVendorTariffs() {
+      const vendorId=byId('vendor').value;
+      const notice=byId('tariffStatus');
+      activeTariff=null; byId('tariffScheme').replaceChildren(new Option('Loading tariffs…',''));
+      byId('tariffScheme').disabled=true; renderTariffDetails(); configureSections();
+      if (!vendorId) { notice.hidden=true; return; }
+      notice.textContent='Loading current tariffs from Dataverse…'; notice.hidden=false;
+      try {
+        const response=await fetch(`/tariffs/vendors/${encodeURIComponent(vendorId)}`);
+        const payload=await response.json();
+        if (!response.ok) throw new Error(payload.detail || 'Could not load tariffs.');
+        renderVendorTariffs(payload);
+      } catch(error) {
+        notice.textContent=error.message; notice.hidden=false;
+      }
+    }
+
+    async function loadVendors() {
+      const select=byId('vendor');
+      try {
+        const response=await fetch('/tariffs/vendors');
+        const payload=await response.json();
+        if (!response.ok) throw new Error(payload.detail || 'Could not load vendors.');
+        select.replaceChildren(new Option('Select a vendor',''));
+        payload.vendors.forEach(vendor=>select.add(new Option(`${vendor.name} · ${vendor.id.slice(0,8)}`,vendor.id)));
+      } catch(error) {
+        select.replaceChildren(new Option('Dataverse vendor list unavailable',''));
+        byId('tariffStatus').textContent=error.message; byId('tariffStatus').hidden=false;
+      }
+    }
+
+    function selectTariff() {
+      const tariffs=JSON.parse(byId('tariffScheme').dataset.tariffs || '[]');
+      activeTariff=tariffs.find(tariff=>tariff.id===byId('tariffScheme').value) || null;
+      setTariffInputs(); renderTariffDetails(); configureSections();
+    }
+
+    function globelinkStorageDays() {
+      const start = byId('startDate').value;
+      const end = byId('endDate').value;
+      if (!start || !end) return inputNumber('days');
+      const startTime = Date.parse(start + 'T00:00:00Z');
+      const endTime = Date.parse(end + 'T00:00:00Z');
+      if (endTime < startTime) throw new Error('Storage end date must be on or after the start date.');
+      return Math.floor((endTime - startTime) / 86400000) + 1;
+    }
+
+    function addCharge(lines, name, basis, amount) {
+      lines.push({name, basis, amount});
+      return amount;
+    }
+
+    function formatAmount(amount) {
+      const value=amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:3});
+      return currency() ? `${value} ${currency()}` : value;
+    }
+
+    function calculateSacoThc(lines) {
+      const cbm = inputNumber('cbm');
+      const discharge = addCharge(lines, 'Discharging', `${cbm} CBM × ${inputNumber('thcDischarge')}`, cbm * inputNumber('thcDischarge'));
+      const admin = addCharge(lines, 'B/L administration', 'Fixed', inputNumber('blAdmin'));
+      const delivery = addCharge(lines, 'Delivery order processing', 'Fixed', inputNumber('deliveryOrder'));
+      const base = discharge + admin + delivery;
+      const imo = checked('isImo') ? addCharge(lines, 'IMO surcharge', 'Conditional fixed', inputNumber('imoRate')) : 0;
+      const vatBase = base + (checked('imoTaxable') ? imo : 0);
+      const vat = addCharge(lines, `VAT (${inputNumber('thcVat')}%)`, 'Taxable base × rate', vatBase * percent('thcVat'));
+      return {subtotal:base + imo, services:0, tax:vat, total:base + imo + vat, basis:`${cbm} CBM`};
+    }
+
+    function calculateSacoStorage(lines) {
+      const cbm = inputNumber('cbm');
+      const days = inputNumber('days');
+      const base = addCharge(lines, 'Storage', `${cbm} CBM × ${days} days × ${inputNumber('storageRate')}`, cbm * days * inputNumber('storageRate'))
+        + addCharge(lines, 'Warehouse discharging', `${cbm} CBM × ${inputNumber('warehouseDischarge')}`, cbm * inputNumber('warehouseDischarge'))
+        + addCharge(lines, 'Warehouse stowage', `${cbm} CBM × ${inputNumber('stowage')}`, cbm * inputNumber('stowage'))
+        + addCharge(lines, 'Warehouse loading', `${cbm} CBM × ${inputNumber('warehouseLoading')}`, cbm * inputNumber('warehouseLoading'))
+        + addCharge(lines, 'B/L administration', 'Fixed', inputNumber('storageAdmin'));
+      const services = addCharge(lines, `Services (${inputNumber('servicesRate')}%)`, 'Base × rate', base * percent('servicesRate'));
+      const vat = addCharge(lines, `VAT (${inputNumber('storageVat')}%)`, 'Base plus services × rate', (base + services) * percent('storageVat'));
+      return {subtotal:base + services, services, tax:vat, total:base + services + vat, basis:`${cbm} CBM · ${days} days`};
+    }
+
+    function calculateGlobelinkBase(lines, wm, days) {
+      const storage = addCharge(lines, 'Storage', `${wm} W/M × ${days} days × ${inputNumber('glStorage')}`, wm * days * inputNumber('glStorage'));
+      const discharge = addCharge(lines, 'Discharging', `${wm} W/M × ${inputNumber('glDischarge')}`, wm * inputNumber('glDischarge'));
+      const loading = addCharge(lines, 'Loading', `${wm} W/M × ${inputNumber('glLoading')}`, wm * inputNumber('glLoading'));
+      const fixedInspection = checked('fixedInspection');
+      const applyInspection = isCoload() || checked('applyInspection');
+      const inspection = applyInspection ? addCharge(lines, 'Inspection', fixedInspection ? 'Fixed' : `${wm} W/M × rate`, inputNumber('glInspection') * (fixedInspection ? 1 : wm)) : 0;
+      return {storage, discharge, loading, inspection};
+    }
+
+    function calculateGlobelinkOptions(lines, base) {
+      const cleaningOn = isCoload() ? checked('coloadCleaning') : checked('applyCleaning');
+      const samplesOn = isCoload() ? checked('coloadSamples') : checked('applySamples');
+      const cleaning = cleaningOn ? addCharge(lines, 'Cleaning', 'Fixed', inputNumber('glCleaning')) : 0;
+      const samples = samplesOn ? addCharge(lines, 'Samples', 'Fixed', inputNumber('glSamples')) : 0;
+      const serviceOn = isCoload() ? checked('coloadServices') : checked('applyServices');
+      const serviceBase = base.storage + base.discharge + base.loading + base.inspection + cleaning + samples;
+      const services = serviceOn ? addCharge(lines, `Services (${inputNumber('glServices')}%)`, 'Selected charges × rate', serviceBase * percent('glServices')) : 0;
+      const friday = checked('applyFriday') ? addCharge(lines, 'Friday surcharge', 'Conditional fixed', inputNumber('fridayRate')) : 0;
+      return {cleaning, samples, services, friday};
+    }
+
+    function calculateGlobelink(lines) {
+      const wm = Math.max(inputNumber('weight') / 1000, inputNumber('cbm'));
+      const days = globelinkStorageDays();
+      const base=calculateGlobelinkBase(lines,wm,days);
+      const options=calculateGlobelinkOptions(lines,base);
+      const subtotal=base.storage+base.discharge+base.loading+base.inspection+options.cleaning+options.samples+options.services+options.friday;
+      return {subtotal, services:options.services, tax:0, total:subtotal, basis:`${wm.toFixed(3)} W/M · ${days} days`, wm, days};
+    }
+
+    function renderChargeTable(lines) {
+      const body = byId('chargeLines');
+      body.replaceChildren();
+      lines.forEach(line => {
+        const row = document.createElement('tr');
+        [line.name, line.basis, formatAmount(line.amount)]
+          .forEach((value, index) => { const cell=document.createElement('td'); cell.textContent=value; if(index===2) cell.style.textAlign='right'; row.append(cell); });
+        body.append(row);
+      });
+    }
+
+    function renderChargeTotals(totals) {
+      const totalRows = [
+        ['Subtotal', totals.subtotal],
+        ['Services', totals.services],
+        ['VAT / tax', totals.tax],
+        ['Total', totals.total]
+      ];
+      const footer = byId('chargeTotals');
+      footer.replaceChildren();
+      totalRows.forEach(([label, amount]) => {
+        const row = document.createElement('tr');
+        const name = document.createElement('th'); name.textContent=label;
+        const value = document.createElement('td'); value.textContent=formatAmount(amount);
+        if(label==='Total') { row.className='total'; }
+        row.append(name, value); footer.append(row);
+      });
+    }
+
+    function renderCalculation(lines, totals) {
+      renderChargeTable(lines); renderChargeTotals(totals);
+      byId('chargeableSummary').replaceChildren(
+        summary('Calculation basis', totals.basis), summary('Services', formatAmount(totals.services)),
+        summary('Tax', formatAmount(totals.tax)), summary('Estimated total', formatAmount(totals.total))
+      );
+    }
+
+    function summary(label, value) {
+      const box=document.createElement('div'); box.className='stat';
+      const caption=document.createElement('small'); caption.textContent=label;
+      const amount=document.createElement('strong'); amount.textContent=value;
+      box.append(caption,amount); return box;
+    }
+
+    function calculate() {
+      if (!activeTariff) {
+        byId('calcNotice').textContent='Select a Dataverse vendor and current tariff before calculating.';
+        byId('chargeLines').replaceChildren(); byId('chargeTotals').replaceChildren();
+        byId('chargeableSummary').replaceChildren(); return;
+      }
+      try {
+        const lines=[];
+        const totals=isGlobelink() ? calculateGlobelink(lines) : (isSacoStorage() ? calculateSacoStorage(lines) : calculateSacoThc(lines));
+        renderCalculation(lines, totals);
+        byId('calcNotice').textContent=`Rates loaded from Dataverse tariff ${activeTariff.name}. Currency conversion is not performed by this test screen.`;
+      } catch (error) {
+        byId('chargeLines').replaceChildren(); byId('chargeTotals').replaceChildren();
+        byId('calcNotice').textContent=error.message;
+      }
+    }
+
+    function resetInputs() {
+      byId('cbm').value='12'; byId('weight').value='12000'; byId('days').value='1';
+      byId('startDate').value=''; byId('endDate').value='';
+      setTariffInputs(); renderTariffDetails(); configureSections();
+    }
+
+    byId('vendor').addEventListener('change',loadVendorTariffs);
+    byId('tariffScheme').addEventListener('change',selectTariff);
+    byId('calculate').addEventListener('click',calculate);
+    byId('reset').addEventListener('click',resetInputs);
+    document.querySelectorAll('input,select').forEach(input=>input.addEventListener('input',calculate));
+    loadVendors();
+    configureSections();
+  </script>
+</body>
+</html>

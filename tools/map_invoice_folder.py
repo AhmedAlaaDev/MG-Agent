@@ -23,9 +23,9 @@ MARKDOWN_REPORT = INVOICES_ROOT / "invoice_mapping_report.md"
 
 sys.path.insert(0, str(SERVICE_ROOT))
 
-from ai_extractor import extract_multi_invoice_with_llm  # noqa: E402
-from config import settings  # noqa: E402
-from spreadsheet_extractor import extract_document_text_professionally  # noqa: E402
+from app.infrastructure.ai.ai_extractor import extract_multi_invoice_with_llm  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.infrastructure.spreadsheet.spreadsheet_extractor import extract_document_text_professionally  # noqa: E402
 
 
 def _clean_container(value: Any) -> str | None:

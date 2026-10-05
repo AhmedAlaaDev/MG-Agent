@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SACO and Globelink invoices | MESCO</title>
+  <style>
+    :root { color-scheme: light; --ink:#172b4d; --muted:#5e6c84; --line:#dfe3e8; --paper:#fff; --canvas:#f4f6f8; --blue:#0759a5; --green:#16794b; --red:#b42318; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI",Arial,sans-serif; }
+    .wrap { width:min(980px, calc(100% - 32px)); margin:28px auto 56px; }
+    h1 { margin:0 0 4px; font-size:28px; }
+    h2 { margin:0 0 14px; font-size:20px; }
+    p { margin:6px 0 12px; color:var(--muted); }
+    a { color:var(--blue); }
+    .card { margin:16px 0; padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:12px; }
+    label { display:block; margin:12px 0 6px; font-weight:600; }
+    select, input[type=file] { width:100%; padding:10px 12px; border:1px solid #b8c2cc; border-radius:7px; background:#fff; font:inherit; }
+    .actions { display:flex; gap:10px; margin-top:16px; }
+    button { border:0; border-radius:7px; padding:10px 16px; color:#fff; background:var(--blue); font:600 15px "Segoe UI",Arial,sans-serif; cursor:pointer; }
+    button.secondary { color:var(--ink); background:#e9edf2; }
+    button:disabled { cursor:not-allowed; opacity:.55; }
+    .status { display:none; margin-top:14px; padding:11px 13px; border-radius:7px; white-space:pre-wrap; }
+    .status.info { display:block; background:#eaf2fb; color:#174c7e; }
+    .status.success { display:block; background:#e8f5ee; color:var(--green); }
+    .status.error { display:block; background:#fff0ef; color:var(--red); }
+    .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
+    .stat { padding:12px; background:#f4f7fa; border-radius:8px; }
+    .stat small { display:block; color:var(--muted); }
+    .stat strong { overflow-wrap:anywhere; }
+    table { width:100%; border-collapse:collapse; margin-top:14px; }
+    th, td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }
+    td.number, th.number { text-align:right; }
+    @media (max-width:700px) { .card { padding:16px; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>SACO and Globelink invoices</h1>
+      <p>Choose the vendor, then upload the PDF. SACO storage claims and Globelink tax invoices each use their own reader.</p>
+      <a href="/">Back to uploader home</a> · <a href="/docs">API docs</a>
+    </header>
+    <section class="card">
+      <h2>1. Choose the vendor</h2>
+      <label for="vendor">Invoice vendor</label>
+      <select id="vendor">
+        <option value="saco">SACO</option>
+        <option value="globelink">Globelink</option>
+      </select>
+      <label for="invoiceFile">Invoice PDF</label>
+      <input id="invoiceFile" type="file" accept="application/pdf,.pdf">
+      <div class="actions">
+        <button id="extractButton" type="button" disabled>Extract invoice</button>
+        <button id="resetButton" type="button" class="secondary">Clear</button>
+      </div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </section>
+    <section id="resultCard" class="card" hidden>
+      <h2>2. Extracted invoice</h2>
+      <div id="summary" class="summary"></div>
+      <table>
+        <thead>
+          <tr><th>Charge</th><th class="number">Amount</th><th>Currency</th></tr>
+        </thead>
+        <tbody id="charges"></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const vendorInput = document.getElementById('vendor');
+    const fileInput = document.getElementById('invoiceFile');
+    const extractButton = document.getElementById('extractButton');
+    const statusEl = document.getElementById('status');
+    const resultCard = document.getElementById('resultCard');
+    const summary = document.getElementById('summary');
+    const charges = document.getElementById('charges');
+
+    function setStatus(message, kind) {
+      statusEl.textContent = message;
+      statusEl.className = 'status ' + kind;
+    }
+
+    function stat(label, value) {
+      const box = document.createElement('div');
+      box.className = 'stat';
+      const caption = document.createElement('small');
+      caption.textContent = label;
+      const strong = document.createElement('strong');
+      strong.textContent = value || '—';
+      box.append(caption, strong);
+      return box;
+    }
+
+    function money(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+    }
+
+    fileInput.addEventListener('change', () => {
+      extractButton.disabled = !fileInput.files.length;
+      resultCard.hidden = true;
+    });
+
+    document.getElementById('resetButton').addEventListener('click', () => {
+      fileInput.value = '';
+      extractButton.disabled = true;
+      resultCard.hidden = true;
+      summary.replaceChildren();
+      charges.replaceChildren();
+      setStatus('', 'info');
+      statusEl.className = 'status';
+    });
+
+    extractButton.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      extractButton.disabled = true;
+      setStatus('Reading the invoice…', 'info');
+      const body = new FormData();
+      body.append('vendor', vendorInput.value);
+      body.append('file', file);
+      body.append('post_to_dataverse', 'false');
+      try {
+        const response = await fetch('/extract/invoice/storage', { method: 'POST', body });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+          resultCard.hidden = true;
+          setStatus(payload.error || payload.detail || 'Extraction failed.', 'error');
+          return;
+        }
+        renderInvoice(payload.data || {});
+        setStatus('Extraction finished. Nothing was posted to Dynamics.', 'success');
+      } catch (error) {
+        setStatus(String(error), 'error');
+      } finally {
+        extractButton.disabled = !fileInput.files.length;
+      }
+    });
+
+    function renderInvoice(data) {
+      resultCard.hidden = false;
+      const fields = [
+        ['Vendor', data.vendor_name],
+        ['Form', data.document_type],
+        ['Status', data.document_status],
+        ['Language', data.document_language === 'ar' ? 'Arabic' : 'English'],
+        ['Invoice', data.vendor_invoice_number],
+        ['Date', data.invoice_date],
+        ['Client', data.client_name],
+        ['B/L', data.house_bl_number],
+        ['Job / booking', data.shipment_ref],
+        ['IMP', data.imp_number],
+        ['Remarks', data.remarks],
+        ['Payment term', data.payment_term],
+        ['Container', data.container_number],
+        ['Vessel', data.vessel_name],
+        ['Voyage', data.voyage_number],
+        ['Port of loading', data.port_of_loading],
+        ['Port of discharge', data.port_of_discharge],
+        ['ETA', data.eta_date],
+        ['Storage days', data.storage_days],
+        ['Arrival', data.arrival_date],
+        ['Storage from', data.storage_start_date],
+        ['Release', data.release_date],
+        ['Subtotal', money(data.subtotal_amount) + ' ' + (data.currency || '')],
+        ['VAT', money(data.tax_amount) + (data.tax_rate ? ' (' + data.tax_rate + ')' : '')],
+        ['Total', money(data.total_amount) + ' ' + (data.currency || '')],
+      ].filter(([, fieldValue]) => fieldValue !== null && fieldValue !== undefined && fieldValue !== '');
+      summary.replaceChildren(...fields.map(([label, value]) => stat(label, value)));
+      charges.replaceChildren();
+      (data.line_items || []).forEach((item) => {
+        const row = document.createElement('tr');
+        [item.service_description, money(item.total_amount), item.currency].forEach((value, index) => {
+          const cell = document.createElement('td');
+          if (index === 1) cell.className = 'number';
+          cell.textContent = value || '—';
+          row.append(cell);
+        });
+        charges.append(row);
+      });
+    }
+  </script>
+</body>
+</html>
